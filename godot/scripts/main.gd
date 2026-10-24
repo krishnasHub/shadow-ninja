@@ -21,8 +21,8 @@ const TUNE := {
 	"walk": 140.0, "run": 260.0, "crawl": 70.0, "cling": 80.0,
 	"accel_ground": 1600.0, "accel_air": 900.0,
 	# Limbo-style weight: speed builds slowly, then picks up (seconds to full speed), and eases to a stop
-	"ramp_run": 0.5, "ramp_walk": 0.35, "ramp_crawl": 0.25, "ramp_cling": 0.3,
-	"ramp_floor": 0.15,                         # the first step starts at 15% of full speed
+	"ramp_run": 0.9, "ramp_walk": 0.6, "ramp_crawl": 0.4, "ramp_cling": 0.5,
+	"ramp_floor": 0.08,                         # the first step starts at 8% of full speed
 	"decel": 1400.0,                            # stopping / turning: about 0.2s from a full run
 	"jump_v": 640.0, "jump_cut": 1.2,           # extra gravity while rising with jump released
 	"coyote": 0.08, "jump_buffer": 0.12,
@@ -37,7 +37,7 @@ const METER_ALERT := 0.65
 
 const GUARD := {
 	"walk": 55.0, "chase": 115.0, "investigate": 85.0,
-	"ramp": 0.7, "decel": 300.0,                # guards are heavier: slower to get going, ease into stops
+	"ramp": 1.0, "decel": 300.0,                # guards are heavier: slower to get going, ease into stops
 	"torch_radius": 330.0, "torch_spread": 0.32, "danger": 1.3,
 	"search_time": 4.0, "end_pause": 1.5, "saw_you_hide": 0.4,
 	"alert_speed": 1.35, "alert_search": 7.0,
@@ -130,6 +130,7 @@ class Guard:
 	var pause := 0.0
 	var phase := 0.0
 	var move_t := 0.0
+	var cur_v := 0.0         # current speed (drives the stride)
 	var moving := false
 	var search_start := 0.0
 	var search_facing := 1
@@ -232,6 +233,8 @@ func _ready() -> void:
 			_selftest_throw_mode()
 		elif _capture.selftest == "menu":
 			_selftest_menu()
+		elif _capture.selftest == "quit":
+			_selftest_quit()
 		else:
 			_selftest()
 		get_tree().quit()
@@ -647,9 +650,17 @@ func _unhandled_input(e: InputEvent) -> void:
 			var i := menu_item_at(get_viewport().get_mouse_position())
 			if i >= 0:
 				menu_sel = i
+		elif in_menu() and menu_page == "quit":
+			var q := quit_item_at(get_viewport().get_mouse_position())
+			if q >= 0:
+				quit_sel = q
 	elif e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT:
 		if in_menu():
-			if menu_page != "":
+			if menu_page == "quit":
+				var q := quit_item_at(get_viewport().get_mouse_position())
+				if q >= 0:
+					quit_choose(q)
+			elif menu_page != "":
 				menu_page = ""
 			else:
 				var i := menu_item_at(get_viewport().get_mouse_position())
@@ -666,7 +677,10 @@ func _unhandled_input(e: InputEvent) -> void:
 const MENU_Y := 280.0           # first item's baseline; hud.gd draws the items at the same spots
 const MENU_DY := 40.0
 var menu_sel := 0
-var menu_page := ""             # "" = the list, or "about" / "controls"
+var menu_page := ""             # "" = the list, or "about" / "controls" / "quit"
+var quit_sel := 0               # "Are you sure?": 0 = No (the default), 1 = Yes
+const QUIT_Y := 310.0           # No / Yes baseline; hud.gd draws them at QUIT_X
+const QUIT_X := [400.0, 560.0]
 
 func in_menu() -> bool:
 	return state == "title" or state == "pause"
@@ -701,9 +715,33 @@ func menu_activate(i: int) -> void:
 		"Controls":
 			menu_page = "controls"
 		"Quit":
-			get_tree().quit()
+			menu_page = "quit"
+			quit_sel = 0
+
+func quit_item_at(p: Vector2) -> int:
+	for i in 2:
+		if absf(p.x - QUIT_X[i]) < 60 and p.y > QUIT_Y - 28 and p.y < QUIT_Y + 10:
+			return i
+	return -1
+
+func quit_choose(i: int) -> void:
+	if i == 1:
+		get_tree().quit()
+	else:
+		menu_page = ""
 
 func menu_key(code: int) -> void:
+	if menu_page == "quit":                 # Are you sure?  ← → choose, Enter picks, Y / N shortcuts
+		match code:
+			KEY_LEFT, KEY_RIGHT, KEY_A, KEY_D, KEY_UP, KEY_DOWN, KEY_W, KEY_S:
+				quit_sel = 1 - quit_sel
+			KEY_ENTER, KEY_KP_ENTER, KEY_SPACE:
+				quit_choose(quit_sel)
+			KEY_Y:
+				quit_choose(1)
+			KEY_N, KEY_ESCAPE, KEY_BACKSPACE:
+				quit_choose(0)
+		return
 	if menu_page != "":                     # About / Controls: any of these goes back
 		if code in [KEY_ESCAPE, KEY_ENTER, KEY_KP_ENTER, KEY_SPACE, KEY_BACKSPACE]:
 			menu_page = ""
@@ -1136,8 +1174,10 @@ func update_guard(g: Guard, dt: float) -> void:
 		g.x += d * minf(absf(dx), v * dt)
 		g.phase += v * dt * 0.08
 		g.moving = true
+		g.cur_v = v
 	else:
 		g.move_t = 0.0
+		g.cur_v = 0.0
 	# torch: level-ish on patrol, on you in a chase, sweeping in a search
 	var tp := Vector2(g.x + g.facing * 14, g.y - 32)
 	var aim := 0.15
@@ -1231,7 +1271,7 @@ func _capture_setup(setup: String) -> void:
 	match setup:
 		"title":
 			open_menu("title")
-		"about", "controls":
+		"about", "controls", "quit":
 			open_menu("title")
 			menu_page = setup
 		"pause":
@@ -1470,3 +1510,23 @@ func _selftest_menu() -> void:
 	state = "caught"
 	press.call(KEY_ESCAPE)
 	print("  caught + Esc -> state: ", state)
+
+# Dev tool: the "Are you sure?" quit page.  godot_console --headless --path . -- --selftest=quit
+func _selftest_quit() -> void:
+	var press := func(code):
+		var ev := InputEventKey.new()
+		ev.physical_keycode = code
+		ev.pressed = true
+		_unhandled_input(ev)
+	open_menu("title")
+	menu_sel = 3
+	press.call(KEY_ENTER)
+	print("  Quit -> page: ", menu_page, ", default: ", "No" if quit_sel == 0 else "Yes")
+	press.call(KEY_ENTER)
+	print("  Enter on No -> page: '", menu_page, "', still running: ", not get_tree().is_queued_for_deletion())
+	menu_sel = 3
+	press.call(KEY_ENTER)
+	press.call(KEY_RIGHT)
+	print("  → -> selected: ", "No" if quit_sel == 0 else "Yes")
+	press.call(KEY_ESCAPE)
+	print("  Esc -> page: '", menu_page, "'")

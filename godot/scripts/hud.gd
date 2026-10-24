@@ -114,6 +114,17 @@ func _menu(paused: bool) -> void:
 	draw_rect(Rect2(0, 0, 960, 540), Color(0, 0, 0, 0.62 if paused else 0.55))
 	if m.menu_page != "":                            # text pages: darker so they read easily
 		draw_rect(Rect2(0, 0, 960, 540), Color(0, 0, 0, 0.45))
+	if m.menu_page == "quit":
+		_text("Are you sure?", Vector2(480, 240), m.font_italic, 28, Color(1, 1, 1, 0.9), 0, true)
+		for i in 2:
+			var label := "NO" if i == 0 else "YES"
+			var x: float = m.QUIT_X[i]
+			var sel: bool = i == m.quit_sel
+			draw_string(m.font_regular, Vector2(x - 60, m.QUIT_Y), label, HORIZONTAL_ALIGNMENT_CENTER, 120, 20, Color(1, 1, 1, 0.95 if sel else 0.42))
+			if sel:
+				draw_line(Vector2(x - 22, m.QUIT_Y + 10), Vector2(x + 22, m.QUIT_Y + 10), Color(1, 1, 1, 0.7), 1.0)
+		_footer("← →  choose    ·    ENTER  select    ·    ESC  back")
+		return
 	if m.menu_page == "about":
 		_about()
 		return

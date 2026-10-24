@@ -239,7 +239,7 @@ func _guard(g) -> void:
 		draw_rect(Rect2(x + 30, by - 5, 18, 5), c)   # cap, fallen off
 		draw_rect(Rect2(x - 6, by - 6, 14, 6), c)    # torch, off
 		return
-	var sw: float = sin(g.phase) if g.moving else 0.0
+	var sw: float = sin(g.phase) * clampf(g.cur_v / 50.0, 0.0, 1.0)      # stride grows with speed
 	_limb(Vector2(x, by - 20), Vector2(x + sw * 9, by - 1), 5, c)
 	_limb(Vector2(x, by - 20), Vector2(x - sw * 9, by - 1), 5, c)
 	_rrect(x - 9, by - 46, 18, 28, 5, c)                    # torso
@@ -260,7 +260,8 @@ func _ninja() -> void:
 	var g := lerpf(6, 215, P.vis) / 255.0
 	var col := Color(g, g, g)
 	var f: float = P.facing
-	var sw: float = sin(P.walk_phase) if absf(P.vx) > 8 else 0.0
+	# stride grows with speed, so a slow first step is a small step
+	var sw: float = sin(P.walk_phase) * clampf(absf(P.vx) / (50.0 if (P.crawling or P.clinging) else 120.0), 0.0, 1.0)
 	draw_polyline(m.scarf_pos, col, 3.0, true)
 	var cx: float = P.x + P.w / 2
 	var by: float = P.y + P.h
