@@ -36,6 +36,10 @@ func _eye(c: Vector2, o: float) -> void:            # opens with exposure
 		draw_circle(c, minf(4.5, hh), Color.WHITE)
 
 func _hud() -> void:
+	if m.state == "play" and m.level_t < 3.5:       # the floor's name as it starts, fading out
+		var a := clampf(minf(m.level_t / 0.6, (3.5 - m.level_t) / 1.0), 0.0, 1.0)
+		_text(m.level.name, Vector2(480, 130), m.font_regular, 30, Color(1, 1, 1, 0.85 * a), 12, true)
+		_text(m.level.subtitle, Vector2(480, 162), m.font_italic, 16, Color(1, 1, 1, 0.6 * a), 0, true)
 	var x := 28.0
 	var y := 30.0
 	var w := 230.0
@@ -106,9 +110,15 @@ func _screens() -> void:
 	elif st == "escaped":
 		draw_rect(Rect2(0, 0, 960, 540), Color(0, 0, 0, minf(0.8, t)))
 		if t > 0.5:
-			_text("OUT", Vector2(480, 260), m.font_regular, 56, Color(1, 1, 1, 0.92), 16, true)
-			_text("floor cleared - that is the whole prototype for now.", Vector2(480, 305), m.font_italic, 16, Color(1, 1, 1, 0.6), 0, true)
-			_text("R  run it again    ·    ESC  menu", Vector2(480, 345), m.font_regular, 13, Color(1, 1, 1, 0.5), 2, true)
+			var last: bool = m.level_idx + 1 >= m.Levels.LEVELS.size()
+			if last:
+				_text("OUT", Vector2(480, 260), m.font_regular, 56, Color(1, 1, 1, 0.92), 16, true)
+				_text("you made it out of the tower.", Vector2(480, 305), m.font_italic, 16, Color(1, 1, 1, 0.6), 0, true)
+				_text("ENTER  menu    ·    R  replay this floor", Vector2(480, 345), m.font_regular, 13, Color(1, 1, 1, 0.5), 2, true)
+			else:
+				_text(m.level.name + "  CLEARED", Vector2(480, 260), m.font_regular, 40, Color(1, 1, 1, 0.92), 12, true)
+				_text("down the stairs, into the dark.", Vector2(480, 300), m.font_italic, 16, Color(1, 1, 1, 0.6), 0, true)
+				_text("ENTER  next floor    ·    R  replay this floor    ·    ESC  menu", Vector2(480, 345), m.font_regular, 13, Color(1, 1, 1, 0.5), 2, true)
 
 func _menu(paused: bool) -> void:
 	draw_rect(Rect2(0, 0, 960, 540), Color(0, 0, 0, 0.62 if paused else 0.55))

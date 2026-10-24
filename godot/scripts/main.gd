@@ -8,11 +8,11 @@ extends Node2D
 const DrawNode := preload("res://scripts/draw_node.gd")
 const Hud := preload("res://scripts/hud.gd")
 const PostShader := preload("res://shaders/post.gdshader")
+const Levels := preload("res://scripts/levels.gd")
 
 const VIEW_W := 960.0
 const VIEW_H := 540.0
 const T := 32
-const LW := 100
 const LH := 17
 const GRIP := 2
 
@@ -43,10 +43,6 @@ const GUARD := {
 	"alert_speed": 1.35, "alert_search": 7.0,
 	"wake_after": INF,                          # sleepers never wake. Harder difficulty: seconds
 }
-const GUARD_DEFS := [   # tiles: start, patrol from/to, walkable bounds on this floor
-	{"x": 50, "from": 45, "to": 58, "min_x": 38, "max_x": 74},
-	{"x": 70, "from": 63, "to": 72, "min_x": 38, "max_x": 74},
-]
 const NOISE := {"run": 150.0, "land": 120.0, "stone": 280.0, "thud": 140.0}
 const STONE := {"max": 3, "max_speed": 700.0, "gravity": 1400.0, "r": 3.0}
 
@@ -57,30 +53,6 @@ const CONE_SOFT := [1.0]               # one hard-edged cone, for render AND det
 const LIGHT_TEX := 512                 # high enough that the cone edge stays crisp when scaled up
 
 const PROP_W := {"desk": 70.0, "plant": 26.0, "cooler": 26.0}
-const PROPS := [
-	{"type": "desk", "x": 4.0, "y": 480.0}, {"type": "plant", "x": 8.0, "y": 480.0},
-	{"type": "desk", "x": 14.0, "y": 480.0}, {"type": "cooler", "x": 21.0, "y": 480.0},
-	{"type": "desk", "x": 40.0, "y": 480.0},
-	{"type": "plant", "x": 48.0, "y": 480.0}, {"type": "desk", "x": 55.0, "y": 480.0},
-	{"type": "chair", "x": 57.5, "y": 480.0}, {"type": "cooler", "x": 66.0, "y": 480.0},
-	{"type": "plant", "x": 80.0, "y": 384.0}, {"type": "desk", "x": 91.0, "y": 480.0},
-	{"type": "plant", "x": 94.0, "y": 480.0},
-]
-const HINTS := [
-	[2.5, 170, "A D / ← →  run (loud)      SHIFT  sneak (silent)      SPACE / W / ↑  jump"],
-	[11.0, 210, "light fills the meter.  ↓ behind furniture hides you."],
-	[17.5, 300, "jump into the duct to cling.  ← → shimmy,  ↓ drop."],
-	[24.0, 170, "↓  crawl - the dark is under the walkway"],
-	[33.0, 260, "CTRL: throw mode. aim with the mouse, click to throw. the clack pulls guards to it."],
-	[43.0, 170, "moonlight is weaker. it is still light."],
-	[38.5, 215, "guards: hide before the torch finds you. if he sees you duck, he knows where."],
-	[56.0, 255, "jump on a guard from behind - or drop from a duct - to put him to sleep."],
-	[64.0, 170, "some lights blink. count."],
-	[85.0, 170, "↓  through the vent"],
-]
-const SPAWN := Vector2(3 * T, 15 * T - 44)
-const EXIT_X := 96 * T + 8
-
 class Player:
 	var x := 0.0
 	var y := 0.0
@@ -99,7 +71,7 @@ class Player:
 	var move_t := 0.0        # how long you've been pushing the same way (drives the speed ramp)
 	var lean := 0.0
 	var vis := 0.0
-	var cover := -1          # index into PROPS, -1 = none
+	var cover := -1          # index into props, -1 = none
 	var hidden := false
 	var was_hidden := false
 
@@ -115,6 +87,11 @@ class Lt:
 	var flicker_on := 0.0
 	var level := 1.0
 	var danger := 1.0
+	var sweep_amp := 0.0     # cameras: sweep +-amp radians around base_dir, every sweep_period seconds
+	var sweep_period := 1.0
+	var base_dir := 0.0
+	var seeing := false
+	var alarm_t := -99.0
 	var node: PointLight2D
 	var guard = null
 
@@ -162,6 +139,19 @@ class NoiseEvent:
 	var poly := PackedVector2Array()
 
 # ---------- state ----------
+# ---------- the current floor (loaded from levels.gd) ----------
+var LW := 100                   # this floor's width in tiles
+var level_idx := 0
+var level: Dictionary = {}
+var props: Array = []           # {type, x (tiles), y (px: the surface it stands on)}
+var hints: Array = []
+var guard_defs: Array = []
+var spawn := Vector2.ZERO
+var exit_x := 0.0
+var door_x := 0                 # tiles
+var level_t := 0.0              # seconds since this floor started (drives the floor-name banner)
+var static_nodes: Array = []    # drawn once per floor; redrawn when a floor loads
+var level_nodes: Array = []     # this floor's lights + occluders, freed when the next one loads
 var grid := PackedByteArray()
 var seg_a := PackedVector2Array()
 var seg_b := PackedVector2Array()
@@ -207,14 +197,10 @@ var _frame := 0
 # =====================================================================
 func _ready() -> void:
 	_make_fonts()
-	build_level()
-	build_segments()
-	build_occluders()
 	var cm := CanvasModulate.new()
 	cm.color = Color(TUNE.ambient, TUNE.ambient, TUNE.ambient)
 	add_child(cm)
 	build_layers()
-	build_lights()
 	camera = Camera2D.new()
 	camera.anchor_mode = Camera2D.ANCHOR_MODE_FIXED_TOP_LEFT
 	add_child(camera)
@@ -224,6 +210,7 @@ func _ready() -> void:
 		var kv: PackedStringArray = a.trim_prefix("--").split("=")
 		if kv.size() == 2:
 			_capture[kv[0]] = kv[1]
+	load_level(0)
 	start_run()
 	state = "title"
 	if _capture.has("capture"):
@@ -235,6 +222,8 @@ func _ready() -> void:
 			_selftest_menu()
 		elif _capture.selftest == "quit":
 			_selftest_quit()
+		elif _capture.selftest == "floor2":
+			_selftest_floor2()
 		else:
 			_selftest()
 		get_tree().quit()
@@ -268,16 +257,16 @@ func build_layers() -> void:
 		var px := Parallax2D.new()
 		px.scroll_scale = Vector2(spec[1], 1.0)
 		add_child(px)
-		_add_draw(spec[0], px, spec[2])
+		static_nodes.append(_add_draw(spec[0], px, spec[2]))
 	# main layer
-	_add_draw("stage", self, 0)
+	static_nodes.append(_add_draw("stage", self, 0))
 	draw_nodes.append(_add_draw("actors_back", self, -1))     # the ninja while hidden: furniture draws over him
 	draw_nodes.append(_add_draw("actors", self, 1))
 	# foreground silhouettes sweep past faster than the world
 	var fg := Parallax2D.new()
 	fg.scroll_scale = Vector2(1.35, 1.0)
 	add_child(fg)
-	_add_draw("fg", fg, 20, true)
+	static_nodes.append(_add_draw("fg", fg, 20, true))
 
 func _build_screen_layers() -> void:
 	# overlay: world-space things drawn after lighting (eyes, bulbs, hints, noise, aim) - not darkened
@@ -316,23 +305,39 @@ func fill(x: int, y: int, w: int, h: int, v: int = 1) -> void:
 		for i in range(x, x + w):
 			grid[j * LW + i] = v
 
-func build_level() -> void:
+func load_level(idx: int) -> void:
+	level_idx = idx
+	level = Levels.LEVELS[idx]
+	LW = level.width
+	for n in level_nodes:
+		n.queue_free()
+	level_nodes.clear()
+	lights.clear()
 	grid.resize(LW * LH)
 	grid.fill(0)
 	fill(0, 0, LW, 2)                   # ceiling
 	fill(0, 15, LW, 2)                  # floor
-	fill(0, 0, 1, LH)
+	fill(0, 0, 1, LH)                   # outer walls
 	fill(LW - 1, 0, 1, LH)
-	fill(10, 12, 1, 3)                  # 1. filing cabinet throws a shadow pocket
-	fill(26, 13, 12, 1)                 # 2. raised walkway, dark crawlspace under it
-	for gx in [44, 52, 60]:             # 3. skylights
-		fill(gx, 0, 2, 2, 0)
-	fill(74, 13, 2, 2)                  # 4. crate and raised floor
-	fill(77, 12, 8, 3)
-	fill(88, 2, 2, 12)                  # 5. vent wall - crawl under it
-	fill(18, 11, 6, 1, GRIP)            # ducts to cling to
-	fill(46, 11, 11, 1, GRIP)
-	fill(62, 11, 5, 1, GRIP)
+	for r in level.solids:
+		fill(r[0], r[1], r[2], r[3])
+	for r in level.holes:
+		fill(r[0], r[1], r[2], r[3], 0)
+	for r in level.ducts:
+		fill(r[0], r[1], r[2], r[3], GRIP)
+	props = []
+	for p in level.props:
+		props.append({"type": p[0], "x": float(p[1]), "y": float(p[2] * T)})
+	hints = level.hints
+	guard_defs = level.guards
+	spawn = Vector2(level.spawn[0] * T, level.spawn[1] * T - TUNE.stand_h)
+	door_x = level.exit
+	exit_x = level.exit * T + 8
+	build_segments()
+	build_occluders()
+	build_lights()
+	for n in static_nodes:
+		n.queue_redraw()
 
 # Above the map is open sky (so skylights let moonlight in); sides and below are solid.
 func solid_at(i: int, j: int) -> bool:
@@ -409,6 +414,7 @@ func build_occluders() -> void:
 			var occ := LightOccluder2D.new()
 			occ.occluder = op
 			add_child(occ)
+			level_nodes.append(occ)
 
 # Ray (p + t*d) vs segment a-b; returns t (in units of d) or INF.
 static func ray_seg(p: Vector2, d: Vector2, a: Vector2, b: Vector2) -> float:
@@ -533,17 +539,28 @@ func make_light(kind: String, pos: Vector2, dir: float, spread: float, radius: f
 
 func build_lights() -> void:
 	var ceil_y := 2 * T + 4
-	lights.append(make_light("lamp", Vector2(16.5 * T, ceil_y), PI / 2, 0.5, 600, 0.9))
-	lights.append(make_light("lamp", Vector2(31.5 * T, ceil_y), PI / 2, 0.45, 600))
-	for gx in [44, 52, 60]:
-		var cx: float = (gx + 1) * T
-		var o := Vector2(cx - 150, -420)
-		lights.append(make_light("moon", o, atan2(2 * T - o.y, cx - o.x), 0.3, 1150, 0.45, STOPS_FLAT))
-	var fl := make_light("lamp", Vector2(69.5 * T, ceil_y), PI / 2, 0.55, 600)
-	fl.flicker_period = 3.0
-	fl.flicker_on = 0.55
-	lights.append(fl)
-	lights.append(make_light("sign", Vector2(97 * T, 11 * T + 20), 0.0, PI, 170, 0.35))
+	for d in level.lights:
+		var L: Lt
+		match d.kind:
+			"moon":                     # through a skylight gap, from far above
+				var cx: float = (d.gap + 1) * T
+				var o := Vector2(cx - 150, -420)
+				L = make_light("moon", o, atan2(2 * T - o.y, cx - o.x), 0.3, 1150, 0.45, STOPS_FLAT)
+			"sign":
+				L = make_light("sign", Vector2(d.x * T, 11 * T + 20), 0.0, PI, 170, 0.35)
+			_:                          # lamp / camera: on the ceiling unless a y is given
+				var y: float = d.y * T if d.has("y") else ceil_y
+				L = make_light(d.kind, Vector2(d.x * T, y), d.get("dir", PI / 2), d.spread, d.radius,
+					d.get("intensity", 1.0), STOPS_LAMP, d.get("danger", 1.0))
+		if d.has("flicker"):
+			L.flicker_period = d.flicker[0]
+			L.flicker_on = d.flicker[1]
+		if d.has("sweep"):
+			L.sweep_amp = d.sweep[0]
+			L.sweep_period = d.sweep[1]
+			L.base_dir = L.dir
+		lights.append(L)
+		level_nodes.append(L.node)
 
 func all_lights() -> Array:
 	var out := lights.duplicate()
@@ -552,6 +569,9 @@ func all_lights() -> Array:
 	return out
 
 func update_light(L: Lt, t: float) -> void:
+	if L.sweep_amp > 0.0:
+		L.dir = L.base_dir + L.sweep_amp * sin(TAU * t / L.sweep_period)
+		L.node.rotation = L.dir
 	if L.flicker_period > 0.0:
 		var ph := fmod(t, L.flicker_period) / L.flicker_period
 		var lit := ph < L.flicker_on
@@ -583,15 +603,20 @@ func light_at(L: Lt, p: Vector2) -> float:
 # =====================================================================
 #  RUN STATE
 # =====================================================================
-func start_run() -> void:
+func start_run(idx := -1) -> void:
+	if idx >= 0 and idx != level_idx:
+		load_level(idx)
 	P = Player.new()
-	P.x = SPAWN.x
-	P.y = SPAWN.y
+	P.x = spawn.x
+	P.y = spawn.y
 	P.w = TUNE.width
 	P.h = TUNE.stand_h
 	guards.clear()
-	for i in GUARD_DEFS.size():
-		guards.append(make_guard(GUARD_DEFS[i], i))
+	for i in guard_defs.size():
+		guards.append(make_guard(guard_defs[i], i))
+	for i in range(guards.size(), torch_pool.size()):     # torches of guards this floor does not have
+		torch_pool[i].level = 0.0
+		torch_pool[i].guard = null
 	noises.clear()
 	stones.clear()
 	stone_count = STONE.max
@@ -604,6 +629,7 @@ func start_run() -> void:
 	cam.x = clampf(P.x - VIEW_W * 0.4, 0, LW * T - VIEW_W)
 	state = "play"
 	state_t = 0.0
+	level_t = 0.0
 
 var test_keys = null    # self-test: a Dictionary of held keys replaces the keyboard
 
@@ -639,7 +665,9 @@ func _unhandled_input(e: InputEvent) -> void:
 			KEY_ESCAPE, KEY_P:
 				open_menu("pause" if state == "play" else "title")   # caught / escaped go back to the title
 			KEY_ENTER, KEY_KP_ENTER:
-				if state == "caught" or state == "escaped":
+				if state == "escaped" and level_idx + 1 < Levels.LEVELS.size():
+					start_run(level_idx + 1)        # on to the next floor
+				elif state == "caught" or state == "escaped":
 					open_menu("title")
 			KEY_G:
 				debug = not debug
@@ -709,7 +737,7 @@ func menu_activate(i: int) -> void:
 		"Resume":
 			state = "play"
 		"New Game":
-			start_run()
+			start_run(0)
 		"About":
 			menu_page = "about"
 		"Controls":
@@ -871,8 +899,8 @@ func update_player(dt: float) -> void:
 	var mid := P.x + P.w / 2
 	P.cover = -1
 	if P.on_ground:
-		for i in PROPS.size():
-			var p: Dictionary = PROPS[i]
+		for i in props.size():
+			var p: Dictionary = props[i]
 			if PROP_W.has(p.type) and absf(p.y - (P.y + P.h)) < 2 and mid > p.x * T + 4 and mid < p.x * T + PROP_W[p.type] - 4:
 				P.cover = i
 				break
@@ -959,6 +987,30 @@ func update_detection(dt: float) -> void:
 		meter = 1.0
 		state = "caught"
 		state_t = 0.0
+
+# Cameras: their sweeping beam fills the meter like any light (hiding beats it). Seeing you also
+# calls the nearest awake guard over to where you were standing.
+func update_cameras() -> void:
+	var px := P.x + P.w / 2
+	for L in lights:
+		if L.kind != "camera":
+			continue
+		var s := 0.0
+		if not P.hidden:
+			for p in sample_points():
+				s += light_at(L, p)
+		L.seeing = s > 0.05
+		if L.seeing and time - L.alarm_t > 1.5:
+			L.alarm_t = time
+			var best = null
+			var best_d := INF
+			for g in guards:
+				var d: float = absf(g.x - px) + absf(g.y - (P.y + P.h)) * 2
+				if g.state != "asleep" and d < best_d:
+					best_d = d
+					best = g
+			if best != null:
+				hear(best, px)
 
 # =====================================================================
 #  NOISE + STONES - noise is a circle; any awake guard inside it (with a clear line) goes to look
@@ -1083,7 +1135,7 @@ func update_stones(dt: float) -> void:
 func make_guard(d: Dictionary, idx: int) -> Guard:
 	var g := Guard.new()
 	g.x = d.x * T
-	g.y = 15 * T
+	g.y = d.row * T
 	g.from_x = d["from"] * T
 	g.to_x = d["to"] * T
 	g.min_x = d.min_x * T + 12
@@ -1240,9 +1292,11 @@ func _physics_process(dt: float) -> void:
 	update_scarf()
 	update_guards(dt)
 	update_detection(dt)
+	update_cameras()
+	level_t += dt
 	var target := clampf(P.x + P.w / 2 - VIEW_W * 0.45 + P.facing * 70, 0, LW * T - VIEW_W)
 	cam.x = lerpf(cam.x, target, 1 - exp(-dt * 4))
-	if state == "play" and P.x + P.w > EXIT_X:
+	if state == "play" and P.x + P.w > exit_x:
 		state = "escaped"
 		state_t = 0.0
 
@@ -1279,6 +1333,18 @@ func _capture_setup(setup: String) -> void:
 			P.x = 13.2 * T
 			open_menu("pause")
 			menu_sel = 2
+		"floor2":
+			start_run(1)
+			P.x = 3 * T
+			level_t = 1.0
+		"catwalk":
+			start_run(1)
+			P.x = 56 * T
+			P.y = 10 * T - P.h
+		"camera":
+			start_run(1)
+			P.x = 84 * T
+			guards[3].x = 104 * T
 		"lamp":
 			start_run()
 			P.x = 13.2 * T
@@ -1530,3 +1596,68 @@ func _selftest_quit() -> void:
 	print("  → -> selected: ", "No" if quit_sel == 0 else "Yes")
 	press.call(KEY_ESCAPE)
 	print("  Esc -> page: '", menu_page, "'")
+
+
+# Dev tool: floor 2 - transition, the route up to the catwalk, cameras.
+#   godot_console --headless --path . -- --selftest=floor2
+func _selftest_floor2() -> void:
+	var press := func(code):
+		var ev := InputEventKey.new()
+		ev.physical_keycode = code
+		ev.pressed = true
+		_unhandled_input(ev)
+	test_keys = {}
+	start_run(0)
+	P.x = exit_x
+	_run(2)
+	print("  floor 1 exit -> state: ", state)
+	press.call(KEY_ENTER)
+	print("  Enter -> ", level.name, " (", level.subtitle, "), width ", LW, ", guards ", guards.size(), ", lights ", lights.size())
+	# the climb: floor -> crate -> crate -> catwalk, one held jump each
+	var tops := []
+	for step in [[47.6, 15], [49.6, 13], [51.1, 12]]:
+		P.x = step[0] * T
+		P.y = step[1] * T - P.h
+		P.vx = 0.0
+		P.vy = 0.0
+		P.move_t = 0.0
+		test_keys = {"right": true, "jump": true}
+		jump_queued = true
+		for i in 50:
+			_run(1)
+			if P.on_ground and i > 5:
+				break
+		test_keys = {}
+		tops.append("x%.1f row %.0f" % [(P.x + P.w / 2) / T, (P.y + P.h) / T])
+	print("  climb landings: ", tops)
+	print("  catwalk guard stands on row: ", guards[1].y / T)
+	# camera: standing in its sweep vs hidden behind the cooler under it
+	var cam_l: Lt = null
+	for L in lights:
+		if L.kind == "camera":
+			cam_l = L
+	start_run(1)
+	guards[3].x = 108 * T
+	P.x = 90 * T
+	var seen_t := -1.0
+	for i in 60 * 7:
+		_run(1)
+		if cam_l.seeing and seen_t < 0:
+			seen_t = i / 60.0
+	var called := []
+	for g in guards:
+		if g.state == "investigate" or g.state == "search" or g.state == "chase":
+			called.append(guards.find(g))
+	print("  standing under the camera: seen after %.1fs, guards called: %s, meter %.2f" % [seen_t, called, meter])
+	start_run(1)
+	P.x = 81 * T + 4
+	P.y = 15 * T - TUNE.crawl_h
+	P.h = TUNE.crawl_h
+	P.crawling = true
+	test_keys = {"down": true}
+	var ever := false
+	for i in 60 * 7:
+		_run(1)
+		ever = ever or cam_l.seeing
+	print("  hidden behind the cooler for a full sweep: seen? ", ever, ", meter %.2f" % meter)
+	test_keys = null

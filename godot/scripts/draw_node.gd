@@ -49,8 +49,8 @@ func _text(font: Font, pos: Vector2, s: String, size: int, col: Color, center :=
 	else:
 		draw_string(font, pos, s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, col)
 
-static func layer_width(f: float) -> float:
-	return ceilf(960 + (100 * T - 960) * f) + 60
+func layer_width(f: float) -> float:
+	return ceilf(960 + (m.LW * T - 960) * f) + 60
 
 # =====================================================================
 #  PARALLAX LAYERS - far city, mid office wall, foreground (drawn once)
@@ -181,13 +181,13 @@ func _stage() -> void:
 					draw_rect(Rect2(i * T + k, j * T + 6, 2, T - 12), grey(0x26))
 					k += 8
 	# door
-	draw_rect(Rect2(96 * T + 4, 12 * T + 4, 2 * T - 8, 3 * T - 4), grey(0x2a))
-	draw_rect(Rect2(96 * T + 46, 12 * T + 50, 6, 3), tile)
-	for p in m.PROPS:
+	draw_rect(Rect2(m.door_x * T + 4, 12 * T + 4, 2 * T - 8, 3 * T - 4), grey(0x2a))
+	draw_rect(Rect2(m.door_x * T + 46, 12 * T + 50, 6, 3), tile)
+	for p in m.props:
 		_prop(p)
 	for L in m.lights:                              # lamp shades
 		if L.kind == "lamp":
-			draw_colored_polygon(PackedVector2Array([Vector2(L.pos.x - 5, 2 * T), Vector2(L.pos.x + 5, 2 * T),
+			draw_colored_polygon(PackedVector2Array([Vector2(L.pos.x - 5, L.pos.y - 4), Vector2(L.pos.x + 5, L.pos.y - 4),
 				Vector2(L.pos.x + 15, L.pos.y + 7), Vector2(L.pos.x - 15, L.pos.y + 7)]), tile)
 
 func _prop(p: Dictionary) -> void:
@@ -222,6 +222,13 @@ func _prop(p: Dictionary) -> void:
 #  ACTORS - guards and the ninja (lit by the lights)
 # =====================================================================
 func _actors() -> void:
+	for L in m.lights:                              # security cameras: housing on the ceiling, lens follows the sweep
+		if L.kind == "camera":
+			draw_rect(Rect2(L.pos.x - 3, 2 * T, 6, 4), grey(0x12))
+			draw_set_transform(L.pos, L.dir)
+			draw_rect(Rect2(-8, -6, 20, 12), grey(0x12))
+			draw_rect(Rect2(12, -4, 5, 8), grey(0x12))
+			draw_set_transform_matrix(Transform2D.IDENTITY)
 	for g in m.guards:
 		_guard(g)
 	if m.state != "title" and not m.P.hidden:
@@ -298,15 +305,23 @@ func _overlay() -> void:
 		if L.kind == "lamp" and L.level > 0:
 			for k in 6:
 				draw_circle(L.pos + Vector2(0, 7), 26.0 * (1.0 - k / 6.0), Color(1, 1, 1, 0.12 * L.level))
-	var sign = m.lights[m.lights.size() - 1]        # exit sign
+	for L in m.lights:                              # camera status light: blinks while watching, solid when it sees you
+		if L.kind == "camera" and (L.seeing or fmod(m.time, 1.0) < 0.5):
+			var led: Vector2 = L.pos + Vector2.from_angle(L.dir) * 2.0
+			draw_circle(led, 5.0 if L.seeing else 3.0, Color(1, 1, 1, 0.25))
+			draw_circle(led, 2.0, Color(1, 1, 1, 0.95 if L.seeing else 0.6))
+	var sign = null                                 # exit sign
+	for L in m.lights:
+		if L.kind == "sign":
+			sign = L
 	draw_rect(Rect2(sign.pos.x - 18, sign.pos.y - 7, 36, 14), Color(0.92, 0.92, 0.92, 0.9))
 	_text(m.font_bold, sign.pos + Vector2(0, 5), "EXIT", 10, Color.BLACK, true)
-	for h in m.HINTS:
+	for h in m.hints:
 		_text(m.font_italic, Vector2(h[0] * T, h[1]), h[2], 14, Color(1, 1, 1, 0.3))
 	var P = m.P
 	if m.state != "title":
 		if P.cover >= 0 and not P.hidden:           # nudge: you could hide here
-			var p: Dictionary = m.PROPS[P.cover]
+			var p: Dictionary = m.props[P.cover]
 			_text(m.font_regular, Vector2(p.x * T + m.PROP_W[p.type] / 2, p.y - 66), "↓", 13, Color(1, 1, 1, 0.45), true)
 		_eyes()
 	_noise_and_stones()

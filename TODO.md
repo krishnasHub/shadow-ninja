@@ -38,6 +38,14 @@ Run it: open `index.html` in a browser (single file, no build).
 | Light switches (guard comes to switch it back on = lure), cameras | ⬜ later |
 | Multiple floors (start top, work down), sound pass | ⬜ later |
 
+## Floors (both versions)
+- Floors are data: `godot/scripts/levels.gd` and the `LEVELS` array in `index.html` hold the **same** data. Keep them in sync (the format is documented at the top of each).
+- Clearing a floor shows "FLOOR n CLEARED", where Enter goes to the next floor, R replays it, and Esc goes to the menu. Each floor opens with its name fading in. Clearing the last floor shows "OUT".
+- **Floor 1, the offices** (100 tiles): the original level.
+- **Floor 2, security** (120 tiles): a cubicle row of desks under a strip of lights (one flickers), a crate climb to a **catwalk** with its own guard and lamp over a lower floor with a second guard and a small lamp, then a corridor watched by a **security camera**, a guard posted near the exit, and coolers/plants/desks to hide behind. 4 guards.
+- **Cameras** (new on Floor 2): a narrow beam that sweeps (`sweep: [amplitude, period]`), fills the meter (danger 1.5), can't be put to sleep, and is beaten by hiding. When it sees you it calls the nearest awake guard to where you stood (at most every 1.5s). Its status light blinks while watching and goes solid when it sees you.
+- Guards now have a `row` (the tile row they stand on), so they can patrol catwalks.
+
 ## Meter rules (current)
 - `exposure` = sum over lights of avg light at 3 body points, capped at 1.
 - Fills at `exposure × fillRate` (0.38/s). After `drainDelay` (1.2s) in full shadow, drains at 0.12/s.
@@ -53,8 +61,8 @@ A full port of the HTML version (same level, mechanics and numbers) in Godot 4.7
 - Lights are Godot `PointLight2D`s with shadows. Their textures are baked from the same `stops` + `CONE_SOFT`, and the occluders are the same tile runs. Detection still uses our own rays (`light_at`), so the rule holds.
 - Everything is built in code (no TileMap or hand-made scenes yet). Moving the level to a TileMap is the step that unlocks editing levels in the Godot editor.
 - Dev tools: `godot_console --headless --path godot -- --selftest=1` replays the scenarios verified in the HTML version (all pass). `godot_console --path godot -- --capture=out.png --setup=chase --frames=45` saves a screenshot (setups: title, lamp, chase, cling, moon).
-- **Menus (Godot only):** title = New Game / About / Controls / Quit; Esc in play opens the same menu with Resume on top, and the game freezes behind it. ↑↓ or W/S + Enter/Space, or mouse hover + click; Esc goes back or resumes. About = a few lines on the game plus the controls table. Caught/escaped: R retries, Esc goes to the title menu. Quit asks "Are you sure?" (No is the default; ← → choose, Y/N shortcuts, Esc = No). `run.bat` launches fullscreen; F11 toggles. Self-tests: `--selftest=1`, `--selftest=throwmode`, `--selftest=menu`, `--selftest=quit`.
-- Differences from HTML: **hard-edged light cones** (user's call: `CONE_SOFT = [1.0]`, 512px light textures with a 1-texel anti-aliased edge, PCF shadows with no smoothing, 4096 shadow atlas). The HTML version still uses the soft 3-cone edge. Also no blur on the foreground silhouettes, and the overlay (eyes/hints) draws above the foreground leaves.
+- **Menus (both versions):** title = New Game / About / Controls / Quit; Esc in play opens the same menu with Resume on top, and the game freezes behind it. ↑↓ or W/S + Enter/Space, or mouse hover + click; Esc goes back or resumes. About = a few lines on the game plus the controls table. Caught/escaped: R retries, Esc goes to the title menu. Quit asks "Are you sure?" (No is the default; ← → choose, Y/N shortcuts, Esc = No). `run.bat` launches fullscreen; F11 toggles. Self-tests: `--selftest=1`, `--selftest=throwmode`, `--selftest=menu`, `--selftest=quit`, `--selftest=floor2` (transition, the catwalk climb, cameras). Screenshot setups also include floor2, catwalk and camera.
+- **Hard-edged light cones** in both versions (user's call: `CONE_SOFT = [1]`; Godot also uses 512px light textures with a 1-texel anti-aliased edge, PCF shadows with no smoothing, and a 4096 shadow atlas). HTML Quit can't close a browser tab it didn't open, so it shows a goodbye screen instead. Differences from HTML: no blur on the foreground silhouettes, and the overlay (eyes/hints) draws above the foreground leaves.
 
 ## Code map (`index.html`)
 - `TUNE` - every gameplay number in one place.
