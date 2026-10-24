@@ -1,0 +1,26 @@
+# Shadow Ninja
+
+A greyscale 2D stealth side-scroller. You're a ninja inside a high-security office tower, and you have to get out. Light is the enemy: lamps, moonlight and every guard's torch fill your detection meter, and shadow drains it.
+
+The rule the whole game is built on: **the light you see is the light that catches you.** Drawing and detection use the same light geometry.
+
+## Two versions
+
+| Folder | What | Run it |
+|---|---|---|
+| `index.html` | The original prototype: one HTML file, canvas 2D, soft-edged lights | Open it in a browser |
+| `godot/` | A port in Godot 4.7: same level and rules, Godot 2D lights with hard-edged cones, menus | Double-click `godot/run.bat` (fullscreen), or open `godot/project.godot` in Godot and press F5 |
+
+## Controls
+
+| Keys | Action |
+|---|---|
+| A D / ← → | run (loud) |
+| hold Shift | sneak (silent) |
+| Space / W / ↑ | jump · grab a duct · land on a guard to put him to sleep |
+| S / ↓ | crawl · hide behind furniture · drop from a duct |
+| Ctrl | throw mode: aim with the mouse, click to throw a stone |
+| Esc | pause menu |
+| R · F11 | restart · fullscreen (Godot) |
+
+`TODO.md` has the design notes, status and the code map.

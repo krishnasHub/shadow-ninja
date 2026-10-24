@@ -1,0 +1,1143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Shadow Ninja</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas {
+    position: absolute; inset: 0; margin: auto; display: block;
+    width: min(100vw, 177.78vh); height: min(100vh, 56.25vw);
+    background: #000;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+'use strict';
+
+// =====================================================================
+//  SHADOW NINJA - prototype (milestones 1-2: movement + light/meter)
+//  Core rule: the light you SEE is the light that CATCHES you.
+//  Rendering and detection both use the same light geometry
+//  (visibility polygon + cone + falloff), so they can never disagree.
+// =====================================================================
+
+const VIEW_W = 960, VIEW_H = 540, T = 32;
+
+const TUNE = {
+  gravity: 1800, maxFall: 1100,
+  walk: 140, run: 260, crawl: 70, cling: 80,
+  accelGround: 1600, accelAir: 900,
+  jumpV: 640, jumpCut: 1.2,          // extra gravity while rising with jump released
+  coyote: 0.08, jumpBuffer: 0.12,
+  width: 18, standH: 44, crawlH: 20,
+  ambient: 0.42,                     // how bright "darkness" is in the lightmap (0..1)
+  fillRate: 0.38,                    // meter per second at full exposure
+  drainDelay: 1.2, drainRate: 0.12,  // seconds in shadow before draining, drain per second
+  exposedThreshold: 0.03,
+};
+// Meter bands - guards (milestone 3) will react to these.
+const METER_SUSPICIOUS = 0.35, METER_ALERT = 0.65;
+
+// ---------- utils ----------
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const approach = (v, t, d) => v < t ? Math.min(v + d, t) : Math.max(v - d, t);
+const wrapAngle = a => { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI; return a; };
+function rng(seed) {
+  return () => {
+    seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+cv.width = VIEW_W; cv.height = VIEW_H;
+const lightCv = document.createElement('canvas');
+lightCv.width = VIEW_W; lightCv.height = VIEW_H;
+const lctx = lightCv.getContext('2d');
+
+// =====================================================================
+//  LEVEL - one office floor, built from rectangles (tile units)
+// =====================================================================
+const LW = 100, LH = 17;
+const grid = new Uint8Array(LW * LH);
+function fill(x, y, w, h, v = 1) {
+  for (let j = y; j < y + h; j++) for (let i = x; i < x + w; i++) grid[j * LW + i] = v;
+}
+// Above the map is open sky (so skylights let moonlight in); sides and below are solid.
+function solidAt(i, j) {
+  if (j < 0) return false;
+  if (i < 0 || i >= LW || j >= LH) return true;
+  return grid[j * LW + i] !== 0;
+}
+// Ducts (2) are solid like walls, and their underside is something you can cling to.
+const GRIP = 2;
+const isGrip = (i, j) => i >= 0 && i < LW && j >= 0 && j < LH && grid[j * LW + i] === GRIP;
+
+fill(0, 0, LW, 2);                  // ceiling
+fill(0, 15, LW, 2);                 // floor
+fill(0, 0, 1, LH); fill(LW - 1, 0, 1, LH);
+// 1. start office - a tall filing cabinet throws a shadow pocket
+fill(10, 12, 1, 3);
+// 2. raised walkway - lit on top, a dark crawlspace underneath
+fill(26, 13, 12, 1);
+// 3. skylights - slanted moonlight shafts
+for (const gx of [44, 52, 60]) fill(gx, 0, 2, 2, 0);
+// 4. flickering hall, then a crate and a raised floor
+fill(74, 13, 2, 2); fill(77, 12, 8, 3);
+// 5. vent wall - crawl under it to reach the exit
+fill(88, 2, 2, 12);
+// ducts low enough to jump into and cling to (they cast shadows too)
+fill(18, 11, 6, 1, GRIP);           // tutorial duct by the first lamp
+fill(46, 11, 11, 1, GRIP);          // over the first guard's patrol
+fill(62, 11, 5, 1, GRIP);           // over the second guard's patrol
+
+const SPAWN = { x: 3 * T, y: 15 * T - TUNE.standH };
+const EXIT_X = 96 * T + 8;
+
+// Furniture. Duck (↓) behind anything with a width to hide from light.
+const PROP_W = { desk: 70, plant: 26, cooler: 26 };
+const PROPS = [
+  { type: 'desk', x: 4, y: 15 * T }, { type: 'plant', x: 8, y: 15 * T },
+  { type: 'desk', x: 14, y: 15 * T }, { type: 'cooler', x: 21, y: 15 * T },
+  { type: 'desk', x: 40, y: 15 * T },
+  { type: 'plant', x: 48, y: 15 * T }, { type: 'desk', x: 55, y: 15 * T },
+  { type: 'chair', x: 57.5, y: 15 * T }, { type: 'cooler', x: 66, y: 15 * T },
+  { type: 'plant', x: 80, y: 12 * T }, { type: 'desk', x: 91, y: 15 * T },
+  { type: 'plant', x: 94, y: 15 * T },
+];
+
+const HINTS = [
+  [2.5, 170, 'A D / ← →  run (loud)      SHIFT  sneak (silent)      SPACE / W / ↑  jump'],
+  [33, 260, 'CTRL: throw mode. aim with the mouse, click to throw. the clack pulls guards to it.'],
+  [56, 255, 'jump on a guard from behind - or drop from a duct - to put him to sleep.'],
+  [11, 210, 'light fills the meter.  ↓ behind furniture hides you.'],
+  [17.5, 300, 'jump into the duct to cling.  ← → shimmy,  ↓ drop.'],
+  [24, 170, '↓  crawl - the dark is under the walkway'],
+  [43, 170, 'moonlight is weaker. it is still light.'],
+  [38.5, 215, 'guards: hide before the torch finds you. if he sees you duck, he knows where.'],
+  [64, 170, 'some lights blink. count.'],
+  [85, 170, '↓  through the vent'],
+];
+
+// ---------- occluder segments: merged tile edges ----------
+function buildSegments() {
+  const segs = [];
+  for (let y = 0; y <= LH; y++) {          // horizontal edges
+    let start = 0, type = 0;
+    for (let x = 0; x <= LW; x++) {
+      let t = 0;
+      if (x < LW) { const a = solidAt(x, y - 1), b = solidAt(x, y); if (a !== b) t = b ? 1 : 2; }
+      if (t !== type) { if (type) segs.push({ ax: start * T, ay: y * T, bx: x * T, by: y * T }); type = t; start = x; }
+    }
+  }
+  for (let x = 0; x <= LW; x++) {          // vertical edges
+    let start = 0, type = 0;
+    for (let y = 0; y <= LH; y++) {
+      let t = 0;
+      if (y < LH) { const a = solidAt(x - 1, y), b = solidAt(x, y); if (a !== b) t = b ? 1 : 2; }
+      if (t !== type) { if (type) segs.push({ ax: x * T, ay: start * T, bx: x * T, by: y * T }); type = t; start = y; }
+    }
+  }
+  return segs;
+}
+const SEGS = buildSegments();
+
+// Ray (p + t*d) vs segment; returns t (in units of d) or Infinity.
+function raySeg(px, py, dx, dy, s) {
+  const ex = s.bx - s.ax, ey = s.by - s.ay;
+  const den = dx * ey - dy * ex;
+  if (Math.abs(den) < 1e-9) return Infinity;
+  const sx = s.ax - px, sy = s.ay - py;
+  const t = (sx * ey - sy * ex) / den;
+  const u = (sx * dy - sy * dx) / den;
+  return (t > 0 && u >= 0 && u <= 1) ? t : Infinity;
+}
+function blocked(ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay;
+  for (const s of SEGS) { const t = raySeg(ax, ay, dx, dy, s); if (t > 1e-4 && t < 1 - 1e-4) return true; }
+  return false;
+}
+// Everything a light at (lx,ly) can see within radius r, as an angle-sorted polygon.
+function visibilityPolygon(lx, ly, r) {
+  const x0 = lx - r, y0 = ly - r, x1 = lx + r, y1 = ly + r;
+  const segs = SEGS.filter(s => Math.max(s.ax, s.bx) >= x0 && Math.min(s.ax, s.bx) <= x1 &&
+                                Math.max(s.ay, s.by) >= y0 && Math.min(s.ay, s.by) <= y1);
+  segs.push({ ax: x0, ay: y0, bx: x1, by: y0 }, { ax: x1, ay: y0, bx: x1, by: y1 },
+            { ax: x1, ay: y1, bx: x0, by: y1 }, { ax: x0, ay: y1, bx: x0, by: y0 });
+  const angles = [];
+  for (const s of segs) for (const [px, py] of [[s.ax, s.ay], [s.bx, s.by]]) {
+    const a = Math.atan2(py - ly, px - lx); angles.push(a - 1e-4, a, a + 1e-4);
+  }
+  const pts = [];
+  for (const a of angles) {
+    const dx = Math.cos(a), dy = Math.sin(a);
+    let best = Infinity;
+    for (const s of segs) { const t = raySeg(lx, ly, dx, dy, s); if (t < best) best = t; }
+    if (best < Infinity) pts.push({ a, x: lx + dx * best, y: ly + dy * best });
+  }
+  pts.sort((p, q) => p.a - q.a);
+  return pts;
+}
+
+// =====================================================================
+//  LIGHTS
+// =====================================================================
+const STOPS_LAMP = [[0, 1], [0.5, 0.85], [0.8, 0.5], [1, 0]];
+const STOPS_FLAT = [[0, 1], [1, 1]];
+const CONE_SOFT = [0.82, 1, 1.15];   // three stacked cones = soft edge, used for render AND detection
+
+function falloff(stops, t) {
+  for (let i = 1; i < stops.length; i++) if (t <= stops[i][0]) {
+    const [t0, v0] = stops[i - 1], [t1, v1] = stops[i];
+    return lerp(v0, v1, (t - t0) / (t1 - t0));
+  }
+  return 0;
+}
+function light(o) {
+  const L = Object.assign({ kind: 'lamp', dir: Math.PI / 2, spread: 0.5, radius: 420, intensity: 1,
+                            stops: STOPS_LAMP, flicker: null, level: 1, danger: 1 }, o);
+  L.poly = visibilityPolygon(L.x, L.y, L.radius);   // world is static, so cache it
+  return L;
+}
+const CEIL_Y = 2 * T + 4;
+const LIGHTS = [
+  light({ x: 16.5 * T, y: CEIL_Y, spread: 0.5, radius: 600, intensity: 0.9 }),
+  light({ x: 31.5 * T, y: CEIL_Y, spread: 0.45, radius: 600 }),
+  ...[44, 52, 60].map(gx => {
+    const cx = (gx + 1) * T, ox = cx - 150, oy = -420;
+    return light({ kind: 'moon', x: ox, y: oy, dir: Math.atan2(2 * T - oy, cx - ox), spread: 0.3,
+                   radius: 1150, intensity: 0.45, stops: STOPS_FLAT });
+  }),
+  light({ x: 69.5 * T, y: CEIL_Y, spread: 0.55, radius: 600, flicker: { period: 3, on: 0.55 } }),
+  light({ kind: 'sign', x: 97 * T, y: 11 * T + 20, dir: 0, spread: Math.PI, radius: 170, intensity: 0.35 }),
+];
+
+function updateLight(L, t) {
+  if (!L.flicker) { L.level = L.intensity; return; }
+  const ph = (t % L.flicker.period) / L.flicker.period;
+  let lit = ph < L.flicker.on;
+  if (ph < 0.07) lit = Math.sin(t * 90) > 0.2;                          // sputters on
+  else if (ph > L.flicker.on - 0.03 && ph < L.flicker.on) lit = Math.sin(t * 70) > 0;
+  L.level = lit ? L.intensity : 0;
+}
+
+// How much of light L reaches point (px,py), 0..1. Mirrors drawLight exactly.
+function lightAt(L, px, py) {
+  if (L.level <= 0) return 0;
+  const dx = px - L.x, dy = py - L.y, d2 = dx * dx + dy * dy;
+  if (d2 >= L.radius * L.radius) return 0;
+  const ang = Math.abs(wrapAngle(Math.atan2(dy, dx) - L.dir));
+  let cone = 0;
+  for (const k of CONE_SOFT) if (ang <= L.spread * k) cone++;
+  if (!cone) return 0;
+  if (blocked(L.x, L.y, px, py)) return 0;
+  return L.level * falloff(L.stops, Math.sqrt(d2) / L.radius) * cone / CONE_SOFT.length;
+}
+
+function drawLight(c, L, alphaScale) {
+  if (L.level <= 0) return;
+  const g = c.createRadialGradient(L.x, L.y, 0, L.x, L.y, L.radius);
+  for (const [t, v] of L.stops) g.addColorStop(t, `rgba(255,255,255,${v * L.level * alphaScale / CONE_SOFT.length})`);
+  c.save();
+  c.beginPath();
+  c.moveTo(L.poly[0].x, L.poly[0].y);
+  for (let i = 1; i < L.poly.length; i++) c.lineTo(L.poly[i].x, L.poly[i].y);
+  c.closePath();
+  c.clip();
+  c.fillStyle = g;
+  for (const k of CONE_SOFT) {
+    const s = L.spread * k;
+    c.beginPath();
+    if (s >= Math.PI) c.arc(L.x, L.y, L.radius, 0, Math.PI * 2);
+    else { c.moveTo(L.x, L.y); c.arc(L.x, L.y, L.radius, L.dir - s, L.dir + s); c.closePath(); }
+    c.fill();
+  }
+  c.restore();
+}
+const lightInView = (L, cx, cy) =>
+  L.x + L.radius > cx && L.x - L.radius < cx + VIEW_W && L.y + L.radius > cy && L.y - L.radius < cy + VIEW_H;
+
+// =====================================================================
+//  PARALLAX LAYERS (pre-rendered) - far city, mid office wall, foreground
+// =====================================================================
+const PAR_FAR = 0.18, PAR_MID = 0.5, PAR_FG = 1.35;
+const layerWidth = f => Math.ceil(VIEW_W + (LW * T - VIEW_W) * f) + 60;
+
+function makeFar() {
+  const c = document.createElement('canvas'); c.width = layerWidth(PAR_FAR); c.height = VIEW_H;
+  const g = c.getContext('2d'), r = rng(11);
+  g.fillStyle = '#ececec'; g.beginPath(); g.arc(c.width * 0.62, 120, 34, 0, Math.PI * 2); g.fill();
+  g.fillStyle = '#bdbdbd';
+  for (let x = -20; x < c.width;) { const bw = 30 + r() * 70, bh = 60 + r() * 120; g.fillRect(x, 470 - bh, bw, bh + 80); x += bw + r() * 6; }
+  for (let x = -30; x < c.width;) {
+    const bw = 40 + r() * 90, bh = 120 + r() * 250, top = 470 - bh;
+    g.fillStyle = '#9a9a9a'; g.fillRect(x, top, bw, bh + 80);
+    if (r() < 0.25) g.fillRect(x + bw / 2 - 1, top - 40, 2, 40);
+    if (r() < 0.55) {
+      g.fillStyle = '#c4c4c4';
+      for (let wy = top + 10; wy < 460; wy += 14) for (let wx = x + 6; wx < x + bw - 6; wx += 10) if (r() < 0.18) g.fillRect(wx, wy, 4, 6);
+    }
+    x += bw + 4 + r() * 20;
+  }
+  return c;
+}
+function makeMid() {
+  const c = document.createElement('canvas'); c.width = layerWidth(PAR_MID); c.height = VIEW_H;
+  const g = c.getContext('2d'), r = rng(23);
+  g.fillStyle = '#4c4c4c';                        // glass-wall mullions
+  for (let x = 0; x < c.width; x += 150) g.fillRect(x, 0, 7, VIEW_H);
+  g.fillRect(0, 90, c.width, 5); g.fillRect(0, 440, c.width, 5);
+  g.fillStyle = '#404040';                        // structural columns
+  for (let x = 260; x < c.width; x += 560 + r() * 120) g.fillRect(x, 0, 44, VIEW_H);
+  for (let x = 80; x < c.width; x += 180 + r() * 260) {
+    const kind = r();
+    g.fillStyle = '#454545'; g.strokeStyle = '#454545';
+    if (kind < 0.4) {                             // shelving unit
+      const w = 60 + r() * 50, h = 120 + r() * 70;
+      g.fillRect(x, 480 - h, w, h);
+      g.fillStyle = '#383838'; for (let y = 480 - h + 30; y < 480; y += 34) g.fillRect(x + 3, y, w - 6, 3);
+    } else if (kind < 0.7) {                      // pendant light (unlit)
+      const len = 60 + r() * 80;
+      g.lineWidth = 2; g.beginPath(); g.moveTo(x, 60); g.lineTo(x, 60 + len); g.stroke();
+      g.beginPath(); g.moveTo(x - 4, 60 + len); g.lineTo(x + 4, 60 + len); g.lineTo(x + 12, 72 + len); g.lineTo(x - 12, 72 + len); g.fill();
+    } else {                                      // tall plant
+      g.fillRect(x - 9, 455, 18, 25);
+      for (let k = 0; k < 7; k++) {
+        const a = -1.1 + k * 0.37, len = 40 + r() * 50;
+        g.beginPath(); g.ellipse(x + Math.sin(a) * len / 2, 455 - Math.cos(a) * len / 2, 5, len / 2, a, 0, Math.PI * 2); g.fill();
+      }
+    }
+  }
+  return c;
+}
+function makeFg() {
+  const c = document.createElement('canvas'); c.width = layerWidth(PAR_FG); c.height = VIEW_H;
+  const g = c.getContext('2d'), r = rng(5);
+  g.filter = 'blur(4px)'; g.fillStyle = g.strokeStyle = '#000'; g.lineCap = 'round';
+  for (let x = 700; x < c.width; x += 900 + r() * 700) {
+    if (r() < 0.5) {                              // cables sagging from the ceiling
+      const n = 2 + Math.floor(r() * 2);
+      for (let k = 0; k < n; k++) {
+        const x0 = x + r() * 60, x1 = x0 + 120 + r() * 200, sag = 50 + r() * 70;
+        g.lineWidth = 4 + r() * 5; g.beginPath(); g.moveTo(x0, -10); g.quadraticCurveTo((x0 + x1) / 2, sag * 2, x1, -10); g.stroke();
+      }
+    } else {                                      // big leaves rising from below
+      for (let k = 0; k < 6; k++) {
+        const a = -0.9 + r() * 1.8, len = 70 + r() * 80;
+        g.beginPath(); g.ellipse(x + Math.sin(a) * len / 2, 560 - Math.cos(a) * len / 2, 14 + r() * 10, len / 2, a, 0, Math.PI * 2); g.fill();
+      }
+    }
+  }
+  return c;
+}
+function makeGrain() {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const g = c.getContext('2d'), img = g.createImageData(256, 256);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = Math.random() * 255;
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = v; img.data[i + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  return c;
+}
+function makeVignette() {
+  const c = document.createElement('canvas'); c.width = VIEW_W; c.height = VIEW_H;
+  const g = c.getContext('2d');
+  const grd = g.createRadialGradient(VIEW_W / 2, VIEW_H / 2, VIEW_H * 0.35, VIEW_W / 2, VIEW_H / 2, VIEW_W * 0.62);
+  grd.addColorStop(0, 'rgba(0,0,0,0)'); grd.addColorStop(1, 'rgba(0,0,0,0.75)');
+  g.fillStyle = grd; g.fillRect(0, 0, VIEW_W, VIEW_H);
+  return c;
+}
+const farCv = makeFar(), midCv = makeMid(), fgCv = makeFg(), vignetteCv = makeVignette();
+const grainPattern = ctx.createPattern(makeGrain(), 'repeat');
+const fogGrad = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+fogGrad.addColorStop(0, '#d4d4d4'); fogGrad.addColorStop(0.6, '#b0b0b0'); fogGrad.addColorStop(1, '#8c8c8c');
+
+// =====================================================================
+//  INPUT
+// =====================================================================
+const KEYMAP = { ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right',
+                 ArrowUp: 'jump', KeyW: 'jump', Space: 'jump', ArrowDown: 'down', KeyS: 'down',
+                 ShiftLeft: 'walk', ShiftRight: 'walk' };
+const held = new Set();
+let jumpQueued = false;
+addEventListener('keydown', e => {
+  const k = KEYMAP[e.code];
+  if (k) { held.add(k); if (k === 'jump' && !e.repeat) jumpQueued = true; e.preventDefault(); }
+  if (e.repeat) return;
+  if (e.code === 'Enter' && state === 'title') startRun();
+  else if (e.code === 'KeyR' && state !== 'title') startRun();
+  else if ((e.code === 'KeyP' || e.code === 'Escape') && (state === 'play' || state === 'pause')) state = state === 'play' ? 'pause' : 'play';
+  else if (e.code === 'KeyG') debug = !debug;
+  else if ((e.code === 'ControlLeft' || e.code === 'ControlRight') && state === 'play') {
+    aiming = !aiming && stoneCount > 0;           // throw mode on/off
+    e.preventDefault();
+  }
+});
+addEventListener('keyup', e => { const k = KEYMAP[e.code]; if (k) held.delete(k); });
+const mouse = { x: 0, y: 0, seen: false, movedT: -99 };   // canvas pixels
+cv.addEventListener('mousemove', e => {
+  const r = cv.getBoundingClientRect();
+  mouse.x = (e.clientX - r.left) * VIEW_W / r.width; mouse.y = (e.clientY - r.top) * VIEW_H / r.height;
+  mouse.seen = true; mouse.movedT = time;
+});
+cv.addEventListener('mousedown', e => {
+  if (e.button !== 0) return;
+  if (state === 'title') startRun();
+  else if (aiming) { throwStone(); aiming = false; }  // outside throw mode the mouse does nothing; one throw per Ctrl
+});
+addEventListener('blur', () => held.clear());
+
+// =====================================================================
+//  PLAYER
+// =====================================================================
+const P = {};
+const scarf = [];
+const cam = { x: 0, y: Math.max(0, (LH * T - VIEW_H) / 2) };
+let state = 'title', stateT = 0, time = 0, debug = false;
+let meter = 0, exposure = 0, calm = 0;
+
+function startRun() {
+  Object.assign(P, { x: SPAWN.x, y: SPAWN.y, w: TUNE.width, h: TUNE.standH, vx: 0, vy: 0, onGround: false,
+                     facing: 1, crawling: false, running: false, coyote: 0, jumpBuf: 0, walkPhase: 0, lean: 0, vis: 0, cover: null, hidden: false, wasHidden: false, clinging: false });
+  guards = GUARD_DEFS.map(makeGuard);
+  noises = []; stones = []; stoneCount = STONE.max; aiming = false;
+  meter = 0; exposure = 0; calm = 0; jumpQueued = false;
+  resetScarf();
+  cam.x = clamp(P.x - VIEW_W * 0.4, 0, LW * T - VIEW_W);
+  state = 'play'; stateT = 0;
+}
+
+function rectHits(x, y, w, h) {
+  const i0 = Math.floor(x / T), i1 = Math.floor((x + w - 0.001) / T);
+  const j0 = Math.floor(y / T), j1 = Math.floor((y + h - 0.001) / T);
+  for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) if (solidAt(i, j)) return true;
+  return false;
+}
+const canStand = () => !rectHits(P.x, P.y - (TUNE.standH - TUNE.crawlH), P.w, TUNE.standH);
+
+// clinging: hold on while the tile above your middle is a duct
+const gripOver = x => isGrip(Math.floor((x + P.w / 2) / T), Math.floor(P.y / T) - 1);
+function startCling() {
+  P.clinging = true; P.crawling = false; P.h = TUNE.crawlH; P.vx = P.vy = 0;
+}
+function updateCling(dt, dir) {
+  if (held.has('down')) {                        // let go - top stays at the duct, then fall
+    P.clinging = false; P.h = TUNE.standH; P.vy = 0;
+    return false;
+  }
+  if (dir) P.facing = dir;
+  jumpQueued = false;
+  const nx = P.x + dir * TUNE.cling * dt;
+  P.vx = dir && gripOver(nx) && !rectHits(nx, P.y, P.w, P.h) ? dir * TUNE.cling : 0;
+  P.x += P.vx * dt;
+  P.walkPhase += Math.abs(P.vx) * dt * 0.12;
+  P.cover = null; P.hidden = false; P.running = false; P.onGround = false; P.lean = 0;
+  return true;                                   // silent: shimmying makes no noise
+}
+
+function updatePlayer(dt) {
+  let dir = (held.has('right') ? 1 : 0) - (held.has('left') ? 1 : 0);
+  if (aiming) {                                  // throw mode: hold still and face the cursor (ducking still works)
+    dir = 0; jumpQueued = false;
+    P.facing = aimTarget().x >= P.x + P.w / 2 ? 1 : -1;
+  }
+  if (P.clinging && updateCling(dt, dir)) return;
+  const wantCrawl = held.has('down');
+  if (wantCrawl && P.onGround && !P.crawling) {
+    P.y += TUNE.standH - TUNE.crawlH; P.h = TUNE.crawlH; P.crawling = true;
+  } else if (!wantCrawl && P.crawling && canStand()) {
+    P.y -= TUNE.standH - TUNE.crawlH; P.h = TUNE.standH; P.crawling = false;
+  }
+  P.running = !held.has('walk') && !P.crawling;   // running is the default; Shift sneaks
+  if (dir) P.facing = dir;
+  const maxV = P.crawling ? TUNE.crawl : P.running ? TUNE.run : TUNE.walk;
+  P.vx = approach(P.vx, dir * maxV, (P.onGround ? TUNE.accelGround : TUNE.accelAir) * dt);
+
+  P.coyote = P.onGround ? TUNE.coyote : P.coyote - dt;
+  P.jumpBuf = jumpQueued ? TUNE.jumpBuffer : P.jumpBuf - dt;
+  jumpQueued = false;
+  if (P.jumpBuf > 0 && P.coyote > 0 && !P.crawling) { P.vy = -TUNE.jumpV; P.jumpBuf = 0; P.coyote = 0; }
+  if (!held.has('jump') && P.vy < 0) P.vy += TUNE.gravity * TUNE.jumpCut * dt;
+  P.vy = Math.min(P.vy + TUNE.gravity * dt, TUNE.maxFall);
+
+  // move X, then Y, resolving against tiles
+  P.x += P.vx * dt;
+  if (rectHits(P.x, P.y, P.w, P.h)) {
+    P.x = P.vx > 0 ? Math.floor((P.x + P.w - 0.001) / T) * T - P.w : (Math.floor(P.x / T) + 1) * T;
+    P.vx = 0;
+  }
+  const wasOnGround = P.onGround, impactV = P.vy;
+  P.onGround = false;
+  P.y += P.vy * dt;
+  if (rectHits(P.x, P.y, P.w, P.h)) {
+    if (P.vy > 0) { P.y = Math.floor((P.y + P.h - 0.001) / T) * T - P.h; P.onGround = true; P.vy = 0; }
+    else {
+      P.y = (Math.floor(P.y / T) + 1) * T; P.vy = 0;
+      if (gripOver(P.x) && !held.has('down')) { startCling(); return; }   // head hits a duct: grab on
+    }
+  }
+  // a hard landing is loud unless you're sneaking (Shift)
+  if (P.onGround && !wasOnGround && impactV > 450 && !held.has('walk')) makeNoise(P.x + P.w / 2, P.y + P.h, NOISE.land);
+
+  // hiding: ducked behind furniture with your middle inside its footprint
+  const mid = P.x + P.w / 2;
+  P.cover = P.onGround ? PROPS.find(p => PROP_W[p.type] && Math.abs(p.y - (P.y + P.h)) < 2 &&
+                                         mid > p.x * T + 4 && mid < p.x * T + PROP_W[p.type] - 4) : null;
+  P.hidden = !!P.cover && P.crawling;
+
+  const moving = Math.abs(P.vx) > 8;
+  const prevPhase = P.walkPhase;
+  P.walkPhase += Math.abs(P.vx) * dt * (P.crawling ? 0.12 : 0.075);
+  // running footsteps are loud; sneaking and crawling are silent
+  if (P.running && P.onGround && Math.abs(P.vx) > 150 &&
+      Math.floor(P.walkPhase / (2 * Math.PI)) !== Math.floor(prevPhase / (2 * Math.PI)))
+    makeNoise(mid, P.y + P.h, NOISE.run);
+  P.lean = approach(P.lean, P.crawling || !moving ? 0 : P.facing * (P.running ? 0.18 : 0.06), dt * 1.5);
+}
+
+// headband tails - a little verlet chain
+function neck() {
+  const cx = P.x + P.w / 2, by = P.y + P.h;
+  if (P.clinging) return { x: cx + P.facing * 9, y: P.y + 11 };
+  return P.crawling ? { x: cx + P.facing * 9, y: by - 11 } : { x: cx - P.facing * 5, y: by - 39 };
+}
+function resetScarf() {
+  scarf.length = 0;
+  const n = neck();
+  for (let i = 0; i < 7; i++) { const x = n.x - P.facing * i * 5; scarf.push({ x, y: n.y, px: x, py: n.y }); }
+}
+function updateScarf() {
+  const n = neck(); scarf[0].x = n.x; scarf[0].y = n.y;
+  for (let i = 1; i < scarf.length; i++) {
+    const p = scarf[i], vx = (p.x - p.px) * 0.92, vy = (p.y - p.py) * 0.92;
+    p.px = p.x; p.py = p.y;
+    p.x += vx - P.facing * 0.15; p.y += vy + 0.12 + Math.sin(time * 7 + i) * 0.06;
+  }
+  for (let k = 0; k < 3; k++) for (let i = 1; i < scarf.length; i++) {
+    const a = scarf[i - 1], b = scarf[i], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1, f = (d - 5) / d;
+    b.x -= dx * f; b.y -= dy * f;
+  }
+}
+
+// =====================================================================
+//  DETECTION
+// =====================================================================
+function samplePoints() {
+  const cx = P.x + P.w / 2;
+  return [{ x: cx, y: P.y + 5 }, { x: cx, y: P.y + P.h * 0.5 }, { x: cx, y: P.y + P.h - 4 }];
+}
+// Behind furniture no light reaches you - except the torch of a guard who saw you duck there.
+const lightReachesHidden = L => L.guard && L.guard.knowsHide === P.cover;
+function updateDetection(dt) {
+  const pts = samplePoints();
+  let E = 0, fill = 0;
+  for (const L of allLights()) {
+    if (P.hidden && !lightReachesHidden(L)) continue;
+    let s = 0; for (const p of pts) s += lightAt(L, p.x, p.y);
+    s /= pts.length; E += s; fill += s * L.danger;
+  }
+  exposure = Math.min(1, E);
+  const hunted = guards.some(g => g.state === 'chase' || (g.state === 'search' && g.huntingYou));
+  if (exposure > TUNE.exposedThreshold) { meter += fill * TUNE.fillRate * dt; calm = 0; }
+  else if (!hunted) { calm += dt; if (calm > TUNE.drainDelay) meter = Math.max(0, meter - TUNE.drainRate * dt); }
+  P.vis = approach(P.vis, exposure, dt * 6);
+  if (meter >= 1) { meter = 1; state = 'caught'; stateT = 0; }
+}
+
+// =====================================================================
+//  NOISE + STONES
+//  Noise is a circle: any awake guard inside it goes to look.
+// =====================================================================
+const NOISE = { run: 150, land: 120, stone: 280, thud: 140 };   // radii in px
+const STONE = { max: 3, maxSpeed: 700, gravity: 1400, r: 3 };   // maxSpeed sets the range: ~10 tiles on the flat
+let noises = [], stones = [], stoneCount = 0;
+let aiming = false;   // throw mode (Ctrl): the mouse aims, a click throws
+
+// Walls block sound: a noise reaches exactly what a light at the same spot would.
+function makeNoise(x, y, r) {
+  y -= 6;                                        // lift off the floor so the floor doesn't swallow it
+  noises.push({ x, y, r, t: 0, poly: visibilityPolygon(x, y, r) });
+  for (const g of guards) if (g.state !== 'asleep' && Math.hypot(g.x - x, g.y - 30 - y) < r &&
+                              !blocked(x, y, g.x, g.y - 30)) hear(g, x);
+}
+function hear(g, x) {
+  if (g.state === 'chase' && time - g.seenT < 0.1) return;   // he's looking right at you already
+  g.state = 'investigate'; g.investX = x;
+}
+const solidPx = (x, y) => solidAt(Math.floor(x / T), Math.floor(y / T));
+
+// Aim at the mouse. Pick the throw that lands on it; if that needs more than maxSpeed
+// it's out of range, and you throw as hard as you can toward it (the arc shows where that lands).
+function aimTarget() {
+  return mouse.seen ? { x: mouse.x + cam.x, y: mouse.y + cam.y } : { x: P.x + P.w / 2 + P.facing * 8 * T, y: P.y + P.h };
+}
+function aimThrow() {
+  const tgt = aimTarget(), side = tgt.x >= P.x + P.w / 2 ? 1 : -1;
+  const x = P.x + P.w / 2 + side * 8, y = P.y + (P.crawling ? 8 : P.clinging ? 12 : 14);
+  const dx = tgt.x - x, dy = tgt.y - y, t = clamp(Math.hypot(dx, dy) / 450, 0.25, 0.8);
+  let vx = dx / t, vy = dy / t - 0.5 * STONE.gravity * t;
+  const sp = Math.hypot(vx, vy), inRange = sp <= STONE.maxSpeed;
+  if (!inRange) { vx *= STONE.maxSpeed / sp; vy *= STONE.maxSpeed / sp; }
+  return { side, x, y, vx, vy, inRange, tgt };
+}
+function throwStone() {
+  if (state !== 'play' || stoneCount <= 0) return;
+  const a = aimThrow();
+  stoneCount--; P.facing = a.side;
+  stones.push({ x: a.x, y: a.y, vx: a.vx, vy: a.vy, resting: false, clacked: false });
+}
+// One physics step for a flying stone (used by the real stone AND the aim preview). True on impact.
+function stoneStep(s, dt) {
+  let hit = false;
+  s.vy += STONE.gravity * dt;
+  s.x += s.vx * dt;
+  if (solidPx(s.x, s.y)) { s.x -= s.vx * dt; s.vx *= -0.35; hit = true; }
+  s.y += s.vy * dt;
+  if (solidPx(s.x, s.y)) {
+    s.y -= s.vy * dt; hit = true;
+    if (s.vy > 0) {
+      if (s.vy < 160) { s.resting = true; s.vx = s.vy = 0; s.y = (Math.floor(s.y / T) + 1) * T - STONE.r; }
+      else { s.vy *= -0.3; s.vx *= 0.6; }
+    } else s.vy = 0;
+  }
+  return hit;
+}
+function predictPath(a) {
+  const s = { x: a.x, y: a.y, vx: a.vx, vy: a.vy }, pts = [];
+  for (let i = 0; i < 120; i++) { if (stoneStep(s, 1 / 60)) break; if (i % 2) pts.push({ x: s.x, y: s.y }); }
+  return { pts, end: { x: s.x, y: s.y } };
+}
+function clack(s) { if (!s.clacked) { s.clacked = true; makeNoise(s.x, s.y, NOISE.stone); } }
+function updateStones(dt) {
+  const px = P.x + P.w / 2, feet = P.y + P.h;
+  for (const s of stones) {
+    if (s.resting) {
+      if (stoneCount < STONE.max && Math.abs(s.x - px) < 14 && Math.abs(s.y - feet) < 12) { s.taken = true; stoneCount++; }
+      continue;
+    }
+    if (stoneStep(s, dt)) clack(s);
+  }
+  stones = stones.filter(s => !s.taken);
+  for (const n of noises) n.t += dt;
+  noises = noises.filter(n => n.t < 0.6);
+}
+
+// =====================================================================
+//  GUARDS - a guard's torch is just a moving light
+//  Patrol → (torch finds you) Chase → (lost you) Search → Return → Patrol
+//  Patrol → (hears a noise / finds a sleeping guard) Investigate → Search
+//  Land on one he can't see you → Asleep, torch off, for good.
+// =====================================================================
+const GUARD = { walk: 55, chase: 115, investigate: 85, torchRadius: 330, torchSpread: 0.32, danger: 1.3,
+                searchTime: 4, endPause: 1.5, sawYouHide: 0.4,   // sawYouHide: seconds of grace
+                alertSpeed: 1.35, alertSearch: 7,                // after finding a sleeping guard
+                wakeAfter: Infinity };   // sleepers never wake. Harder difficulty: seconds until they do
+const GUARD_DEFS = [   // tiles: start, patrol from/to, walkable bounds on this floor
+  { x: 50, from: 45, to: 58, minX: 38, maxX: 74 },
+  { x: 70, from: 63, to: 72, minX: 38, maxX: 74 },
+];
+let guards = [];
+const allLights = () => LIGHTS.concat(guards.map(g => g.torch));
+
+function makeGuard(d) {
+  const g = { x: d.x * T, y: 15 * T, facing: 1, from: d.from * T, to: d.to * T,
+              minX: d.minX * T + 12, maxX: d.maxX * T - 12, state: 'patrol', pause: 0, phase: 0,
+              moving: false, searchStart: 0, searchFacing: 1, seenT: -99, lastSeen: 0, knowsHide: null, aim: 0.15 };
+  g.torch = light({ kind: 'torch', x: g.x, y: g.y - 32, dir: 0, spread: GUARD.torchSpread,
+                    radius: GUARD.torchRadius, danger: GUARD.danger });
+  g.torch.guard = g;
+  return g;
+}
+function guardSees(g) {
+  if (g.state === 'asleep' || (P.hidden && g.knowsHide !== P.cover)) return false;
+  let s = 0;
+  for (const p of samplePoints()) s += lightAt(g.torch, p.x, p.y);
+  return s > 0.05;
+}
+function updateGuard(g, dt) {
+  if (g.state === 'asleep') {
+    if (time - g.sleepT < GUARD.wakeAfter) return;
+    g.alert = true; g.torch.level = g.torch.intensity;                 // wakes up angry
+    g.state = 'search'; g.huntingYou = false; g.searchStart = time; g.searchFacing = g.facing;
+  }
+  const px = P.x + P.w / 2;
+  if (guardSees(g)) { g.seenT = time; g.lastSeen = px; g.state = 'chase'; }
+  const seeing = time - g.seenT < 0.1;
+  // a sleeping colleague in his torch puts him on alert
+  if (!seeing) for (const o of guards) if (o.state === 'asleep' && !o.found && lightAt(g.torch, o.x, o.y - 8) > 0.05) {
+    o.found = true; g.alert = true; hear(g, o.x);
+  }
+  const boost = g.alert ? GUARD.alertSpeed : 1;
+  let target = null, speed = GUARD.walk * boost;
+  if (g.state === 'patrol') {
+    if (g.pause > 0) g.pause -= dt;
+    else {
+      target = g.facing > 0 ? g.to : g.from;
+      if (Math.abs(target - g.x) < 2) { g.facing *= -1; g.pause = GUARD.endPause; target = null; }
+    }
+  } else if (g.state === 'chase' || g.state === 'investigate') {
+    const chasing = g.state === 'chase';
+    speed = (chasing ? GUARD.chase : GUARD.investigate) * boost;
+    target = clamp(chasing ? g.lastSeen : g.investX, g.minX, g.maxX);
+    if (seeing && Math.abs(px - g.x) < 30) target = null;            // standing over you
+    else if (!seeing && Math.abs(target - g.x) < 6) {
+      g.state = 'search'; g.huntingYou = chasing; g.searchStart = time; g.searchFacing = g.facing; target = null;
+    }
+  } else if (g.state === 'search') {
+    g.facing = g.searchFacing * (Math.floor((time - g.searchStart) / 1.3) % 2 ? -1 : 1);
+    if (time - g.searchStart > (g.alert ? GUARD.alertSearch : GUARD.searchTime)) g.state = 'return';
+  } else if (g.state === 'return') {
+    target = clamp(g.x, g.from, g.to);
+    if (Math.abs(target - g.x) < 2) g.state = 'patrol';
+  }
+  g.moving = false;
+  if (target !== null) {
+    const dx = clamp(target, g.minX, g.maxX) - g.x;
+    if (Math.abs(dx) > 1) {
+      g.facing = Math.sign(dx);
+      g.x += g.facing * Math.min(Math.abs(dx), speed * dt);
+      g.phase += speed * dt * 0.08; g.moving = true;
+    }
+  }
+  // torch: level-ish on patrol, on you in a chase, sweeping in a search
+  const tx = g.x + g.facing * 14, ty = g.y - 32;
+  let aim = 0.15;
+  if (g.state === 'chase' && seeing) aim = clamp(Math.atan2(P.y + P.h / 2 - ty, Math.abs(px - tx)), -0.6, 0.7);
+  else if (g.state === 'search') aim = 0.1 + Math.sin(time * 2.2) * 0.35;
+  g.aim = lerp(g.aim, aim, 1 - Math.exp(-dt * 6));
+  const L = g.torch;
+  L.x = tx; L.y = ty; L.dir = g.facing > 0 ? g.aim : Math.PI - g.aim;
+  L.poly = visibilityPolygon(L.x, L.y, L.radius);
+}
+function updateGuards(dt) {
+  // The hiding rule: duck while a guard has you in his torch (or just did) and he knows the spot.
+  if (P.hidden && !P.wasHidden) for (const g of guards) if (time - g.seenT < GUARD.sawYouHide) g.knowsHide = P.cover;
+  if (!P.hidden) for (const g of guards) g.knowsHide = null;
+  P.wasHidden = P.hidden;
+  // takedown: come down on a guard who can't see you
+  if (!P.onGround && P.vy > 0) for (const g of guards) {
+    if (g.state === 'asleep' || time - g.seenT < 0.15) continue;
+    if (P.x < g.x + 11 && P.x + P.w > g.x - 11 && P.y < g.y && P.y + P.h > g.y - 62) takedown(g);
+  }
+  for (const g of guards) updateGuard(g, dt);
+}
+function takedown(g) {
+  g.state = 'asleep'; g.sleepT = time; g.torch.level = 0; g.moving = false;
+  P.vy = -320;                                   // spring off him
+  makeNoise(g.x, g.y - 10, NOISE.thud);          // the thud can bring the other guard
+}
+
+function updateCamera(dt) {
+  const target = clamp(P.x + P.w / 2 - VIEW_W * 0.45 + P.facing * 70, 0, LW * T - VIEW_W);
+  cam.x = lerp(cam.x, target, 1 - Math.exp(-dt * 4));
+}
+
+// =====================================================================
+//  STEP
+// =====================================================================
+function step(dt) {
+  time += dt; stateT += dt;
+  for (const L of LIGHTS) updateLight(L, time);
+  if (state === 'title') { cam.x = (0.5 - 0.5 * Math.cos(time * 0.04)) * (LW * T - VIEW_W); return; }
+  if (state !== 'play') return;
+  updatePlayer(dt); updateStones(dt); updateScarf(); updateGuards(dt); updateDetection(dt); updateCamera(dt);
+  if (state === 'play' && P.x + P.w > EXIT_X) { state = 'escaped'; stateT = 0; }
+}
+
+// =====================================================================
+//  RENDER
+// =====================================================================
+function drawTiles(cx) {
+  ctx.fillStyle = '#0a0a0a';
+  const i0 = Math.max(0, Math.floor(cx / T)), i1 = Math.min(LW - 1, Math.floor((cx + VIEW_W) / T));
+  for (let j = 0; j < LH; j++) for (let i = i0; i <= i1; i++) if (grid[j * LW + i]) ctx.fillRect(i * T, j * T, T + 0.5, T + 0.5);
+  // ducts: hanger rods up to the ceiling and grille seams
+  for (let j = 0; j < LH; j++) for (let i = i0; i <= i1; i++) if (grid[j * LW + i] === GRIP) {
+    const x = i * T, y = j * T;
+    ctx.fillStyle = '#0a0a0a';
+    if (i % 3 === 0) ctx.fillRect(x + 14, 2 * T, 3, y - 2 * T);
+    ctx.fillStyle = '#262626';
+    for (let k = 4; k < T; k += 8) ctx.fillRect(x + k, y + 6, 2, T - 12);
+  }
+}
+function drawProp(p) {
+  const x = p.x * T, y = p.y, c = ctx;
+  c.fillStyle = '#151515';
+  if (p.type === 'desk') {
+    c.fillRect(x, y - 28, 70, 6); c.fillRect(x + 4, y - 22, 4, 22); c.fillRect(x + 62, y - 22, 4, 22);
+    c.fillRect(x + 40, y - 22, 22, 16); c.fillRect(x + 14, y - 46, 24, 16); c.fillRect(x + 24, y - 30, 4, 2);
+  } else if (p.type === 'plant') {
+    c.beginPath(); c.moveTo(x + 4, y - 18); c.lineTo(x + 22, y - 18); c.lineTo(x + 19, y); c.lineTo(x + 7, y); c.fill();
+    for (let k = 0; k < 7; k++) {
+      const a = -1.2 + k * 0.4, len = 18 + (k * 7 % 11);
+      c.beginPath(); c.ellipse(x + 13 + Math.sin(a) * len / 2, y - 18 - Math.cos(a) * len / 2, 3.5, len / 2, a, 0, Math.PI * 2); c.fill();
+    }
+  } else if (p.type === 'cooler') {
+    c.fillRect(x + 2, y - 40, 22, 40); c.fillRect(x + 10, y - 44, 6, 4);
+    c.beginPath(); c.ellipse(x + 13, y - 56, 10, 13, 0, 0, Math.PI * 2); c.fill();
+  } else if (p.type === 'chair') {
+    c.fillRect(x, y - 20, 22, 4); c.fillRect(x + 18, y - 40, 4, 22); c.fillRect(x + 9, y - 16, 3, 12); c.fillRect(x + 1, y - 4, 20, 3);
+  }
+}
+function drawDoor() {
+  const x = 96 * T, y = 12 * T;
+  ctx.fillStyle = '#2a2a2a'; ctx.fillRect(x + 4, y + 4, 2 * T - 8, 3 * T - 4);
+  ctx.fillStyle = '#0a0a0a'; ctx.fillRect(x + 46, y + 50, 6, 3);
+}
+function drawFixtures() {
+  ctx.fillStyle = '#0a0a0a';
+  for (const L of LIGHTS) if (L.kind === 'lamp') {
+    ctx.beginPath(); ctx.moveTo(L.x - 5, 2 * T); ctx.lineTo(L.x + 5, 2 * T); ctx.lineTo(L.x + 15, L.y + 7); ctx.lineTo(L.x - 15, L.y + 7); ctx.fill();
+  }
+}
+function drawBulbs() {
+  for (const L of LIGHTS) if (L.kind === 'lamp' && L.level > 0) {
+    const g = ctx.createRadialGradient(L.x, L.y + 7, 0, L.x, L.y + 7, 26);
+    g.addColorStop(0, `rgba(255,255,255,${0.9 * L.level})`); g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g; ctx.fillRect(L.x - 26, L.y - 19, 52, 52);
+  }
+}
+function drawExitSign() {
+  const L = LIGHTS[LIGHTS.length - 1];
+  ctx.fillStyle = 'rgba(235,235,235,0.9)'; ctx.fillRect(L.x - 18, L.y - 7, 36, 14);
+  ctx.fillStyle = '#000'; ctx.font = 'bold 10px Georgia, serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('EXIT', L.x, L.y + 1);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+}
+function drawHints() {
+  ctx.font = 'italic 14px Georgia, serif'; ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  for (const [tx, y, s] of HINTS) ctx.fillText(s, tx * T, y);
+}
+
+function drawGuard(g) {
+  const c = ctx, f = g.facing, x = g.x, by = g.y, sw = g.moving ? Math.sin(g.phase) : 0;
+  c.fillStyle = c.strokeStyle = '#121212'; c.lineCap = 'round';
+  if (g.state === 'asleep') {                                             // flat out, torch dark
+    c.beginPath(); c.roundRect(x - 24, by - 13, 34, 13, 5); c.fill();
+    c.beginPath(); c.arc(x + 17, by - 8, 8, 0, Math.PI * 2); c.fill();
+    c.lineWidth = 5; c.beginPath(); c.moveTo(x - 22, by - 6); c.lineTo(x - 42, by - 3); c.stroke();
+    c.fillRect(x + 30, by - 5, 18, 5);                                    // cap, fallen off
+    c.fillRect(x - 6, by - 6, 14, 6);                                     // torch, off
+    return;
+  }
+  c.lineWidth = 5; c.beginPath();
+  c.moveTo(x, by - 20); c.lineTo(x + sw * 9, by - 1);
+  c.moveTo(x, by - 20); c.lineTo(x - sw * 9, by - 1);
+  c.stroke();
+  c.beginPath(); c.roundRect(x - 9, by - 46, 18, 28, 5); c.fill();        // torso
+  c.beginPath(); c.arc(x + f, by - 53, 8, 0, Math.PI * 2); c.fill();     // head
+  c.fillRect(x - 9 + f * 2, by - 62, 18, 5);                              // cap
+  c.fillRect(f > 0 ? x + 6 : x - 16, by - 59, 10, 2.5);                   // brim
+  const L = g.torch;
+  c.lineWidth = 4.5; c.beginPath(); c.moveTo(x + f * 3, by - 41); c.lineTo(L.x, L.y); c.stroke();  // arm
+  c.save(); c.translate(L.x, L.y); c.rotate(L.dir); c.fillRect(-10, -3.5, 12, 7); c.restore();     // torch
+}
+function drawGuardMarks() {
+  ctx.font = 'bold 20px Georgia, serif'; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  for (const g of guards) {
+    if (g.state === 'asleep') {
+      ctx.font = 'italic 13px Georgia, serif'; ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      for (let k = 0; k < 3; k++) {
+        const p = (time * 0.5 + k / 3) % 1;
+        ctx.globalAlpha = 1 - p; ctx.fillText('z', g.x + 18 + p * 14, g.y - 22 - p * 30);
+      }
+      ctx.globalAlpha = 1; ctx.font = 'bold 20px Georgia, serif'; ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      continue;
+    }
+    const m = g.state === 'chase' ? '!' : g.state === 'search' || g.state === 'investigate' ? '?' : '';
+    if (m) ctx.fillText(g.alert ? m + '!' : m, g.x, g.y - 72);
+  }
+  ctx.textAlign = 'left';
+}
+function drawNoiseAndStones() {
+  ctx.lineWidth = 1.5;
+  for (const n of noises) {                       // a bubble that spreads to the noise's reach, cut off by walls
+    const k = n.t / 0.6, rr = Math.max(1, n.r * Math.min(1, k * 1.6));
+    ctx.save();
+    ctx.beginPath(); ctx.moveTo(n.poly[0].x, n.poly[0].y);
+    for (const p of n.poly) ctx.lineTo(p.x, p.y);
+    ctx.closePath(); ctx.clip();
+    const g = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, rr);
+    g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(1, `rgba(255,255,255,${0.1 * (1 - k)})`);
+    ctx.fillStyle = g; ctx.strokeStyle = `rgba(255,255,255,${0.3 * (1 - k)})`;
+    ctx.beginPath(); ctx.arc(n.x, n.y, rr, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+  ctx.fillStyle = '#b4b4b4';
+  for (const s of stones) { ctx.beginPath(); ctx.arc(s.x, s.y, STONE.r, 0, Math.PI * 2); ctx.fill(); }
+}
+function drawAim() {
+  if (state !== 'play' || !aiming) return;       // only in throw mode (Ctrl)
+  const a = aimThrow(), can = stoneCount > 0;
+  // the arc: shown while you're moving the mouse, fades when you stop
+  const arcA = can ? 1 : 0;
+  if (arcA > 0) {
+    const path = predictPath(a);
+    ctx.fillStyle = `rgba(255,255,255,${0.55 * arcA})`;
+    for (const p of path.pts) { ctx.beginPath(); ctx.arc(p.x, p.y, 1.6, 0, Math.PI * 2); ctx.fill(); }
+    ctx.strokeStyle = `rgba(255,255,255,${0.7 * arcA})`; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(path.end.x, path.end.y, 6, 0, Math.PI * 2); ctx.stroke();
+  }
+  // the cursor: a ring when you can reach it, a crossed ring when you can't
+  const { x, y } = a.tgt, ok = a.inRange && can;
+  ctx.strokeStyle = `rgba(255,255,255,${ok ? 0.9 : 0.45})`; ctx.fillStyle = ctx.strokeStyle; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI * 2); ctx.stroke();
+  if (ok) { ctx.beginPath(); ctx.arc(x, y, 1.8, 0, Math.PI * 2); ctx.fill(); }
+  else {
+    ctx.beginPath(); ctx.moveTo(x - 6, y - 6); ctx.lineTo(x + 6, y + 6); ctx.moveTo(x + 6, y - 6); ctx.lineTo(x - 6, y + 6); ctx.stroke();
+    ctx.font = 'italic 11px Georgia, serif'; ctx.textAlign = 'center';
+    ctx.fillText(can ? 'too far' : 'no stones', x, y + 22); ctx.textAlign = 'left';
+  }
+}
+
+function withLean(fn) {
+  const cx = P.x + P.w / 2, by = P.y + P.h;
+  ctx.save(); ctx.translate(cx, by); ctx.rotate(P.lean); ctx.translate(-cx, -by); fn(cx, by); ctx.restore();
+}
+function drawNinja() {
+  const g = Math.round(lerp(6, 215, P.vis)), col = `rgb(${g},${g},${g})`;
+  const c = ctx, f = P.facing;
+  const sw = Math.abs(P.vx) > 8 ? Math.sin(P.walkPhase) : 0;
+  c.fillStyle = col; c.strokeStyle = col; c.lineCap = 'round'; c.lineJoin = 'round';
+  c.lineWidth = 3; c.beginPath(); c.moveTo(scarf[0].x, scarf[0].y);
+  for (let i = 1; i < scarf.length; i++) c.lineTo(scarf[i].x, scarf[i].y);
+  c.stroke();
+  if (P.crawling || P.clinging) {
+    const cx = P.x + P.w / 2, by = P.y + P.h;
+    if (P.clinging) { c.save(); c.translate(0, 2 * P.y + P.h); c.scale(1, -1); }   // crawl pose, upside down
+    c.lineWidth = 3.5; c.beginPath();
+    c.moveTo(cx - f * 7, by - 6); c.lineTo(cx - f * (13 - sw * 3), by - 1);
+    c.moveTo(cx - f * 3, by - 6); c.lineTo(cx - f * (6 + sw * 3), by - 1);
+    c.moveTo(cx + f * 7, by - 7); c.lineTo(cx + f * (11 + sw * 3), by - 1);
+    c.stroke();
+    c.beginPath(); c.ellipse(cx, by - 8, 12, 5.5, 0, 0, Math.PI * 2); c.fill();
+    c.beginPath(); c.arc(cx + f * 13, by - 10, 6.5, 0, Math.PI * 2); c.fill();
+    if (P.clinging) c.restore();
+    return;
+  }
+  withLean((cx, by) => {
+    c.lineWidth = 4; c.beginPath();
+    if (P.onGround) {
+      c.moveTo(cx, by - 15); c.lineTo(cx + sw * 8, by - 1);
+      c.moveTo(cx, by - 15); c.lineTo(cx - sw * 8, by - 1);
+      c.moveTo(cx, by - 28); c.lineTo(cx - sw * 7, by - 17);
+      c.moveTo(cx, by - 28); c.lineTo(cx + sw * 7, by - 17);
+    } else {
+      c.moveTo(cx, by - 15); c.lineTo(cx + f * 6, by - 6);
+      c.moveTo(cx, by - 15); c.lineTo(cx - f * 3, by - 3);
+      c.moveTo(cx, by - 28); c.lineTo(cx + f * 9, by - 36);
+      c.moveTo(cx, by - 28); c.lineTo(cx - f * 7, by - 34);
+    }
+    c.stroke();
+    c.beginPath(); c.roundRect(cx - 6.5, by - 32, 13, 19, 5); c.fill();
+    c.beginPath(); c.arc(cx + f * 1.5, by - 38, 7.5, 0, Math.PI * 2); c.fill();
+  });
+}
+function drawEyes() {
+  if (time % 4.3 < 0.12) return;   // blink
+  const f = P.facing;
+  const eyes = (hx, hy) => {
+    ctx.fillStyle = '#fff'; ctx.shadowColor = 'rgba(255,255,255,0.9)'; ctx.shadowBlur = 6;
+    ctx.beginPath(); ctx.ellipse(hx + f * 2.5, hy - 1.5, 1.7, 1.3, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(hx + f * 5.8, hy - 1.8, 1.5, 1.2, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+  };
+  if (P.clinging) eyes(P.x + P.w / 2 + f * 13, P.y + 10);
+  else if (P.crawling) eyes(P.x + P.w / 2 + f * 13, P.y + P.h - 10);
+  else withLean((cx, by) => eyes(cx + f * 1.5, by - 38));
+}
+
+function buildLightmap(cx, cy) {
+  const a = Math.round(TUNE.ambient * 255);
+  lctx.globalCompositeOperation = 'source-over';
+  lctx.fillStyle = `rgb(${a},${a},${a})`; lctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  lctx.globalCompositeOperation = 'lighter';
+  lctx.save(); lctx.translate(-cx, -cy);
+  for (const L of allLights()) if (lightInView(L, cx, cy)) drawLight(lctx, L, 1);
+  lctx.restore();
+}
+
+function drawDebug() {
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+  for (const s of SEGS) { ctx.beginPath(); ctx.moveTo(s.ax, s.ay); ctx.lineTo(s.bx, s.by); ctx.stroke(); }
+  ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+  for (const L of allLights()) {
+    ctx.beginPath(); ctx.moveTo(L.poly[0].x, L.poly[0].y);
+    for (const p of L.poly) ctx.lineTo(p.x, p.y);
+    ctx.closePath(); ctx.stroke();
+  }
+  if (state !== 'title') for (const p of samplePoints()) {
+    const lit = allLights().some(L => lightAt(L, p.x, p.y) > 0);
+    ctx.fillStyle = lit ? '#fff' : '#000'; ctx.strokeStyle = '#fff';
+    ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  }
+}
+
+function drawEye(x, y, o) {
+  const hh = 1 + o * 8;
+  ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(x - 16, y); ctx.quadraticCurveTo(x, y - hh * 2, x + 16, y); ctx.quadraticCurveTo(x, y + hh * 2, x - 16, y);
+  ctx.stroke();
+  if (o > 0.05) {
+    ctx.save(); ctx.clip();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x, y, 4.5, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+}
+function drawHUD() {
+  const x = 28, y = 30, w = 230, h = 8;
+  ctx.font = '11px Georgia, serif'; ctx.letterSpacing = '3px';
+  ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.fillText('DETECTION', x, y - 9);
+  ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 1; ctx.strokeRect(x - 0.5, y - 0.5, w + 1, h + 1);
+  ctx.fillStyle = `rgba(255,255,255,${0.55 + 0.45 * exposure})`; ctx.fillRect(x, y, w * meter, h);
+  ctx.fillStyle = 'rgba(255,255,255,0.45)';
+  for (const t of [METER_SUSPICIOUS, METER_ALERT]) ctx.fillRect(x + w * t, y - 3, 1, h + 6);
+  drawEye(x + w + 32, y + 4, exposure);
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  for (let i = 0; i < STONE.max; i++) {          // stones in your pouch
+    ctx.beginPath(); ctx.arc(x + w + 72 + i * 13, y + 4, 4, 0, Math.PI * 2);
+    if (i < stoneCount) ctx.fill(); else { ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.stroke(); }
+  }
+  ctx.font = '10px Georgia, serif'; ctx.letterSpacing = '2px';
+  if (aiming) { ctx.fillStyle = 'rgba(255,255,255,0.75)'; ctx.fillText('THROW MODE  ·  click to throw  ·  CTRL to cancel', x + w + 112, y + 8); }
+  else if (stoneCount > 0) { ctx.fillStyle = 'rgba(255,255,255,0.3)'; ctx.fillText('CTRL', x + w + 112, y + 8); }
+  ctx.font = '11px Georgia, serif'; ctx.letterSpacing = '3px';
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.fillText(P.hidden && guards.some(g => g.knowsHide) ? 'HE SAW YOU HIDE - GO' : P.hidden ? 'HIDDEN' : exposure > TUNE.exposedThreshold ? 'EXPOSED' : meter > 0 ? 'IN SHADOW' : 'UNSEEN', x, y + 26);
+  ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.fillText('R restart  ·  P pause  ·  G debug', VIEW_W - 24, VIEW_H - 18);
+  ctx.textAlign = 'left'; ctx.letterSpacing = '0px';
+}
+function centerText(s, y, font, alpha, spacing = '0px') {
+  ctx.font = font; ctx.letterSpacing = spacing; ctx.textAlign = 'center';
+  ctx.fillStyle = `rgba(255,255,255,${alpha})`; ctx.fillText(s, VIEW_W / 2, y);
+  ctx.textAlign = 'left'; ctx.letterSpacing = '0px';
+}
+function drawOverlay() {
+  if (state === 'title') {
+    ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+    centerText('SHADOW NINJA', 210, '54px Georgia, serif', 0.92, '14px');
+    centerText('stay out of the light', 250, 'italic 18px Georgia, serif', 0.6);
+    const lines = ['A  D  /  ←  →     run  (loud)   ·   hold SHIFT  to sneak  (silent)',
+                   'SPACE  /  W  /  ↑     jump  ·  into a duct to cling  ·  onto a guard to put him to sleep',
+                   'S  /  ↓     crawl  ·  hide behind furniture  ·  drop from a duct',
+                   'CTRL     throw mode  ·  aim with the mouse, click to throw'];
+    lines.forEach((s, i) => centerText(s, 296 + i * 22, '14px Georgia, serif', 0.5, '2px'));
+    if (Math.sin(time * 3) > -0.3) centerText('press ENTER', 440, '16px Georgia, serif', 0.8, '4px');
+  } else if (state === 'pause') {
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+    centerText('PAUSED', 270, '36px Georgia, serif', 0.85, '10px');
+  } else if (state === 'caught') {
+    ctx.fillStyle = `rgba(255,255,255,${Math.max(0, 1 - stateT * 3)})`; ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+    ctx.fillStyle = `rgba(0,0,0,${Math.min(0.78, stateT * 1.2)})`; ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+    if (stateT > 0.4) {
+      centerText('CAUGHT', 260, '56px Georgia, serif', 0.92, '16px');
+      centerText('the meter filled.   R  to try again', 305, 'italic 16px Georgia, serif', 0.6);
+    }
+  } else if (state === 'escaped') {
+    ctx.fillStyle = `rgba(0,0,0,${Math.min(0.8, stateT)})`; ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+    if (stateT > 0.5) {
+      centerText('OUT', 260, '56px Georgia, serif', 0.92, '16px');
+      centerText('floor cleared - that is the whole prototype for now.   R  to run it again', 305, 'italic 16px Georgia, serif', 0.6);
+    }
+  }
+}
+
+function render() {
+  const cx = Math.round(cam.x), cy = Math.round(cam.y);
+  const showPlayer = state !== 'title';
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+
+  // back to front: fog, far city, mid office wall
+  ctx.fillStyle = fogGrad; ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  ctx.drawImage(farCv, -Math.round(cx * PAR_FAR), -cy);
+  ctx.drawImage(midCv, -Math.round(cx * PAR_MID), -cy);
+
+  // main layer
+  ctx.save(); ctx.translate(-cx, -cy);
+  drawTiles(cx); drawDoor();
+  if (showPlayer && P.hidden) drawNinja();          // hidden: furniture draws over you
+  for (const p of PROPS) drawProp(p);
+  drawFixtures();
+  for (const g of guards) drawGuard(g);
+  if (showPlayer && !P.hidden) drawNinja();
+  ctx.restore();
+
+  // lighting: multiply the lightmap, then a soft haze for visible light shafts
+  buildLightmap(cx, cy);
+  ctx.globalCompositeOperation = 'multiply'; ctx.drawImage(lightCv, 0, 0);
+  ctx.globalCompositeOperation = 'screen';
+  ctx.save(); ctx.translate(-cx, -cy);
+  for (const L of allLights()) if (lightInView(L, cx, cy)) drawLight(ctx, L, 0.2);
+  drawBulbs();
+  ctx.restore();
+  ctx.globalCompositeOperation = 'source-over';
+
+  ctx.save(); ctx.translate(-cx, -cy);
+  drawHints(); drawExitSign();
+  if (showPlayer && P.cover && !P.hidden) {         // nudge: you could hide here
+    ctx.font = '13px Georgia, serif'; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(255,255,255,0.45)';
+    ctx.fillText('↓', P.cover.x * T + PROP_W[P.cover.type] / 2, P.cover.y - 66);
+    ctx.textAlign = 'left';
+  }
+  if (showPlayer) drawEyes();
+  drawNoiseAndStones();
+  drawGuardMarks();
+  if (debug) drawDebug();
+  ctx.restore();
+
+  // foreground silhouettes sweep past faster than the world
+  ctx.drawImage(fgCv, -Math.round(cx * PAR_FG), -cy);
+
+  // aim arc + cursor on top of everything in the world (the system cursor is hidden while playing)
+  ctx.save(); ctx.translate(-cx, -cy); drawAim(); ctx.restore();
+  const cursor = state === 'play' ? 'none' : 'default';
+  if (cv.style.cursor !== cursor) cv.style.cursor = cursor;
+
+  // film grain + vignette (+ heartbeat as the meter climbs)
+  ctx.save(); ctx.globalAlpha = 0.06;
+  ctx.translate(Math.random() * 256 | 0, Math.random() * 256 | 0);
+  ctx.fillStyle = grainPattern; ctx.fillRect(-256, -256, VIEW_W + 256, VIEW_H + 256);
+  ctx.restore();
+  ctx.drawImage(vignetteCv, 0, 0);
+  if (showPlayer && meter > 0.5) {
+    ctx.globalAlpha = (meter - 0.5) * 2 * (0.5 + 0.5 * Math.sin(time * (6 + meter * 6)));
+    ctx.drawImage(vignetteCv, 0, 0); ctx.globalAlpha = 1;
+  }
+
+  if (showPlayer) drawHUD();
+  if (debug) {
+    ctx.font = '11px monospace'; ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.fillText(`fps ${fps.toFixed(0)}  exposure ${exposure.toFixed(2)}  meter ${meter.toFixed(2)}`, 28, VIEW_H - 18);
+  }
+  drawOverlay();
+}
+
+// =====================================================================
+//  LOOP - fixed 60 Hz simulation
+// =====================================================================
+const DT = 1 / 60;
+let acc = 0, last = performance.now(), fps = 60;
+function frame(now) {
+  const elapsed = Math.min(0.1, (now - last) / 1000); last = now;
+  fps = lerp(fps, 1 / Math.max(elapsed, 1e-3), 0.05);
+  acc += elapsed;
+  while (acc >= DT) { step(DT); acc -= DT; }
+  render();
+  requestAnimationFrame(frame);
+}
+startRun(); state = 'title';
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
