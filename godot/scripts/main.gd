@@ -20,6 +20,10 @@ const TUNE := {
 	"gravity": 1800.0, "max_fall": 1100.0,
 	"walk": 140.0, "run": 260.0, "crawl": 70.0, "cling": 80.0,
 	"accel_ground": 1600.0, "accel_air": 900.0,
+	# Limbo-style weight: speed builds slowly, then picks up (seconds to full speed), and eases to a stop
+	"ramp_run": 0.5, "ramp_walk": 0.35, "ramp_crawl": 0.25, "ramp_cling": 0.3,
+	"ramp_floor": 0.15,                         # the first step starts at 15% of full speed
+	"decel": 1400.0,                            # stopping / turning: about 0.2s from a full run
 	"jump_v": 640.0, "jump_cut": 1.2,           # extra gravity while rising with jump released
 	"coyote": 0.08, "jump_buffer": 0.12,
 	"width": 18.0, "stand_h": 44.0, "crawl_h": 20.0,
@@ -33,6 +37,7 @@ const METER_ALERT := 0.65
 
 const GUARD := {
 	"walk": 55.0, "chase": 115.0, "investigate": 85.0,
+	"ramp": 0.7, "decel": 300.0,                # guards are heavier: slower to get going, ease into stops
 	"torch_radius": 330.0, "torch_spread": 0.32, "danger": 1.3,
 	"search_time": 4.0, "end_pause": 1.5, "saw_you_hide": 0.4,
 	"alert_speed": 1.35, "alert_search": 7.0,
@@ -91,6 +96,7 @@ class Player:
 	var coyote := 0.0
 	var jump_buf := 0.0
 	var walk_phase := 0.0
+	var move_t := 0.0        # how long you've been pushing the same way (drives the speed ramp)
 	var lean := 0.0
 	var vis := 0.0
 	var cover := -1          # index into PROPS, -1 = none
@@ -123,6 +129,7 @@ class Guard:
 	var state := "patrol"
 	var pause := 0.0
 	var phase := 0.0
+	var move_t := 0.0
 	var moving := false
 	var search_start := 0.0
 	var search_facing := 1
@@ -716,6 +723,11 @@ func menu_key(code: int) -> void:
 # =====================================================================
 #  PLAYER
 # =====================================================================
+# Speed multiplier after pushing for t seconds: starts at ramp_floor, eases up (smoothstep) to 1 at `secs`.
+static func ramp(t: float, secs: float) -> float:
+	var k := clampf(t / secs, 0.0, 1.0)
+	return TUNE.ramp_floor + (1.0 - TUNE.ramp_floor) * k * k * (3.0 - 2.0 * k)
+
 func can_stand() -> bool:
 	return not rect_hits(P.x, P.y - (TUNE.stand_h - TUNE.crawl_h), P.w, TUNE.stand_h)
 
@@ -739,8 +751,9 @@ func update_cling(dt: float, dir: int) -> bool:
 	if dir != 0:
 		P.facing = dir
 	jump_queued = false
+	P.move_t = P.move_t + dt if dir != 0 and (P.vx == 0 or signf(P.vx) == dir) else 0.0
 	var nx := P.x + dir * TUNE.cling * dt
-	P.vx = dir * TUNE.cling if dir != 0 and grip_over(nx) and not rect_hits(nx, P.y, P.w, P.h) else 0.0
+	P.vx = dir * TUNE.cling * ramp(P.move_t, TUNE.ramp_cling) if dir != 0 and grip_over(nx) and not rect_hits(nx, P.y, P.w, P.h) else 0.0
 	P.x += P.vx * dt
 	P.walk_phase += absf(P.vx) * dt * 0.12
 	P.cover = -1
@@ -771,7 +784,15 @@ func update_player(dt: float) -> void:
 	if dir != 0:
 		P.facing = dir
 	var max_v: float = TUNE.crawl if P.crawling else (TUNE.run if P.running else TUNE.walk)
-	P.vx = move_toward(P.vx, dir * max_v, (TUNE.accel_ground if P.on_ground else TUNE.accel_air) * dt)
+	# pushing the same way (or starting from still) builds the ramp; letting go or turning resets it
+	P.move_t = P.move_t + dt if dir != 0 and (P.vx == 0 or signf(P.vx) == dir) else 0.0
+	if not P.on_ground:
+		P.vx = move_toward(P.vx, dir * max_v, TUNE.accel_air * dt)        # air control unchanged
+	elif dir == 0 or signf(P.vx) == -dir:
+		P.vx = move_toward(P.vx, 0.0, TUNE.decel * dt)                    # ease to a stop / slow before turning
+	else:
+		var ramp_s: float = TUNE.ramp_crawl if P.crawling else (TUNE.ramp_run if P.running else TUNE.ramp_walk)
+		P.vx = move_toward(P.vx, dir * max_v * ramp(P.move_t, ramp_s), TUNE.accel_ground * dt)
 
 	P.coyote = TUNE.coyote if P.on_ground else P.coyote - dt
 	P.jump_buf = TUNE.jump_buffer if jump_queued else P.jump_buf - dt
@@ -1105,13 +1126,18 @@ func update_guard(g: Guard, dt: float) -> void:
 		if absf(target - g.x) < 2:
 			g.state = "patrol"
 	g.moving = false
-	if target != null:
-		var dx: float = clampf(target, g.min_x, g.max_x) - g.x
-		if absf(dx) > 1:
-			g.facing = 1 if dx > 0 else -1
-			g.x += g.facing * minf(absf(dx), speed * dt)
-			g.phase += speed * dt * 0.08
-			g.moving = true
+	var dx: float = clampf(target, g.min_x, g.max_x) - g.x if target != null else 0.0
+	if absf(dx) > 1:
+		var d := 1 if dx > 0 else -1
+		g.move_t = g.move_t + dt if d == g.facing else 0.0              # turning around restarts the ramp
+		g.facing = d
+		var v := speed * ramp(g.move_t, GUARD.ramp)
+		v = minf(v, sqrt(2.0 * GUARD.decel * absf(dx)) + 5.0)          # ease into the stop
+		g.x += d * minf(absf(dx), v * dt)
+		g.phase += v * dt * 0.08
+		g.moving = true
+	else:
+		g.move_t = 0.0
 	# torch: level-ish on patrol, on you in a chase, sweeping in a search
 	var tp := Vector2(g.x + g.facing * 14, g.y - 32)
 	var aim := 0.15
@@ -1311,8 +1337,8 @@ func _selftest() -> void:
 		test_keys = keys
 		guards[0].x = 50 * T
 		guards[0].facing = 1
-		P.x = guards[0].x - 140
-		_run(25)
+		P.x = guards[0].x - 180
+		_run(45)
 		out["noise: " + ("sneak" if keys.has("walk") else "run") + " behind guard"] = guards[0].state
 	# walls block sound
 	test_keys = {}
@@ -1337,6 +1363,35 @@ func _selftest() -> void:
 	while not stone_step(s, 1.0 / 60.0):
 		pass
 	out["aim: predicted vs actual landing x"] = "%.1f vs %.1f" % [pred.x, s.x]
+	# the speed ramp: run from a standstill, then let go
+	start_run()
+	P.x = 39 * T
+	test_keys = {"right": true}
+	var curve := []
+	for i in 36:
+		_run(1)
+		if i % 6 == 5:
+			curve.append(int(P.vx))
+	out["ramp: run speed every 0.1s"] = curve
+	test_keys = {}
+	var x_stop := P.x
+	var frames := 0
+	while P.vx > 0 and frames < 120:
+		_run(1)
+		frames += 1
+	out["ramp: stop from a run"] = "%.2fs, slid %dpx" % [frames / 60.0, P.x - x_stop]
+	guards[0].x = 45 * T
+	guards[0].facing = 1
+	guards[0].pause = 0.0
+	guards[0].move_t = 0.0
+	var gcurve := []
+	var gx: float = guards[0].x
+	for i in 60:
+		_run(1)
+		if i % 15 == 14:
+			gcurve.append(int((guards[0].x - gx) * 4))
+			gx = guards[0].x
+	out["ramp: guard speed every 0.25s"] = gcurve
 	test_keys = null
 	for k in out:
 		print("  ", k, ": ", out[k])

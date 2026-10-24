@@ -31,6 +31,10 @@ const TUNE = {
   gravity: 1800, maxFall: 1100,
   walk: 140, run: 260, crawl: 70, cling: 80,
   accelGround: 1600, accelAir: 900,
+  // Limbo-style weight: speed builds slowly, then picks up (seconds to full speed), and eases to a stop
+  rampRun: 0.5, rampWalk: 0.35, rampCrawl: 0.25, rampCling: 0.3,
+  rampFloor: 0.15,                   // the first step starts at 15% of full speed
+  decel: 1400,                       // stopping / turning: about 0.2s from a full run
   jumpV: 640, jumpCut: 1.2,          // extra gravity while rising with jump released
   coyote: 0.08, jumpBuffer: 0.12,
   width: 18, standH: 44, crawlH: 20,
@@ -407,7 +411,7 @@ let meter = 0, exposure = 0, calm = 0;
 
 function startRun() {
   Object.assign(P, { x: SPAWN.x, y: SPAWN.y, w: TUNE.width, h: TUNE.standH, vx: 0, vy: 0, onGround: false,
-                     facing: 1, crawling: false, running: false, coyote: 0, jumpBuf: 0, walkPhase: 0, lean: 0, vis: 0, cover: null, hidden: false, wasHidden: false, clinging: false });
+                     facing: 1, crawling: false, running: false, coyote: 0, jumpBuf: 0, walkPhase: 0, moveT: 0, lean: 0, vis: 0, cover: null, hidden: false, wasHidden: false, clinging: false });
   guards = GUARD_DEFS.map(makeGuard);
   noises = []; stones = []; stoneCount = STONE.max; aiming = false;
   meter = 0; exposure = 0; calm = 0; jumpQueued = false;
@@ -421,6 +425,11 @@ function rectHits(x, y, w, h) {
   const j0 = Math.floor(y / T), j1 = Math.floor((y + h - 0.001) / T);
   for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) if (solidAt(i, j)) return true;
   return false;
+}
+// Speed multiplier after pushing for t seconds: starts at rampFloor, eases up (smoothstep) to 1 at `secs`.
+function ramp(t, secs) {
+  const k = clamp(t / secs, 0, 1);
+  return TUNE.rampFloor + (1 - TUNE.rampFloor) * k * k * (3 - 2 * k);
 }
 const canStand = () => !rectHits(P.x, P.y - (TUNE.standH - TUNE.crawlH), P.w, TUNE.standH);
 
@@ -436,8 +445,9 @@ function updateCling(dt, dir) {
   }
   if (dir) P.facing = dir;
   jumpQueued = false;
+  P.moveT = dir && (P.vx === 0 || Math.sign(P.vx) === dir) ? P.moveT + dt : 0;
   const nx = P.x + dir * TUNE.cling * dt;
-  P.vx = dir && gripOver(nx) && !rectHits(nx, P.y, P.w, P.h) ? dir * TUNE.cling : 0;
+  P.vx = dir && gripOver(nx) && !rectHits(nx, P.y, P.w, P.h) ? dir * TUNE.cling * ramp(P.moveT, TUNE.rampCling) : 0;
   P.x += P.vx * dt;
   P.walkPhase += Math.abs(P.vx) * dt * 0.12;
   P.cover = null; P.hidden = false; P.running = false; P.onGround = false; P.lean = 0;
@@ -460,7 +470,14 @@ function updatePlayer(dt) {
   P.running = !held.has('walk') && !P.crawling;   // running is the default; Shift sneaks
   if (dir) P.facing = dir;
   const maxV = P.crawling ? TUNE.crawl : P.running ? TUNE.run : TUNE.walk;
-  P.vx = approach(P.vx, dir * maxV, (P.onGround ? TUNE.accelGround : TUNE.accelAir) * dt);
+  // pushing the same way (or starting from still) builds the ramp; letting go or turning resets it
+  P.moveT = dir && (P.vx === 0 || Math.sign(P.vx) === dir) ? P.moveT + dt : 0;
+  if (!P.onGround) P.vx = approach(P.vx, dir * maxV, TUNE.accelAir * dt);                 // air control unchanged
+  else if (!dir || Math.sign(P.vx) === -dir) P.vx = approach(P.vx, 0, TUNE.decel * dt);   // ease to a stop / slow before turning
+  else {
+    const secs = P.crawling ? TUNE.rampCrawl : P.running ? TUNE.rampRun : TUNE.rampWalk;
+    P.vx = approach(P.vx, dir * maxV * ramp(P.moveT, secs), TUNE.accelGround * dt);
+  }
 
   P.coyote = P.onGround ? TUNE.coyote : P.coyote - dt;
   P.jumpBuf = jumpQueued ? TUNE.jumpBuffer : P.jumpBuf - dt;
@@ -637,7 +654,9 @@ function updateStones(dt) {
 //  Patrol → (hears a noise / finds a sleeping guard) Investigate → Search
 //  Land on one he can't see you → Asleep, torch off, for good.
 // =====================================================================
-const GUARD = { walk: 55, chase: 115, investigate: 85, torchRadius: 330, torchSpread: 0.32, danger: 1.3,
+const GUARD = { walk: 55, chase: 115, investigate: 85,
+                ramp: 0.7, decel: 300,                           // heavier: slower to get going, ease into stops
+                torchRadius: 330, torchSpread: 0.32, danger: 1.3,
                 searchTime: 4, endPause: 1.5, sawYouHide: 0.4,   // sawYouHide: seconds of grace
                 alertSpeed: 1.35, alertSearch: 7,                // after finding a sleeping guard
                 wakeAfter: Infinity };   // sleepers never wake. Harder difficulty: seconds until they do
@@ -700,14 +719,15 @@ function updateGuard(g, dt) {
     if (Math.abs(target - g.x) < 2) g.state = 'patrol';
   }
   g.moving = false;
-  if (target !== null) {
-    const dx = clamp(target, g.minX, g.maxX) - g.x;
-    if (Math.abs(dx) > 1) {
-      g.facing = Math.sign(dx);
-      g.x += g.facing * Math.min(Math.abs(dx), speed * dt);
-      g.phase += speed * dt * 0.08; g.moving = true;
-    }
-  }
+  const dx = target !== null ? clamp(target, g.minX, g.maxX) - g.x : 0;
+  if (Math.abs(dx) > 1) {
+    const d = Math.sign(dx);
+    g.moveT = d === g.facing ? (g.moveT || 0) + dt : 0;           // turning around restarts the ramp
+    g.facing = d;
+    const v = Math.min(speed * ramp(g.moveT, GUARD.ramp), Math.sqrt(2 * GUARD.decel * Math.abs(dx)) + 5);  // ease into the stop
+    g.x += d * Math.min(Math.abs(dx), v * dt);
+    g.phase += v * dt * 0.08; g.moving = true;
+  } else g.moveT = 0;
   // torch: level-ish on patrol, on you in a chase, sweeping in a search
   const tx = g.x + g.facing * 14, ty = g.y - 32;
   let aim = 0.15;
