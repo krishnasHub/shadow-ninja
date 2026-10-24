@@ -1,0 +1,182 @@
+"""Builds Shadow Ninja's music: two seamless 60-second loops in D minor, 64 BPM.
+
+    python tools/make_music.py
+
+  godot/audio/music_base.wav     soft and focused: a warm pad, a low drone, sparse plucked notes
+                                 with a soft echo, and a quiet low pulse. Always playing.
+  godot/audio/music_tension.wav  same key, chords and length: a muted bass ostinato, a faint tick
+                                 and a thin high shimmer. The game fades it in as danger rises.
+
+Both versions of the game play these files (the HTML one from godot/audio/). Everything here is
+synthesised with numpy, so the music is original and easy to change: edit, run, replay.
+"""
+import os
+import wave
+import numpy as np
+
+SR = 22050                      # modest quality keeps the files small; the music is soft and dark anyway
+BPM = 64
+BEAT = 60 / BPM                 # 0.9375 s
+LOOP = 16 * 4 * BEAT            # 16 bars = 60 s
+TAIL = 4.0                      # rendered past the loop point, then folded back onto the start (seamless)
+N = int((LOOP + TAIL) * SR)
+t = np.arange(N) / SR
+rng = np.random.default_rng(7)
+
+def hz(note):                   # 'D3', 'Bb2', 'C#4' -> Hz
+    names = {'C': 0, 'C#': 1, 'Db': 1, 'D': 2, 'D#': 3, 'Eb': 3, 'E': 4, 'F': 5, 'F#': 6, 'Gb': 6,
+             'G': 7, 'G#': 8, 'Ab': 8, 'A': 9, 'A#': 10, 'Bb': 10, 'B': 11}
+    name, octave = note[:-1], int(note[-1])
+    return 440.0 * 2 ** ((names[name] + 12 * (octave + 1) - 69) / 12)
+
+def lowpass(x, cutoff):         # one-pole low-pass
+    a = np.exp(-2 * np.pi * cutoff / SR)
+    y = np.empty_like(x)
+    acc = 0.0
+    for i in range(len(x)):
+        acc = (1 - a) * x[i] + a * acc
+        y[i] = acc
+    return y
+
+def reverb(x, seconds=2.6, mix=0.35):   # convolution with a decaying-noise impulse: soft and wide
+    n = int(seconds * SR)
+    ir = rng.standard_normal(n) * np.exp(-np.arange(n) / (SR * seconds / 5.5))
+    ir = lowpass(ir, 2800)
+    ir /= np.sqrt(np.sum(ir ** 2))
+    size = 1 << int(np.ceil(np.log2(len(x) + n)))
+    wet = np.fft.irfft(np.fft.rfft(x, size) * np.fft.rfft(ir, size), size)[:len(x)]
+    return (1 - mix) * x + mix * wet
+
+def place(dst, src, at):        # mix src into dst starting at time `at` (wrapping past the end)
+    i = int(at * SR) % len(dst)
+    end = min(len(dst), i + len(src))
+    dst[i:end] += src[:end - i]
+    if i + len(src) > len(dst):
+        dst[:i + len(src) - len(dst)] += src[end - i:]
+
+# ---------------------------------------------------------------- harmony: 4 chords, 4 bars each
+CHORDS = [
+    ('D2', ['D3', 'F3', 'A3', 'E4']),          # Dm(add9)
+    ('Bb1', ['Bb2', 'D3', 'F3', 'A3']),        # Bbmaj7
+    ('G1', ['G2', 'Bb2', 'D3', 'F3', 'A3']),   # Gm9
+    ('A1', ['A2', 'D3', 'E3', 'G3']),          # A7sus4 - leans back to D
+]
+CHORD_LEN = LOOP / 4
+PENTA = ['D4', 'F4', 'G4', 'A4', 'C5', 'D5', 'F5']
+
+def pad():
+    out = np.zeros(N)
+    for c, (_, notes) in enumerate(CHORDS):
+        start = c * CHORD_LEN - 1.0                     # chords overlap by a second or two
+        dur = CHORD_LEN + 2.5
+        tt = np.arange(int(dur * SR)) / SR
+        env = np.minimum(1, tt / 3.0) * np.minimum(1, (dur - tt) / 3.5)
+        env = np.clip(env, 0, 1) ** 1.5
+        voice = np.zeros(len(tt))
+        for note in notes:
+            f = hz(note)
+            for cents in (-4, 0, 5):                      # three slightly detuned copies: a warm chorus
+                ff = f * 2 ** (cents / 1200)
+                ph = rng.uniform(0, 2 * np.pi)
+                voice += np.sin(2 * np.pi * ff * tt + ph) + 0.22 * np.sin(4 * np.pi * ff * tt + ph) \
+                    + 0.08 * np.sin(6 * np.pi * ff * tt + ph)
+        voice *= env * (1 + 0.15 * np.sin(2 * np.pi * 0.11 * tt))   # a slow breath
+        place(out, voice / len(notes), start)
+    return lowpass(out, 1400)
+
+def drone():
+    swell = 0.75 + 0.25 * np.sin(2 * np.pi * t / LOOP)  # one slow swell per loop (loops cleanly)
+    return (np.sin(2 * np.pi * hz('D2') * t) + 0.5 * np.sin(2 * np.pi * hz('D1') * t)) * swell
+
+def pluck(f, dur=2.4, bright=1.0):                       # kalimba-ish: a sine plus a quick inharmonic ping
+    tt = np.arange(int(dur * SR)) / SR
+    s = np.sin(2 * np.pi * f * tt) * np.exp(-tt / 0.55) + 0.35 * bright * np.sin(2 * np.pi * f * 2.76 * tt) * np.exp(-tt / 0.08)
+    return s * np.minimum(1, tt / 0.004)
+
+def plucks():
+    out = np.zeros(N)
+    step = BEAT / 2
+    for k in range(int(LOOP / step)):
+        bar_pos = k % 16
+        p = 0.32 if bar_pos % 4 == 0 else 0.14           # sparse: more likely on beats
+        if rng.random() < p:
+            chord = CHORDS[int(k * step // CHORD_LEN) % 4][1]
+            tones = [n for n in PENTA if n[:-1] in [c[:-1] for c in chord]] or PENTA
+            note = tones[rng.integers(len(tones))] if rng.random() < 0.75 else PENTA[rng.integers(len(PENTA))]
+            vel = 0.55 + 0.45 * rng.random()
+            place(out, pluck(hz(note)) * vel, k * step + rng.normal(0, 0.01))
+    echo = np.zeros(N)                                   # a soft dotted-eighth echo
+    d = int(0.75 * BEAT * SR)
+    for r in range(1, 4):
+        echo[d * r:] += out[:-d * r] * (0.38 ** r)
+    return out + lowpass(echo, 1800)
+
+def thump(f0=58, dur=0.6):                               # a soft, muffled low pulse
+    tt = np.arange(int(dur * SR)) / SR
+    f = f0 * (1 + 0.6 * np.exp(-tt / 0.03))
+    return np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-tt / 0.16) * np.minimum(1, tt / 0.006)
+
+def pulse():
+    out = np.zeros(N)
+    for b in range(int(LOOP / BEAT)):
+        if b % 2 == 0:
+            place(out, thump() * (1.0 if b % 4 == 0 else 0.6), b * BEAT)
+    return out
+
+# ---------------------------------------------------------------- tension layer
+def bass_note(f, dur):                                   # a muted, filtered pluck an octave low
+    tt = np.arange(int(dur * SR)) / SR
+    saw = 2 * ((f * tt) % 1) - 1
+    return saw * np.exp(-tt / 0.12) * np.minimum(1, tt / 0.005)
+
+def ostinato():
+    out = np.zeros(N)
+    step = BEAT / 2
+    for k in range(int(LOOP / step)):
+        root = CHORDS[int(k * step // CHORD_LEN) % 4][0]
+        f = hz(root) * (2 if k % 8 in (3, 7) else 1)     # a lift on the "and" of 2 and 4
+        place(out, bass_note(f, 0.4) * (1.0 if k % 2 == 0 else 0.7), k * step)
+    return lowpass(out, 420)
+
+def ticks():
+    out = np.zeros(N)
+    step = BEAT / 4
+    click = rng.standard_normal(int(0.012 * SR)) * np.exp(-np.arange(int(0.012 * SR)) / (0.002 * SR))
+    click = click - lowpass(click, 3000)                 # keep only the high part: a dry tick
+    for k in range(int(LOOP / step)):
+        place(out, click * (1.0 if k % 4 == 0 else 0.45), k * step)
+    return out
+
+def shimmer():
+    trem = 0.5 + 0.5 * np.sin(2 * np.pi * 6.4 * t)
+    s = np.zeros(N)
+    for c, (_, notes) in enumerate(CHORDS):              # the chord's top voice, two octaves up, very thin
+        f = hz(notes[-1]) * 2
+        seg = (t >= c * CHORD_LEN) & (t < (c + 1) * CHORD_LEN + 1)
+        s += np.where(seg, np.sin(2 * np.pi * f * t), 0)
+    return lowpass(s * trem, 2500)
+
+# ---------------------------------------------------------------- mix, loop, write
+def fold(x):                                             # wrap the tail back onto the start: seamless loop
+    n = int(LOOP * SR)
+    y = x[:n].copy()
+    y[:len(x) - n] += x[n:]
+    return y
+
+def write(path, x, peak):
+    x = x / np.max(np.abs(x)) * peak
+    pcm = (np.clip(x, -1, 1) * 32767).astype('<i2')
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with wave.open(path, 'wb') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SR)
+        w.writeframes(pcm.tobytes())
+    print(f'{path}: {len(x) / SR:.1f}s, {os.path.getsize(path) / 1e6:.1f} MB')
+
+if __name__ == '__main__':
+    root = os.path.join(os.path.dirname(__file__), '..', 'godot', 'audio')
+    base = reverb(0.55 * pad() + 0.22 * drone() + 0.30 * plucks(), 2.8, 0.4) + 0.32 * pulse()
+    write(os.path.join(root, 'music_base.wav'), fold(base), 0.55)
+    tension = reverb(0.7 * ostinato() + 0.12 * ticks() + 0.10 * shimmer(), 1.6, 0.25)
+    write(os.path.join(root, 'music_tension.wav'), fold(tension), 0.5)

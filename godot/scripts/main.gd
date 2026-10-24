@@ -196,6 +196,14 @@ var font_regular: Font
 var font_italic: Font
 var font_bold: Font
 var _tex_cache := {}
+# music (tools/make_music.py): a soft base loop always playing, and a tension layer in the same key
+# that fades in as danger rises (meter, a guard hunting you, a camera on you). M toggles it.
+var music_base: AudioStreamPlayer
+var music_tension: AudioStreamPlayer
+var music_on := true
+var tension := 0.0
+const MUSIC_BASE_DB := -7.0
+const MUSIC_TENSION_DB := -5.0
 
 # capture mode (dev tool): godot --path . -- --capture=out.png --setup=chase --frames=40
 var _capture := {}
@@ -215,6 +223,7 @@ func _ready() -> void:
 	add_child(camera)
 	camera.make_current()
 	_build_screen_layers()
+	_setup_music()
 	for a in OS.get_cmdline_user_args():
 		var kv: PackedStringArray = a.trim_prefix("--").split("=")
 		if kv.size() == 2:
@@ -235,9 +244,49 @@ func _ready() -> void:
 			_selftest_floor2()
 		elif _capture.selftest == "floor3":
 			_selftest_floor3()
+		elif _capture.selftest == "music":
+			_selftest_music()
 		else:
 			_selftest()
 		get_tree().quit()
+
+func _setup_music() -> void:
+	var players := []
+	for which in ["base", "tension"]:
+		var st := AudioStreamWAV.load_from_file("res://audio/music_%s.wav" % which)   # raw file: no import step needed
+		var p := AudioStreamPlayer.new()
+		if st != null:
+			st.loop_mode = AudioStreamWAV.LOOP_FORWARD
+			st.loop_end = int(st.get_length() * st.mix_rate)
+			p.stream = st
+		add_child(p)
+		players.append(p)
+	music_base = players[0]
+	music_tension = players[1]
+	music_base.volume_db = MUSIC_BASE_DB
+	music_tension.volume_db = -80.0
+	music_base.play()                        # started together, so the two layers stay in step
+	music_tension.play()
+
+# How much danger the music should carry, 0..1.
+func music_danger() -> float:
+	var d := meter * 1.3
+	for g in guards:
+		if g.state == "chase":
+			d = maxf(d, 0.9)
+		elif g.state == "search" or g.state == "investigate":
+			d = maxf(d, 0.45)
+	for L in lights:
+		if L.kind == "camera" and L.seeing:
+			d = maxf(d, 0.7)
+	return clampf(d, 0.0, 1.0)
+
+func update_music(dt: float) -> void:
+	if state == "pause":
+		return                               # hold the mood while paused
+	var target := music_danger() if state == "play" else 0.0
+	tension = move_toward(tension, target, dt * (0.6 if target > tension else 0.2))   # rises quickly, settles slowly
+	music_tension.volume_db = linear_to_db(maxf(tension, 0.0001)) + MUSIC_TENSION_DB
 
 func _make_fonts() -> void:
 	var names := PackedStringArray(["Georgia", "Times New Roman", "serif"])
@@ -683,6 +732,11 @@ func held(k: String) -> bool:
 func _unhandled_input(e: InputEvent) -> void:
 	if e is InputEventKey and e.pressed and not e.echo:
 		var code: int = e.physical_keycode
+		if code == KEY_M:                   # music on / off, anywhere
+			music_on = not music_on
+			music_base.stream_paused = not music_on
+			music_tension.stream_paused = not music_on
+			return
 		if code == KEY_F11:
 			var full := DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN
 			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED if full else DisplayServer.WINDOW_MODE_FULLSCREEN)
@@ -1418,6 +1472,7 @@ func _process(dt: float) -> void:
 	if state != "title" and meter > 0.5:
 		hb = (meter - 0.5) * 2 * (0.5 + 0.5 * sin(time * (6 + meter * 6)))
 	post_mat.set_shader_parameter("heartbeat", hb)
+	update_music(dt)
 	post_mat.set_shader_parameter("seed", randf() * 100.0)
 	for n in draw_nodes:
 		n.queue_redraw()
@@ -1848,4 +1903,35 @@ func _selftest_floor3() -> void:
 	print("  back down the stairs: lower floor at x%.1f after %.1fs" % [P.x / T, down / 60.0])
 	var out := _walk({"right": true}, func(): return state == "escaped", 1500)
 	print("  under the stairs, through the door, out: ", state, " after %.1fs" % (out / 60.0))
+	test_keys = null
+
+
+# Dev tool: music - both loops load and play; the tension layer follows danger; M toggles.
+#   godot_console --headless --path . -- --selftest=music
+func _selftest_music() -> void:
+	print("  loops: base %.0fs, tension %.0fs, playing: %s" % [music_base.stream.get_length(), music_tension.stream.get_length(), music_base.playing and music_tension.playing])
+	start_run(0)
+	test_keys = {}
+	for i in 120:
+		_run(1)
+		update_music(1.0 / 60.0)
+	print("  calm: tension %.2f (%.0f dB)" % [tension, music_tension.volume_db])
+	guards[0].state = "chase"
+	guards[0].seen_t = time
+	for i in 120:
+		guards[0].seen_t = time
+		guards[0].state = "chase"
+		update_music(1.0 / 60.0)
+	print("  a guard chasing for 2s: tension %.2f (%.0f dB)" % [tension, music_tension.volume_db])
+	guards[0].state = "patrol"
+	for i in 300:
+		update_music(1.0 / 60.0)
+	print("  safe again for 5s: tension %.2f" % tension)
+	var ev := InputEventKey.new()
+	ev.physical_keycode = KEY_M
+	ev.pressed = true
+	_unhandled_input(ev)
+	print("  M -> music paused: ", music_base.stream_paused and music_tension.stream_paused)
+	_unhandled_input(ev)
+	print("  M again -> playing: ", not music_base.stream_paused)
 	test_keys = null

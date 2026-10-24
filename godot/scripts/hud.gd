@@ -74,7 +74,7 @@ func _hud() -> void:
 	elif m.meter > 0:
 		status = "IN SHADOW"
 	_text(status, Vector2(x, y + 26), m.font_regular, 11, Color(1, 1, 1, 0.55), 3)
-	draw_string(m.font_regular, Vector2(960 - 24 - 500, 540 - 18), "Esc menu  ·  R restart  ·  F11 fullscreen  ·  G debug",
+	draw_string(m.font_regular, Vector2(960 - 24 - 500, 540 - 18), "Esc menu  ·  R restart  ·  M music  ·  F11 fullscreen  ·  G debug",
 		HORIZONTAL_ALIGNMENT_RIGHT, 500, 11, Color(1, 1, 1, 0.3))
 
 const CONTROLS := [
@@ -85,6 +85,7 @@ const CONTROLS := [
 	["CTRL", "throw mode  -  aim with the mouse, click to throw a stone"],
 	["ESC", "pause menu"],
 	["R    ·    F11", "restart    ·    fullscreen"],
+	["M", "music on / off"],
 ]
 const ABOUT := [
 	"You slipped into a high-security office tower. Now you have to get out.",

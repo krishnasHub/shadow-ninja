@@ -52,6 +52,14 @@ Run it: open `index.html` in a browser (single file, no build).
 - **Cameras** (new on Floor 2): a narrow beam that sweeps (`sweep: [amplitude, period]`), fills the meter (danger 1.5), can't be put to sleep, and is beaten by hiding. When it sees you it calls the nearest awake guard to where you stood (at most every 1.5s). Its status light blinks while watching and goes solid when it sees you.
 - Guards now have a `row` (the tile row they stand on), so they can patrol catwalks.
 
+## Music (both versions)
+- `tools/make_music.py` composes and renders it with numpy (original, reproducible: edit, then `python tools/make_music.py`). Two seamless 60 s loops in D minor at 64 BPM, 22 kHz mono WAV (2.6 MB each) in `godot/audio/`. The HTML version plays the same files.
+  - **base**: warm detuned pad (Dm(add9) - Bbmaj7 - Gm9 - A7sus4, 4 bars each), a low D drone, sparse pentatonic plucks with a dotted-eighth echo, and a soft low pulse on beats 1 and 3. Always on.
+  - **tension**: a muted bass ostinato on the chord roots, a dry 16th tick, and a thin high shimmer. Same chords and length, started together with the base.
+- The tension layer's volume follows danger: meter x 1.3, a chasing guard 0.9, a searching/investigating guard 0.45, a camera on you 0.7. It rises quickly (0.6/s), settles slowly (0.2/s), and holds while paused. Levels: base -7 dB, tension -5 dB at full.
+- **M** toggles the music. In the browser it starts on the first key press or click (browsers block sound before that).
+- Godot loads the WAVs at runtime (`AudioStreamWAV.load_from_file`), so a fresh clone needs no import step. Self-test: `--selftest=music`.
+
 ## Meter rules (current)
 - `exposure` = sum over lights of avg light at 3 body points, capped at 1.
 - Fills at `exposure × fillRate` (0.38/s). After `drainDelay` (1.2s) in full shadow, drains at 0.12/s.
