@@ -52,6 +52,9 @@ func _text(font: Font, pos: Vector2, s: String, size: int, col: Color, center :=
 func layer_width(f: float) -> float:
 	return ceilf(960 + (m.LW * T - 960) * f) + 60
 
+func layer_height(f: float) -> float:              # tall floors: layers drift vertically at factor f
+	return ceilf(540 + (m.LH * T - 540) * f) + 60
+
 # =====================================================================
 #  PARALLAX LAYERS - far city, mid office wall, foreground (drawn once)
 # =====================================================================
@@ -66,6 +69,7 @@ func _fog() -> void:
 
 func _far() -> void:
 	var w := layer_width(0.18)
+	var hh := layer_height(0.2)
 	var r := RandomNumberGenerator.new()
 	r.seed = 11
 	draw_circle(Vector2(w * 0.62, 120), 34, grey(0xec))
@@ -73,14 +77,14 @@ func _far() -> void:
 	while x < w:
 		var bw := 30 + r.randf() * 70
 		var bh := 60 + r.randf() * 120
-		draw_rect(Rect2(x, 470 - bh, bw, bh + 80), grey(0xbd))
+		draw_rect(Rect2(x, 470 - bh, bw, hh - 470 + bh), grey(0xbd))
 		x += bw + r.randf() * 6
 	x = -30.0
 	while x < w:
 		var bw := 40 + r.randf() * 90
 		var bh := 120 + r.randf() * 250
 		var top := 470 - bh
-		draw_rect(Rect2(x, top, bw, bh + 80), grey(0x9a))
+		draw_rect(Rect2(x, top, bw, hh - top), grey(0x9a))
 		if r.randf() < 0.25:
 			draw_rect(Rect2(x + bw / 2 - 1, top - 40, 2, 40), grey(0x9a))
 		if r.randf() < 0.55:
@@ -96,17 +100,20 @@ func _far() -> void:
 
 func _mid() -> void:
 	var w := layer_width(0.5)
+	var hh := layer_height(0.5)
 	var r := RandomNumberGenerator.new()
 	r.seed = 23
 	var x := 0.0
 	while x < w:                                    # glass-wall mullions
-		draw_rect(Rect2(x, 0, 7, 540), grey(0x4c))
+		draw_rect(Rect2(x, 0, 7, hh), grey(0x4c))
 		x += 150
-	draw_rect(Rect2(0, 90, w, 5), grey(0x4c))
-	draw_rect(Rect2(0, 440, w, 5), grey(0x4c))
+	var ty := 90.0
+	while ty < hh:                                  # transoms, every storey
+		draw_rect(Rect2(0, ty, w, 5), grey(0x4c))
+		ty += 350
 	x = 260.0
 	while x < w:                                    # structural columns
-		draw_rect(Rect2(x, 0, 44, 540), grey(0x40))
+		draw_rect(Rect2(x, 0, 44, hh), grey(0x40))
 		x += 560 + r.randf() * 120
 	x = 80.0
 	var col := grey(0x45)
@@ -174,15 +181,30 @@ func _stage() -> void:
 	for j in m.LH:
 		for i in m.LW:
 			if m.grid[j * m.LW + i] == m.GRIP:
-				if i % 3 == 0:
-					draw_rect(Rect2(i * T + 14, 2 * T, 3, j * T - 2 * T), tile)
+				if i % 3 == 0:                      # hanger rod up to whatever is above
+					var top: int = j - 1
+					while top > 0 and m.grid[top * m.LW + i] == 0:
+						top -= 1
+					draw_rect(Rect2(i * T + 14, (top + 1) * T, 3, (j - top - 1) * T), tile)
 				var k := 4
 				while k < T:
 					draw_rect(Rect2(i * T + k, j * T + 6, 2, T - 12), grey(0x26))
 					k += 8
-	# door
-	draw_rect(Rect2(m.door_x * T + 4, 12 * T + 4, 2 * T - 8, 3 * T - 4), grey(0x2a))
-	draw_rect(Rect2(m.door_x * T + 46, 12 * T + 50, 6, 3), tile)
+	# exit door
+	var ey: float = (m.exit_row - 3) * T
+	draw_rect(Rect2(m.door_x * T + 4, ey + 4, 2 * T - 8, 3 * T - 4), grey(0x2a))
+	draw_rect(Rect2(m.door_x * T + 46, ey + 50, 6, 3), tile)
+	for d in m.doors:                               # security doors: banded steel while locked, an empty frame once open
+		var r := Rect2(d.x * T, d.y * T, d.w * T, d.h * T)
+		if not d.open:
+			draw_rect(r, grey(0x1e))
+			var by := r.position.y + 10
+			while by < r.end.y - 6:
+				draw_rect(Rect2(r.position.x + 3, by, r.size.x - 6, 3), grey(0x14))
+				by += 16
+		else:
+			draw_rect(Rect2(r.position.x, r.position.y, 4, r.size.y), tile)
+			draw_rect(Rect2(r.end.x - 4, r.position.y, 4, r.size.y), tile)
 	for p in m.props:
 		_prop(p)
 	for L in m.lights:                              # lamp shades
@@ -212,6 +234,12 @@ func _prop(p: Dictionary) -> void:
 			draw_rect(Rect2(x + 2, y - 40, 22, 40), c)
 			draw_rect(Rect2(x + 10, y - 44, 6, 4), c)
 			_ellipse(Vector2(x + 13, y - 56), 10, 13, 0, c)
+		"rack":                                     # server rack: tall, slotted
+			draw_rect(Rect2(x, y - 92, 40, 92), c)
+			var sy := y - 84
+			while sy < y - 6:
+				draw_rect(Rect2(x + 4, sy, 32, 2), grey(0x22))
+				sy += 12
 		"chair":
 			draw_rect(Rect2(x, y - 20, 22, 4), c)
 			draw_rect(Rect2(x + 18, y - 40, 4, 22), c)
@@ -222,6 +250,11 @@ func _prop(p: Dictionary) -> void:
 #  ACTORS - guards and the ninja (lit by the lights)
 # =====================================================================
 func _actors() -> void:
+	for sw in m.switches:                           # levers: a plate on the wall, the handle swings down when pulled
+		var piv := Vector2(sw.x * T, sw.row * T - 35)
+		draw_rect(Rect2(piv.x - 6, piv.y - 12, 12, 24), grey(0x1a))
+		_limb(piv, m.lever_knob(sw), 3.0, grey(0x10))
+		draw_circle(m.lever_knob(sw), 3.5, grey(0x10))
 	for L in m.lights:                              # security cameras: housing on the ceiling, lens follows the sweep
 		if L.kind == "camera":
 			draw_rect(Rect2(L.pos.x - 3, 2 * T, 6, 4), grey(0x12))
@@ -283,7 +316,13 @@ func _ninja() -> void:
 		draw_set_transform_matrix(Transform2D.IDENTITY)
 		return
 	draw_set_transform_matrix(lean_tr(cx, by, P.lean))
-	if P.on_ground:
+	if P.flip_sw >= 0:                              # pulling a lever: one hand on the knob
+		var knob: Vector2 = m.lever_knob(m.switches[P.flip_sw])
+		_limb(Vector2(cx, by - 15), Vector2(cx + 3, by - 1), 4, col)
+		_limb(Vector2(cx, by - 15), Vector2(cx - 4, by - 1), 4, col)
+		_limb(Vector2(cx, by - 28), Vector2(cx - f * 4, by - 17), 4, col)
+		_limb(Vector2(cx, by - 28), knob, 4, col)
+	elif P.on_ground:
 		_limb(Vector2(cx, by - 15), Vector2(cx + sw * 8, by - 1), 4, col)
 		_limb(Vector2(cx, by - 15), Vector2(cx - sw * 8, by - 1), 4, col)
 		_limb(Vector2(cx, by - 28), Vector2(cx - sw * 7, by - 17), 4, col)
@@ -310,6 +349,17 @@ func _overlay() -> void:
 			var led: Vector2 = L.pos + Vector2.from_angle(L.dir) * 2.0
 			draw_circle(led, 5.0 if L.seeing else 3.0, Color(1, 1, 1, 0.25))
 			draw_circle(led, 2.0, Color(1, 1, 1, 0.95 if L.seeing else 0.6))
+	for d in m.doors:                               # lock light: blinks while locked, dark once open
+		if not d.open and fmod(m.time, 1.2) < 0.6:
+			var lp := Vector2(d.x * T + d.w * T / 2.0, d.y * T - 8)
+			draw_circle(lp, 5.0, Color(1, 1, 1, 0.2))
+			draw_circle(lp, 2.0, Color(1, 1, 1, 0.85))
+	for p in m.props:                               # server racks: little status lights
+		if p.type == "rack":
+			for k in 6:
+				var on := fmod(m.time * (0.7 + k * 0.23) + p.x * 1.7 + k * 0.37, 1.0) < 0.55
+				if on:
+					draw_circle(Vector2(p.x * T + 8 + (k % 3) * 11, p.y - 78 + (k / 3) * 36), 1.3, Color(1, 1, 1, 0.55))
 	var sign = null                                 # exit sign
 	for L in m.lights:
 		if L.kind == "sign":

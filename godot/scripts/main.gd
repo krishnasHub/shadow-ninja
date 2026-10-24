@@ -13,8 +13,8 @@ const Levels := preload("res://scripts/levels.gd")
 const VIEW_W := 960.0
 const VIEW_H := 540.0
 const T := 32
-const LH := 17
 const GRIP := 2
+const DOOR := 3                 # a locked door: solid until its switch is pulled
 
 const TUNE := {
 	"gravity": 1800.0, "max_fall": 1100.0,
@@ -31,6 +31,8 @@ const TUNE := {
 	"fill_rate": 0.38,                          # meter per second at full exposure
 	"drain_delay": 1.2, "drain_rate": 0.12,
 	"exposed_threshold": 0.03,
+	"land_noise_v": 600.0,                      # landings faster than this are loud (drops of up to 3 tiles are quiet)
+	"flip_time": 0.65,                          # pulling a lever: the ninja stops, reaches, pulls
 }
 const METER_SUSPICIOUS := 0.35
 const METER_ALERT := 0.65
@@ -43,7 +45,7 @@ const GUARD := {
 	"alert_speed": 1.35, "alert_search": 7.0,
 	"wake_after": INF,                          # sleepers never wake. Harder difficulty: seconds
 }
-const NOISE := {"run": 150.0, "land": 120.0, "stone": 280.0, "thud": 140.0}
+const NOISE := {"run": 150.0, "land": 120.0, "stone": 280.0, "thud": 140.0, "lever": 230.0}
 const STONE := {"max": 3, "max_speed": 700.0, "gravity": 1400.0, "r": 3.0}
 
 const STOPS_LAMP := [[0.0, 1.0], [0.5, 0.85], [0.8, 0.5], [1.0, 0.0]]
@@ -52,7 +54,7 @@ const CONE_SOFT := [1.0]               # one hard-edged cone, for render AND det
 										# ([0.82, 1.0, 1.15] = the HTML version's soft edge)
 const LIGHT_TEX := 512                 # high enough that the cone edge stays crisp when scaled up
 
-const PROP_W := {"desk": 70.0, "plant": 26.0, "cooler": 26.0}
+const PROP_W := {"desk": 70.0, "plant": 26.0, "cooler": 26.0, "rack": 40.0}
 class Player:
 	var x := 0.0
 	var y := 0.0
@@ -74,6 +76,8 @@ class Player:
 	var cover := -1          # index into props, -1 = none
 	var hidden := false
 	var was_hidden := false
+	var flip_sw := -1         # pulling this switch (index), -1 = not
+	var flip_t := 0.0
 
 class Lt:
 	var kind := "lamp"
@@ -141,6 +145,11 @@ class NoiseEvent:
 # ---------- state ----------
 # ---------- the current floor (loaded from levels.gd) ----------
 var LW := 100                   # this floor's width in tiles
+var LH := 17                    # ...and height (taller floors scroll vertically)
+var exit_row := 15              # the tile row the exit door stands on
+var switches: Array = []        # {x, row, door, on, anim}: walk up to one and the ninja pulls it
+var doors: Array = []           # {x, y, w, h, open}: DOOR tiles until their switch is pulled
+var occ_nodes: Array = []       # light occluders (rebuilt when a door opens)
 var level_idx := 0
 var level: Dictionary = {}
 var props: Array = []           # {type, x (tiles), y (px: the surface it stands on)}
@@ -224,6 +233,8 @@ func _ready() -> void:
 			_selftest_quit()
 		elif _capture.selftest == "floor2":
 			_selftest_floor2()
+		elif _capture.selftest == "floor3":
+			_selftest_floor3()
 		else:
 			_selftest()
 		get_tree().quit()
@@ -253,9 +264,9 @@ func _add_draw(kind: String, parent: Node, z: int, unshaded := false) -> Node2D:
 
 func build_layers() -> void:
 	# back to front: fog (fixed), far city, mid office wall - all lit by the lights like the HTML lightmap
-	for spec in [["fog", 0.0, -10], ["far", 0.18, -9], ["mid", 0.5, -8]]:
+	for spec in [["fog", 0.0, -10, 0.0], ["far", 0.18, -9, 0.2], ["mid", 0.5, -8, 0.5]]:
 		var px := Parallax2D.new()
-		px.scroll_scale = Vector2(spec[1], 1.0)
+		px.scroll_scale = Vector2(spec[1], spec[3])
 		add_child(px)
 		static_nodes.append(_add_draw(spec[0], px, spec[2]))
 	# main layer
@@ -264,7 +275,7 @@ func build_layers() -> void:
 	draw_nodes.append(_add_draw("actors", self, 1))
 	# foreground silhouettes sweep past faster than the world
 	var fg := Parallax2D.new()
-	fg.scroll_scale = Vector2(1.35, 1.0)
+	fg.scroll_scale = Vector2(1.35, 0.0)
 	add_child(fg)
 	static_nodes.append(_add_draw("fg", fg, 20, true))
 
@@ -309,14 +320,17 @@ func load_level(idx: int) -> void:
 	level_idx = idx
 	level = Levels.LEVELS[idx]
 	LW = level.width
+	LH = level.get("height", 17)
+	exit_row = level.get("exit_row", 15)
 	for n in level_nodes:
 		n.queue_free()
 	level_nodes.clear()
+	occ_nodes.clear()
 	lights.clear()
 	grid.resize(LW * LH)
 	grid.fill(0)
 	fill(0, 0, LW, 2)                   # ceiling
-	fill(0, 15, LW, 2)                  # floor
+	fill(0, LH - 2, LW, 2)              # floor
 	fill(0, 0, 1, LH)                   # outer walls
 	fill(LW - 1, 0, 1, LH)
 	for r in level.solids:
@@ -325,6 +339,13 @@ func load_level(idx: int) -> void:
 		fill(r[0], r[1], r[2], r[3], 0)
 	for r in level.ducts:
 		fill(r[0], r[1], r[2], r[3], GRIP)
+	doors = []
+	for r in level.get("doors", []):
+		fill(r[0], r[1], r[2], r[3], DOOR)
+		doors.append({"x": r[0], "y": r[1], "w": r[2], "h": r[3], "open": false})
+	switches = []
+	for sw in level.get("switches", []):
+		switches.append({"x": sw.x, "row": sw.row, "door": sw.door, "on": false, "anim": 0.0})
 	props = []
 	for p in level.props:
 		props.append({"type": p[0], "x": float(p[1]), "y": float(p[2] * T)})
@@ -336,6 +357,19 @@ func load_level(idx: int) -> void:
 	build_segments()
 	build_occluders()
 	build_lights()
+	for n in static_nodes:
+		n.queue_redraw()
+
+# A door opens: its tiles go, and the light geometry is rebuilt around the gap.
+func open_door(i: int) -> void:
+	var d: Dictionary = doors[i]
+	d.open = true
+	fill(d.x, d.y, d.w, d.h, 0)
+	build_segments()
+	for n in occ_nodes:
+		n.queue_free()
+	occ_nodes.clear()
+	build_occluders()
 	for n in static_nodes:
 		n.queue_redraw()
 
@@ -415,6 +449,7 @@ func build_occluders() -> void:
 			occ.occluder = op
 			add_child(occ)
 			level_nodes.append(occ)
+			occ_nodes.append(occ)
 
 # Ray (p + t*d) vs segment a-b; returns t (in units of d) or INF.
 static func ray_seg(p: Vector2, d: Vector2, a: Vector2, b: Vector2) -> float:
@@ -547,7 +582,7 @@ func build_lights() -> void:
 				var o := Vector2(cx - 150, -420)
 				L = make_light("moon", o, atan2(2 * T - o.y, cx - o.x), 0.3, 1150, 0.45, STOPS_FLAT)
 			"sign":
-				L = make_light("sign", Vector2(d.x * T, 11 * T + 20), 0.0, PI, 170, 0.35)
+				L = make_light("sign", Vector2(d.x * T, (exit_row - 4) * T + 20), 0.0, PI, 170, 0.35)
 			_:                          # lamp / camera: on the ceiling unless a y is given
 				var y: float = d.y * T if d.has("y") else ceil_y
 				L = make_light(d.kind, Vector2(d.x * T, y), d.get("dir", PI / 2), d.spread, d.radius,
@@ -604,7 +639,7 @@ func light_at(L: Lt, p: Vector2) -> float:
 #  RUN STATE
 # =====================================================================
 func start_run(idx := -1) -> void:
-	if idx >= 0 and idx != level_idx:
+	if idx >= 0:
 		load_level(idx)
 	P = Player.new()
 	P.x = spawn.x
@@ -627,6 +662,7 @@ func start_run(idx := -1) -> void:
 	aiming = false
 	reset_scarf()
 	cam.x = clampf(P.x - VIEW_W * 0.4, 0, LW * T - VIEW_W)
+	cam.y = clampf(P.y + P.h / 2 - VIEW_H * 0.55, 0, LH * T - VIEW_H)
 	state = "play"
 	state_t = 0.0
 	level_t = 0.0
@@ -682,12 +718,20 @@ func _unhandled_input(e: InputEvent) -> void:
 			var q := quit_item_at(get_viewport().get_mouse_position())
 			if q >= 0:
 				quit_sel = q
+		elif in_menu() and menu_page == "levels":
+			var l := level_item_at(get_viewport().get_mouse_position())
+			if l >= 0:
+				level_sel = l
 	elif e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT:
 		if in_menu():
 			if menu_page == "quit":
 				var q := quit_item_at(get_viewport().get_mouse_position())
 				if q >= 0:
 					quit_choose(q)
+			elif menu_page == "levels":
+				var l := level_item_at(get_viewport().get_mouse_position())
+				if l >= 0:
+					start_run(l)
 			elif menu_page != "":
 				menu_page = ""
 			else:
@@ -705,7 +749,9 @@ func _unhandled_input(e: InputEvent) -> void:
 const MENU_Y := 280.0           # first item's baseline; hud.gd draws the items at the same spots
 const MENU_DY := 40.0
 var menu_sel := 0
-var menu_page := ""             # "" = the list, or "about" / "controls" / "quit"
+var menu_page := ""             # "" = the list, or "levels" / "about" / "controls" / "quit"
+var level_sel := 0              # Levels page: which floor is highlighted
+const LEVELS_Y := 250.0         # Levels page: first floor's baseline (hud.gd draws at the same spots)
 var quit_sel := 0               # "Are you sure?": 0 = No (the default), 1 = Yes
 const QUIT_Y := 310.0           # No / Yes baseline; hud.gd draws them at QUIT_X
 const QUIT_X := [400.0, 560.0]
@@ -715,8 +761,8 @@ func in_menu() -> bool:
 
 func menu_items() -> Array:
 	if state == "pause":
-		return ["Resume", "New Game", "About", "Controls", "Quit"]
-	return ["New Game", "About", "Controls", "Quit"]
+		return ["Resume", "New Game", "Levels", "About", "Controls", "Quit"]
+	return ["New Game", "Levels", "About", "Controls", "Quit"]
 
 func menu_item_at(p: Vector2) -> int:
 	for i in menu_items().size():
@@ -738,6 +784,9 @@ func menu_activate(i: int) -> void:
 			state = "play"
 		"New Game":
 			start_run(0)
+		"Levels":                           # pick any floor (a dev convenience for now)
+			menu_page = "levels"
+			level_sel = level_idx
 		"About":
 			menu_page = "about"
 		"Controls":
@@ -745,6 +794,13 @@ func menu_activate(i: int) -> void:
 		"Quit":
 			menu_page = "quit"
 			quit_sel = 0
+
+func level_item_at(p: Vector2) -> int:
+	for i in Levels.LEVELS.size():
+		var y := LEVELS_Y + i * MENU_DY
+		if absf(p.x - VIEW_W / 2) < 220 and p.y > y - 28 and p.y < y + 10:
+			return i
+	return -1
 
 func quit_item_at(p: Vector2) -> int:
 	for i in 2:
@@ -770,6 +826,18 @@ func menu_key(code: int) -> void:
 			KEY_N, KEY_ESCAPE, KEY_BACKSPACE:
 				quit_choose(0)
 		return
+	if menu_page == "levels":               # ↑ ↓ choose a floor, Enter plays it, Esc back
+		var n := Levels.LEVELS.size()
+		match code:
+			KEY_UP, KEY_W:
+				level_sel = (level_sel - 1 + n) % n
+			KEY_DOWN, KEY_S:
+				level_sel = (level_sel + 1) % n
+			KEY_ENTER, KEY_KP_ENTER, KEY_SPACE:
+				start_run(level_sel)
+			KEY_ESCAPE, KEY_BACKSPACE:
+				menu_page = ""
+		return
 	if menu_page != "":                     # About / Controls: any of these goes back
 		if code in [KEY_ESCAPE, KEY_ENTER, KEY_KP_ENTER, KEY_SPACE, KEY_BACKSPACE]:
 			menu_page = ""
@@ -793,6 +861,27 @@ func menu_key(code: int) -> void:
 static func ramp(t: float, secs: float) -> float:
 	var k := clampf(t / secs, 0.0, 1.0)
 	return TUNE.ramp_floor + (1.0 - TUNE.ramp_floor) * k * k * (3.0 - 2.0 * k)
+
+# Pulling a lever: stand still, reach, pull it down (the handle swings), clunk - the door unlocks.
+func update_flip(dt: float) -> void:
+	var sw: Dictionary = switches[P.flip_sw]
+	P.flip_t += dt
+	P.vx = 0.0
+	P.move_t = 0.0
+	jump_queued = false
+	var k := clampf((P.flip_t - 0.12) / 0.3, 0.0, 1.0)
+	sw.anim = k * k * (3.0 - 2.0 * k)
+	if k >= 1.0 and not sw.on:
+		sw.on = true
+		open_door(sw.door)
+		make_noise(sw.x * T, sw.row * T - 30, NOISE.lever)          # the clunk carries
+	if P.flip_t >= TUNE.flip_time:
+		P.flip_sw = -1
+
+# Where the lever's knob is (handle swings from up to down as anim goes 0 -> 1).
+func lever_knob(sw: Dictionary) -> Vector2:
+	var a := lerpf(-PI / 2 + 0.55, PI / 2 - 0.55, sw.anim)
+	return Vector2(sw.x * T, sw.row * T - 35) + Vector2.from_angle(a) * 16.0
 
 func can_stand() -> bool:
 	return not rect_hits(P.x, P.y - (TUNE.stand_h - TUNE.crawl_h), P.w, TUNE.stand_h)
@@ -837,6 +926,9 @@ func update_player(dt: float) -> void:
 		P.facing = 1 if aim_target().x >= P.x + P.w / 2 else -1
 	if P.clinging and update_cling(dt, dir):
 		return
+	if P.flip_sw >= 0:
+		update_flip(dt)
+		return
 	var want_crawl := held("down")
 	if want_crawl and P.on_ground and not P.crawling:
 		P.y += TUNE.stand_h - TUNE.crawl_h
@@ -874,8 +966,13 @@ func update_player(dt: float) -> void:
 	# move X, then Y, resolving against tiles
 	P.x += P.vx * dt
 	if rect_hits(P.x, P.y, P.w, P.h):
-		P.x = floorf((P.x + P.w - 0.001) / T) * T - P.w if P.vx > 0 else (floorf(P.x / T) + 1) * T
-		P.vx = 0.0
+		# stairs: a one-tile step at your feet is walked up, not bumped into
+		var up := floorf((P.y + P.h - 0.001) / T) * T - P.h
+		if P.on_ground and not P.crawling and P.y - up <= T + 0.5 and not rect_hits(P.x, up, P.w, P.h):
+			P.y = up
+		else:
+			P.x = floorf((P.x + P.w - 0.001) / T) * T - P.w if P.vx > 0 else (floorf(P.x / T) + 1) * T
+			P.vx = 0.0
 	var was_on_ground := P.on_ground
 	var impact_v := P.vy
 	P.on_ground = false
@@ -892,7 +989,7 @@ func update_player(dt: float) -> void:
 				start_cling()
 				return
 	# a hard landing is loud unless you're sneaking (Shift)
-	if P.on_ground and not was_on_ground and impact_v > 450 and not held("walk"):
+	if P.on_ground and not was_on_ground and impact_v > TUNE.land_noise_v and not held("walk"):
 		make_noise(P.x + P.w / 2, P.y + P.h, NOISE.land)
 
 	# hiding: ducked behind furniture with your middle inside its footprint
@@ -905,6 +1002,16 @@ func update_player(dt: float) -> void:
 				P.cover = i
 				break
 	P.hidden = P.cover >= 0 and P.crawling
+	# walk up to a lever and the ninja pulls it himself
+	if P.on_ground and not P.crawling:
+		for i in switches.size():
+			var sw: Dictionary = switches[i]
+			if not sw.on and absf(mid - (sw.x * T)) < 14 and absf(P.y + P.h - sw.row * T) < 4:
+				P.flip_sw = i
+				P.flip_t = 0.0
+				P.vx = 0.0
+				P.lean = 0.0
+				break
 
 	var moving := absf(P.vx) > 8
 	var prev_phase := P.walk_phase
@@ -1296,7 +1403,9 @@ func _physics_process(dt: float) -> void:
 	level_t += dt
 	var target := clampf(P.x + P.w / 2 - VIEW_W * 0.45 + P.facing * 70, 0, LW * T - VIEW_W)
 	cam.x = lerpf(cam.x, target, 1 - exp(-dt * 4))
-	if state == "play" and P.x + P.w > exit_x:
+	var target_y := clampf(P.y + P.h / 2 - VIEW_H * 0.55, 0, LH * T - VIEW_H)   # tall floors scroll vertically
+	cam.y = lerpf(cam.y, target_y, 1 - exp(-dt * 3))
+	if state == "play" and P.x + P.w > exit_x and absf(P.y + P.h - exit_row * T) < T:
 		state = "escaped"
 		state_t = 0.0
 
@@ -1345,6 +1454,21 @@ func _capture_setup(setup: String) -> void:
 			start_run(1)
 			P.x = 84 * T
 			guards[3].x = 104 * T
+		"floor3":
+			start_run(2)
+			P.x = 24 * T
+			level_t = 9.0
+		"stairs":
+			start_run(2)
+			P.x = 35 * T
+			P.y = 17 * T - P.h
+			level_t = 9.0
+		"lever":
+			start_run(2)
+			P.x = 96.5 * T - 9                  # right at the lever: the pull starts on the first frame
+			P.y = 12 * T - P.h
+			P.facing = 1
+			level_t = 9.0
 		"lamp":
 			start_run()
 			P.x = 13.2 * T
@@ -1576,6 +1700,13 @@ func _selftest_menu() -> void:
 	state = "caught"
 	press.call(KEY_ESCAPE)
 	print("  caught + Esc -> state: ", state)
+	menu_sel = menu_items().find("Levels")
+	press.call(KEY_ENTER)
+	print("  Levels -> page: ", menu_page, ", floors listed: ", Levels.LEVELS.size())
+	press.call(KEY_DOWN)
+	press.call(KEY_DOWN)
+	press.call(KEY_ENTER)
+	print("  ↓ ↓ Enter -> ", state, " on ", level.name, " (", level.subtitle, ")")
 
 # Dev tool: the "Are you sure?" quit page.  godot_console --headless --path . -- --selftest=quit
 func _selftest_quit() -> void:
@@ -1585,12 +1716,12 @@ func _selftest_quit() -> void:
 		ev.pressed = true
 		_unhandled_input(ev)
 	open_menu("title")
-	menu_sel = 3
+	menu_sel = menu_items().find("Quit")
 	press.call(KEY_ENTER)
 	print("  Quit -> page: ", menu_page, ", default: ", "No" if quit_sel == 0 else "Yes")
 	press.call(KEY_ENTER)
 	print("  Enter on No -> page: '", menu_page, "', still running: ", not get_tree().is_queued_for_deletion())
-	menu_sel = 3
+	menu_sel = menu_items().find("Quit")
 	press.call(KEY_ENTER)
 	press.call(KEY_RIGHT)
 	print("  → -> selected: ", "No" if quit_sel == 0 else "Yes")
@@ -1637,6 +1768,9 @@ func _selftest_floor2() -> void:
 		if L.kind == "camera":
 			cam_l = L
 	start_run(1)
+	for L in lights:                       # the floor was reloaded: find its camera again
+		if L.kind == "camera":
+			cam_l = L
 	guards[3].x = 108 * T
 	P.x = 90 * T
 	var seen_t := -1.0
@@ -1650,6 +1784,9 @@ func _selftest_floor2() -> void:
 			called.append(guards.find(g))
 	print("  standing under the camera: seen after %.1fs, guards called: %s, meter %.2f" % [seen_t, called, meter])
 	start_run(1)
+	for L in lights:
+		if L.kind == "camera":
+			cam_l = L
 	P.x = 81 * T + 4
 	P.y = 15 * T - TUNE.crawl_h
 	P.h = TUNE.crawl_h
@@ -1660,4 +1797,55 @@ func _selftest_floor2() -> void:
 		_run(1)
 		ever = ever or cam_l.seeing
 	print("  hidden behind the cooler for a full sweep: seen? ", ever, ", meter %.2f" % meter)
+	test_keys = null
+
+
+# Dev tool: floor 3 - the whole route with the guards asleep: stairs up, the lever (pulled
+# automatically), back down, under the stairs, through the door, out.
+#   godot_console --headless --path . -- --selftest=floor3
+func _walk(keys: Dictionary, until: Callable, max_frames := 900) -> int:
+	test_keys = keys
+	for i in max_frames:
+		if keys.has("jump"):
+			jump_queued = true
+		_run(1)
+		meter = 0.0                          # route test: getting there, not getting caught
+		if until.call():
+			test_keys = {}
+			return i
+	test_keys = {}
+	return -1
+
+func _sleep_all() -> void:
+	for g in guards:
+		g.state = "asleep"
+		g.torch.level = 0.0
+
+func _selftest_floor3() -> void:
+	start_run(2)
+	_sleep_all()
+	print("  ", level.name, " (", level.subtitle, "): ", LW, "x", LH, " tiles, door locked: ", not doors[0].open)
+	P.x = 45 * T
+	_walk({"right": true}, func(): return false, 240)
+	print("  walk right on the lower floor: stopped at x%.1f (the door is at 60)" % ((P.x + P.w) / T))
+	start_run(2)
+	_sleep_all()
+	P.x = 27 * T
+	_walk({"right": true}, func(): return P.on_ground and P.x > 29 * T and P.y + P.h < 24 * T - 1, 120)
+	print("  onto the crate: row %.0f" % ((P.y + P.h) / T))
+	_walk({"right": true, "jump": true}, func(): return P.on_ground and P.x > 31 * T and P.y + P.h <= 21 * T + 1, 60)
+	print("  hop to the first step: row %.0f" % ((P.y + P.h) / T))
+	var up := _walk({"right": true}, func(): return P.on_ground and P.y + P.h <= 12 * T + 1 and P.x > 41 * T)
+	print("  walk up the stairs: reached row %.0f in %.1fs, camera y %.0f" % [(P.y + P.h) / T, up / 60.0, cam.y])
+	var pulled := _walk({"right": true}, func(): return P.flip_sw >= 0)
+	print("  walk to the lever: he starts pulling it by himself: ", pulled >= 0, ", stopped: ", absf(P.vx) < 0.01)
+	var mid_anim := 0.0
+	_walk({}, func():
+		mid_anim = maxf(mid_anim, switches[0].anim) if switches[0].anim < 1.0 else mid_anim
+		return P.flip_sw < 0, 120)
+	print("  after the pull: lever on: ", switches[0].on, ", door open: ", doors[0].open, ", door tiles gone: ", grid[22 * LW + 60] == 0, ", clunk heard: ", noises.size() > 0)
+	var down := _walk({"left": true}, func(): return P.on_ground and P.y + P.h >= 24 * T - 1 and P.x < 31 * T, 1500)
+	print("  back down the stairs: lower floor at x%.1f after %.1fs" % [P.x / T, down / 60.0])
+	var out := _walk({"right": true}, func(): return state == "escaped", 1500)
+	print("  under the stairs, through the door, out: ", state, " after %.1fs" % (out / 60.0))
 	test_keys = null

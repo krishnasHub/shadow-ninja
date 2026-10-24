@@ -135,6 +135,20 @@ func _menu(paused: bool) -> void:
 				draw_line(Vector2(x - 22, m.QUIT_Y + 10), Vector2(x + 22, m.QUIT_Y + 10), Color(1, 1, 1, 0.7), 1.0)
 		_footer("← →  choose    ·    ENTER  select    ·    ESC  back")
 		return
+	if m.menu_page == "levels":
+		_text("LEVELS", Vector2(480, 150), m.font_regular, 30, Color(1, 1, 1, 0.9), 10, true)
+		for i in m.Levels.LEVELS.size():
+			var L: Dictionary = m.Levels.LEVELS[i]
+			var y: float = m.LEVELS_Y + i * m.MENU_DY
+			var sel: bool = i == m.level_sel
+			var label := "%s   ·   %s" % [L.name, L.subtitle]
+			_text(label, Vector2(480, y), m.font_regular, 18, Color(1, 1, 1, 0.95 if sel else 0.42), 3, true)
+			if sel:
+				var half: float = (m.font_regular.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 18).x + label.length() * 3) / 2
+				draw_line(Vector2(480 - half - 44, y - 6), Vector2(480 - half - 16, y - 6), Color(1, 1, 1, 0.7), 1.0)
+				draw_line(Vector2(480 + half + 16, y - 6), Vector2(480 + half + 44, y - 6), Color(1, 1, 1, 0.7), 1.0)
+		_footer("↑ ↓  choose    ·    ENTER  play    ·    ESC  back")
+		return
 	if m.menu_page == "about":
 		_about()
 		return

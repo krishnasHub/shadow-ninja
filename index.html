@@ -42,6 +42,8 @@ const TUNE = {
   fillRate: 0.38,                    // meter per second at full exposure
   drainDelay: 1.2, drainRate: 0.12,  // seconds in shadow before draining, drain per second
   exposedThreshold: 0.03,
+  landNoiseV: 600,                   // landings faster than this are loud (drops of up to 3 tiles are quiet)
+  flipTime: 0.65,                    // pulling a lever: the ninja stops, reaches, pulls
 };
 // Meter bands - guards (milestone 3) will react to these.
 const METER_SUSPICIOUS = 0.35, METER_ALERT = 0.65;
@@ -76,7 +78,10 @@ const lctx = lightCv.getContext('2d');
 //    hints:  [x, y_px, text] - faint words painted on the back wall
 //    lights: lamp (ceiling unless y given), moon (through a skylight gap), sign, camera (sweeps)
 //    guards: x start, patrol from/to, walkable bounds minX/maxX, row they stand on
-//    exit:   the door's tile x; reaching it clears the floor
+//    exit:   the door's tile x; reaching it clears the floor (exitRow: the row it stands on, default 15)
+//    height: rows (default 17). The floor is always the bottom 2 rows; taller floors scroll vertically.
+//    doors:  [x, y, w, h] locked doors (solid);  switches: {x, row, door} - walk up to one and the
+//            ninja pulls it, which opens doors[door]. Stairs are just 1-tile steps: walking climbs them.
 // =====================================================================
 const LEVELS = [
   {
@@ -150,10 +155,60 @@ const LEVELS = [
     ],
     spawn: [3, 15], exit: 116,
   },
+  {
+    name: 'FLOOR 3', subtitle: 'the archive',
+    width: 100, height: 26,
+    // two storeys: the upper floor slab is rows 12-13 (top at y 384), the lower floor is row 24 (y 768).
+    // Floating stairs climb from the lower storey (bottom step x31, row 21) to the upper one (x40);
+    // you can walk underneath them.
+    solids: [[1, 12, 28, 2], [40, 12, 59, 2],
+      [29, 23, 1, 1],                                          // a crate to hop from
+      [31, 21, 1, 1], [32, 20, 1, 1], [33, 19, 1, 1], [34, 18, 1, 1],
+      [35, 17, 1, 1], [36, 16, 1, 1], [37, 15, 1, 1], [38, 14, 1, 1], [39, 13, 1, 1],
+      [60, 14, 1, 7]],                                         // the wall above the security door
+    holes: [],
+    ducts: [[74, 8, 9, 1], [44, 19, 8, 1]],
+    doors: [[60, 21, 1, 3]],
+    switches: [{ x: 96.5, row: 12, door: 0 }],
+    props: [['rack', 5, 24], ['desk', 9, 24], ['rack', 15, 24], ['desk', 20, 24], ['rack', 26, 24],
+      ['cooler', 33, 24], ['desk', 41, 24], ['rack', 48, 24], ['plant', 55, 24],
+      ['desk', 64, 24], ['rack', 70, 24], ['cooler', 76, 24], ['desk', 82, 24], ['rack', 88, 24], ['plant', 92, 24],
+      ['rack', 43, 12], ['rack', 48, 12], ['rack', 56, 12], ['rack', 62, 12], ['desk', 66, 12],
+      ['rack', 72, 12], ['rack', 78, 12], ['rack', 86, 12], ['rack', 90, 12], ['plant', 93, 12]],
+    hints: [
+      [2.5, 580, 'floor 3 - the archive. two storeys.'],
+      [24, 640, 'the stairs: crate, hop to the first step, then just walk.'],
+      [50, 560, 'locked. the switch is upstairs.'],
+      [44, 160, 'the server room. racks hide you too.'],
+      [84, 200, 'walk up to the lever to pull it. it is loud.'],
+      [63, 560, 'through. the way out is at the end.'],
+    ],
+    lights: [
+      { kind: 'lamp', x: 10.5, y: 14.125, spread: 0.5, radius: 420 },
+      { kind: 'lamp', x: 22.5, y: 14.125, spread: 0.5, radius: 420, flicker: [2.8, 0.55] },
+      { kind: 'lamp', x: 35.5, spread: 0.35, radius: 760, intensity: 0.8 },      // down the stairwell
+      { kind: 'lamp', x: 50.5, y: 14.125, spread: 0.5, radius: 420 },
+      { kind: 'lamp', x: 68.5, y: 14.125, spread: 0.5, radius: 420 },
+      { kind: 'lamp', x: 84.5, y: 14.125, spread: 0.5, radius: 420, intensity: 0.9 },
+      { kind: 'lamp', x: 52.5, spread: 0.45, radius: 420 },
+      { kind: 'lamp', x: 64.5, spread: 0.45, radius: 420 },
+      { kind: 'camera', x: 79.5, spread: 0.14, radius: 420, sweep: [0.6, 5], danger: 1.5 },
+      { kind: 'lamp', x: 92.5, spread: 0.4, radius: 420 },                         // over the lever
+      { kind: 'sign', x: 96 },
+    ],
+    guards: [
+      { x: 14, from: 7, to: 28, minX: 1, maxX: 29, row: 24 },
+      { x: 50, from: 42, to: 58, minX: 32, maxX: 60, row: 24 },
+      { x: 75, from: 64, to: 90, minX: 61, maxX: 95, row: 24 },
+      { x: 60, from: 44, to: 88, minX: 40, maxX: 95, row: 12 },      // upstairs, in the server room
+    ],
+    spawn: [3, 24], exit: 95, exitRow: 24,
+  },
 ];
 
 // ---------- the current floor (filled in by loadLevel) ----------
-const LH = 17;
+let LH = 17;                                       // this floor's height in rows (tall floors scroll vertically)
+let exitRow = 15, switches = [], doors = [];       // doors: {x, y, w, h, open}; switches: {x, row, door, on, anim}
 let LW = 100, grid = new Uint8Array(0), level = null, levelIdx = 0, levelT = 0;
 let SPAWN = { x: 0, y: 0 }, EXIT_X = 0, DOOR_X = 0, PROPS = [], HINTS = [], GUARD_DEFS = [];
 function fill(x, y, w, h, v = 1) {
@@ -167,10 +222,11 @@ function solidAt(i, j) {
 }
 // Ducts (2) are solid like walls, and their underside is something you can cling to.
 const GRIP = 2;
+const DOOR = 3;                                     // a locked door: solid until its switch is pulled
 const isGrip = (i, j) => i >= 0 && i < LW && j >= 0 && j < LH && grid[j * LW + i] === GRIP;
 
 // Furniture. Duck (↓) behind anything with a width to hide from light.
-const PROP_W = { desk: 70, plant: 26, cooler: 26 };
+const PROP_W = { desk: 70, plant: 26, cooler: 26, rack: 40 };
 
 // ---------- occluder segments: merged tile edges ----------
 function buildSegments() {
@@ -261,7 +317,7 @@ function makeLevelLight(d) {
     L = light({ kind: 'moon', x: ox, y: oy, dir: Math.atan2(2 * T - oy, cx - ox), spread: 0.3,
                 radius: 1150, intensity: 0.45, stops: STOPS_FLAT });
   } else if (d.kind === 'sign') {
-    L = light({ kind: 'sign', x: d.x * T, y: 11 * T + 20, dir: 0, spread: Math.PI, radius: 170, intensity: 0.35 });
+    L = light({ kind: 'sign', x: d.x * T, y: (exitRow - 4) * T + 20, dir: 0, spread: Math.PI, radius: 170, intensity: 0.35 });
   } else {                                         // lamp / camera: on the ceiling unless a y is given
     L = light({ kind: d.kind, x: d.x * T, y: d.y !== undefined ? d.y * T : CEIL_Y, dir: d.dir ?? Math.PI / 2,
                 spread: d.spread, radius: d.radius, intensity: d.intensity ?? 1, danger: d.danger ?? 1 });
@@ -322,16 +378,18 @@ const lightInView = (L, cx, cy) =>
 // =====================================================================
 const PAR_FAR = 0.18, PAR_MID = 0.5, PAR_FG = 1.35;
 const layerWidth = f => Math.ceil(VIEW_W + (LW * T - VIEW_W) * f) + 60;
+const PAR_FAR_Y = 0.2, PAR_MID_Y = 0.5;            // tall floors: vertical drift of the far and mid layers
+const layerHeight = f => Math.ceil(VIEW_H + (LH * T - VIEW_H) * f) + 60;
 
 function makeFar() {
-  const c = document.createElement('canvas'); c.width = layerWidth(PAR_FAR); c.height = VIEW_H;
+  const c = document.createElement('canvas'); c.width = layerWidth(PAR_FAR); c.height = layerHeight(PAR_FAR_Y);
   const g = c.getContext('2d'), r = rng(11);
   g.fillStyle = '#ececec'; g.beginPath(); g.arc(c.width * 0.62, 120, 34, 0, Math.PI * 2); g.fill();
   g.fillStyle = '#bdbdbd';
-  for (let x = -20; x < c.width;) { const bw = 30 + r() * 70, bh = 60 + r() * 120; g.fillRect(x, 470 - bh, bw, bh + 80); x += bw + r() * 6; }
+  for (let x = -20; x < c.width;) { const bw = 30 + r() * 70, bh = 60 + r() * 120; g.fillRect(x, 470 - bh, bw, c.height - 470 + bh); x += bw + r() * 6; }
   for (let x = -30; x < c.width;) {
     const bw = 40 + r() * 90, bh = 120 + r() * 250, top = 470 - bh;
-    g.fillStyle = '#9a9a9a'; g.fillRect(x, top, bw, bh + 80);
+    g.fillStyle = '#9a9a9a'; g.fillRect(x, top, bw, c.height - top);
     if (r() < 0.25) g.fillRect(x + bw / 2 - 1, top - 40, 2, 40);
     if (r() < 0.55) {
       g.fillStyle = '#c4c4c4';
@@ -342,13 +400,13 @@ function makeFar() {
   return c;
 }
 function makeMid() {
-  const c = document.createElement('canvas'); c.width = layerWidth(PAR_MID); c.height = VIEW_H;
+  const c = document.createElement('canvas'); c.width = layerWidth(PAR_MID); c.height = layerHeight(PAR_MID_Y);
   const g = c.getContext('2d'), r = rng(23);
   g.fillStyle = '#4c4c4c';                        // glass-wall mullions
-  for (let x = 0; x < c.width; x += 150) g.fillRect(x, 0, 7, VIEW_H);
-  g.fillRect(0, 90, c.width, 5); g.fillRect(0, 440, c.width, 5);
+  for (let x = 0; x < c.width; x += 150) g.fillRect(x, 0, 7, c.height);
+  for (let y = 90; y < c.height; y += 350) g.fillRect(0, y, c.width, 5);    // transoms, every storey
   g.fillStyle = '#404040';                        // structural columns
-  for (let x = 260; x < c.width; x += 560 + r() * 120) g.fillRect(x, 0, 44, VIEW_H);
+  for (let x = 260; x < c.width; x += 560 + r() * 120) g.fillRect(x, 0, 44, c.height);
   for (let x = 80; x < c.width; x += 180 + r() * 260) {
     const kind = r();
     g.fillStyle = '#454545'; g.strokeStyle = '#454545';
@@ -415,14 +473,16 @@ const fogGrad = ctx.createLinearGradient(0, 0, 0, VIEW_H);
 fogGrad.addColorStop(0, '#d4d4d4'); fogGrad.addColorStop(0.6, '#b0b0b0'); fogGrad.addColorStop(1, '#8c8c8c');
 
 function loadLevel(idx) {
-  levelIdx = idx; level = LEVELS[idx]; LW = level.width;
+  levelIdx = idx; level = LEVELS[idx]; LW = level.width; LH = level.height ?? 17; exitRow = level.exitRow ?? 15;
   grid = new Uint8Array(LW * LH);
   fill(0, 0, LW, 2);                               // ceiling
-  fill(0, 15, LW, 2);                              // floor
+  fill(0, LH - 2, LW, 2);                          // floor
   fill(0, 0, 1, LH); fill(LW - 1, 0, 1, LH);       // outer walls
   for (const r of level.solids) fill(r[0], r[1], r[2], r[3]);
   for (const r of level.holes) fill(r[0], r[1], r[2], r[3], 0);
   for (const r of level.ducts) fill(r[0], r[1], r[2], r[3], GRIP);
+  doors = (level.doors || []).map(([x, y, w, h]) => { fill(x, y, w, h, DOOR); return { x, y, w, h, open: false }; });
+  switches = (level.switches || []).map(sw => ({ ...sw, on: false, anim: 0 }));
   PROPS = level.props.map(([type, x, row]) => ({ type, x, y: row * T }));
   HINTS = level.hints; GUARD_DEFS = level.guards;
   SPAWN = { x: level.spawn[0] * T, y: level.spawn[1] * T - TUNE.standH };
@@ -430,6 +490,14 @@ function loadLevel(idx) {
   SEGS = buildSegments();
   LIGHTS = level.lights.map(makeLevelLight);
   farCv = makeFar(); midCv = makeMid(); fgCv = makeFg();
+}
+// A door opens: its tiles go, and the light geometry is rebuilt around the gap.
+function openDoor(i) {
+  const d = doors[i];
+  d.open = true;
+  fill(d.x, d.y, d.w, d.h, 0);
+  SEGS = buildSegments();
+  for (const L of LIGHTS) L.poly = visibilityPolygon(L.x, L.y, L.radius);
 }
 
 // =====================================================================
@@ -464,11 +532,13 @@ cv.addEventListener('mousemove', e => {
   mouse.seen = true; mouse.movedT = time;
   if (inMenu() && menuPage === '') { const i = menuItemAt(mouse.x, mouse.y); if (i >= 0) menuSel = i; }
   else if (inMenu() && menuPage === 'quit') { const q = quitItemAt(mouse.x, mouse.y); if (q >= 0) quitSel = q; }
+  else if (inMenu() && menuPage === 'levels') { const l = levelItemAt(mouse.x, mouse.y); if (l >= 0) levelSel = l; }
 });
 cv.addEventListener('mousedown', e => {
   if (e.button !== 0) return;
   if (inMenu()) {
     if (menuPage === 'quit') { const q = quitItemAt(mouse.x, mouse.y); if (q >= 0) quitChoose(q); }
+    else if (menuPage === 'levels') { const l = levelItemAt(mouse.x, mouse.y); if (l >= 0) startRun(l); }
     else if (menuPage) menuPage = '';
     else { const i = menuItemAt(mouse.x, mouse.y); if (i >= 0) menuActivate(i); }
   } else if (state === 'bye') openMenu('title');
@@ -483,7 +553,13 @@ const MENU_Y = 280, MENU_DY = 40;                // first item's baseline and sp
 const QUIT_Y = 310, QUIT_X = [400, 560];         // "Are you sure?"  No / Yes
 let menuSel = 0, menuPage = '', quitSel = 0;     // menuPage: '' = the list, or 'about' / 'controls' / 'quit'
 const inMenu = () => state === 'title' || state === 'pause';
-const menuItems = () => state === 'pause' ? ['Resume', 'New Game', 'About', 'Controls', 'Quit'] : ['New Game', 'About', 'Controls', 'Quit'];
+const menuItems = () => state === 'pause' ? ['Resume', 'New Game', 'Levels', 'About', 'Controls', 'Quit'] : ['New Game', 'Levels', 'About', 'Controls', 'Quit'];
+const LEVELS_Y = 250;                            // Levels page: first floor's baseline
+let levelSel = 0;                                // Levels page: which floor is highlighted
+function levelItemAt(x, y) {
+  for (let i = 0; i < LEVELS.length; i++) { const iy = LEVELS_Y + i * MENU_DY; if (Math.abs(x - VIEW_W / 2) < 220 && y > iy - 28 && y < iy + 10) return i; }
+  return -1;
+}
 function menuItemAt(x, y) {
   const n = menuItems().length;
   for (let i = 0; i < n; i++) { const iy = MENU_Y + i * MENU_DY; if (Math.abs(x - VIEW_W / 2) < 150 && y > iy - 28 && y < iy + 10) return i; }
@@ -498,6 +574,7 @@ function menuActivate(i) {
   const item = menuItems()[i];
   if (item === 'Resume') state = 'play';
   else if (item === 'New Game') startRun(0);
+  else if (item === 'Levels') { menuPage = 'levels'; levelSel = levelIdx; }   // pick any floor (a dev convenience for now)
   else if (item === 'About') menuPage = 'about';
   else if (item === 'Controls') menuPage = 'controls';
   else if (item === 'Quit') { menuPage = 'quit'; quitSel = 0; }
@@ -513,6 +590,14 @@ function menuKey(code) {
     else if (code === 'Enter' || code === 'Space') quitChoose(quitSel);
     else if (code === 'KeyY') quitChoose(1);
     else if (code === 'KeyN' || code === 'Escape' || code === 'Backspace') quitChoose(0);
+    return;
+  }
+  if (menuPage === 'levels') {                     // ↑ ↓ choose a floor, Enter plays it, Esc back
+    const n = LEVELS.length;
+    if (code === 'ArrowUp' || code === 'KeyW') levelSel = (levelSel - 1 + n) % n;
+    else if (code === 'ArrowDown' || code === 'KeyS') levelSel = (levelSel + 1) % n;
+    else if (code === 'Enter' || code === 'Space') startRun(levelSel);
+    else if (code === 'Escape' || code === 'Backspace') menuPage = '';
     return;
   }
   if (menuPage) {                                  // About / Controls: any of these goes back
@@ -537,14 +622,15 @@ let state = 'title', stateT = 0, time = 0, debug = false;
 let meter = 0, exposure = 0, calm = 0;
 
 function startRun(idx = -1) {
-  if (idx >= 0 && idx !== levelIdx) loadLevel(idx);
+  if (idx >= 0) loadLevel(idx);
   Object.assign(P, { x: SPAWN.x, y: SPAWN.y, w: TUNE.width, h: TUNE.standH, vx: 0, vy: 0, onGround: false,
-                     facing: 1, crawling: false, running: false, coyote: 0, jumpBuf: 0, walkPhase: 0, moveT: 0, lean: 0, vis: 0, cover: null, hidden: false, wasHidden: false, clinging: false });
+                     facing: 1, crawling: false, running: false, coyote: 0, jumpBuf: 0, walkPhase: 0, moveT: 0, lean: 0, vis: 0, cover: null, hidden: false, wasHidden: false, clinging: false, flipSw: -1, flipT: 0 });
   guards = GUARD_DEFS.map(makeGuard);
   noises = []; stones = []; stoneCount = STONE.max; aiming = false;
   meter = 0; exposure = 0; calm = 0; jumpQueued = false;
   resetScarf();
   cam.x = clamp(P.x - VIEW_W * 0.4, 0, LW * T - VIEW_W);
+  cam.y = clamp(P.y + P.h / 2 - VIEW_H * 0.55, 0, LH * T - VIEW_H);
   state = 'play'; stateT = 0; levelT = 0;
 }
 
@@ -589,6 +675,7 @@ function updatePlayer(dt) {
     P.facing = aimTarget().x >= P.x + P.w / 2 ? 1 : -1;
   }
   if (P.clinging && updateCling(dt, dir)) return;
+  if (P.flipSw >= 0) { updateFlip(dt); return; }
   const wantCrawl = held.has('down');
   if (wantCrawl && P.onGround && !P.crawling) {
     P.y += TUNE.standH - TUNE.crawlH; P.h = TUNE.crawlH; P.crawling = true;
@@ -617,8 +704,13 @@ function updatePlayer(dt) {
   // move X, then Y, resolving against tiles
   P.x += P.vx * dt;
   if (rectHits(P.x, P.y, P.w, P.h)) {
-    P.x = P.vx > 0 ? Math.floor((P.x + P.w - 0.001) / T) * T - P.w : (Math.floor(P.x / T) + 1) * T;
-    P.vx = 0;
+    // stairs: a one-tile step at your feet is walked up, not bumped into
+    const up = Math.floor((P.y + P.h - 0.001) / T) * T - P.h;
+    if (P.onGround && !P.crawling && P.y - up <= T + 0.5 && !rectHits(P.x, up, P.w, P.h)) P.y = up;
+    else {
+      P.x = P.vx > 0 ? Math.floor((P.x + P.w - 0.001) / T) * T - P.w : (Math.floor(P.x / T) + 1) * T;
+      P.vx = 0;
+    }
   }
   const wasOnGround = P.onGround, impactV = P.vy;
   P.onGround = false;
@@ -631,13 +723,18 @@ function updatePlayer(dt) {
     }
   }
   // a hard landing is loud unless you're sneaking (Shift)
-  if (P.onGround && !wasOnGround && impactV > 450 && !held.has('walk')) makeNoise(P.x + P.w / 2, P.y + P.h, NOISE.land);
+  if (P.onGround && !wasOnGround && impactV > TUNE.landNoiseV && !held.has('walk')) makeNoise(P.x + P.w / 2, P.y + P.h, NOISE.land);
 
   // hiding: ducked behind furniture with your middle inside its footprint
   const mid = P.x + P.w / 2;
   P.cover = P.onGround ? PROPS.find(p => PROP_W[p.type] && Math.abs(p.y - (P.y + P.h)) < 2 &&
                                          mid > p.x * T + 4 && mid < p.x * T + PROP_W[p.type] - 4) : null;
   P.hidden = !!P.cover && P.crawling;
+  // walk up to a lever and the ninja pulls it himself
+  if (P.onGround && !P.crawling) {
+    const i = switches.findIndex(sw => !sw.on && Math.abs(mid - sw.x * T) < 14 && Math.abs(P.y + P.h - sw.row * T) < 4);
+    if (i >= 0) { P.flipSw = i; P.flipT = 0; P.vx = 0; P.lean = 0; }
+  }
 
   const moving = Math.abs(P.vx) > 8;
   const prevPhase = P.walkPhase;
@@ -647,6 +744,25 @@ function updatePlayer(dt) {
       Math.floor(P.walkPhase / (2 * Math.PI)) !== Math.floor(prevPhase / (2 * Math.PI)))
     makeNoise(mid, P.y + P.h, NOISE.run);
   P.lean = approach(P.lean, P.crawling || !moving ? 0 : P.facing * (P.running ? 0.18 : 0.06), dt * 1.5);
+}
+
+// Pulling a lever: stand still, reach, pull it down (the handle swings), clunk - the door unlocks.
+function updateFlip(dt) {
+  const sw = switches[P.flipSw];
+  P.flipT += dt; P.vx = 0; P.moveT = 0; jumpQueued = false;
+  const k = clamp((P.flipT - 0.12) / 0.3, 0, 1);
+  sw.anim = k * k * (3 - 2 * k);
+  if (k >= 1 && !sw.on) {
+    sw.on = true;
+    openDoor(sw.door);
+    makeNoise(sw.x * T, sw.row * T - 30, NOISE.lever);          // the clunk carries
+  }
+  if (P.flipT >= TUNE.flipTime) P.flipSw = -1;
+}
+// Where the lever's knob is (the handle swings from up to down as anim goes 0 -> 1).
+function leverKnob(sw) {
+  const a = lerp(-Math.PI / 2 + 0.55, Math.PI / 2 - 0.55, sw.anim);
+  return { x: sw.x * T + Math.cos(a) * 16, y: sw.row * T - 35 + Math.sin(a) * 16 };
 }
 
 // headband tails - a little verlet chain
@@ -702,7 +818,7 @@ function updateDetection(dt) {
 //  NOISE + STONES
 //  Noise is a circle: any awake guard inside it goes to look.
 // =====================================================================
-const NOISE = { run: 150, land: 120, stone: 280, thud: 140 };   // radii in px
+const NOISE = { run: 150, land: 120, stone: 280, thud: 140, lever: 230 };   // radii in px
 const STONE = { max: 3, maxSpeed: 700, gravity: 1400, r: 3 };   // maxSpeed sets the range: ~10 tiles on the flat
 let noises = [], stones = [], stoneCount = 0;
 let aiming = false;   // throw mode (Ctrl): the mouse aims, a click throws
@@ -904,6 +1020,8 @@ function updateCameras() {
 function updateCamera(dt) {
   const target = clamp(P.x + P.w / 2 - VIEW_W * 0.45 + P.facing * 70, 0, LW * T - VIEW_W);
   cam.x = lerp(cam.x, target, 1 - Math.exp(-dt * 4));
+  const targetY = clamp(P.y + P.h / 2 - VIEW_H * 0.55, 0, LH * T - VIEW_H);   // tall floors scroll vertically
+  cam.y = lerp(cam.y, targetY, 1 - Math.exp(-dt * 3));
 }
 
 // =====================================================================
@@ -916,7 +1034,7 @@ function step(dt) {
   if (state !== 'play') return;
   updatePlayer(dt); updateStones(dt); updateScarf(); updateGuards(dt); updateDetection(dt); updateCameras(); updateCamera(dt);
   levelT += dt;
-  if (state === 'play' && P.x + P.w > EXIT_X) { state = 'escaped'; stateT = 0; }
+  if (state === 'play' && P.x + P.w > EXIT_X && Math.abs(P.y + P.h - exitRow * T) < T) { state = 'escaped'; stateT = 0; }
 }
 
 // =====================================================================
@@ -930,7 +1048,11 @@ function drawTiles(cx) {
   for (let j = 0; j < LH; j++) for (let i = i0; i <= i1; i++) if (grid[j * LW + i] === GRIP) {
     const x = i * T, y = j * T;
     ctx.fillStyle = '#0a0a0a';
-    if (i % 3 === 0) ctx.fillRect(x + 14, 2 * T, 3, y - 2 * T);
+    if (i % 3 === 0) {                               // hanger rod up to whatever is above
+      let top = j - 1;
+      while (top > 0 && grid[top * LW + i] === 0) top--;
+      ctx.fillRect(x + 14, (top + 1) * T, 3, (j - top - 1) * T);
+    }
     ctx.fillStyle = '#262626';
     for (let k = 4; k < T; k += 8) ctx.fillRect(x + k, y + 6, 2, T - 12);
   }
@@ -950,14 +1072,38 @@ function drawProp(p) {
   } else if (p.type === 'cooler') {
     c.fillRect(x + 2, y - 40, 22, 40); c.fillRect(x + 10, y - 44, 6, 4);
     c.beginPath(); c.ellipse(x + 13, y - 56, 10, 13, 0, 0, Math.PI * 2); c.fill();
+  } else if (p.type === 'rack') {                  // server rack: tall, slotted
+    c.fillRect(x, y - 92, 40, 92);
+    c.fillStyle = '#222'; for (let sy = y - 84; sy < y - 6; sy += 12) c.fillRect(x + 4, sy, 32, 2);
   } else if (p.type === 'chair') {
     c.fillRect(x, y - 20, 22, 4); c.fillRect(x + 18, y - 40, 4, 22); c.fillRect(x + 9, y - 16, 3, 12); c.fillRect(x + 1, y - 4, 20, 3);
   }
 }
 function drawDoor() {
-  const x = DOOR_X * T, y = 12 * T;
+  const x = DOOR_X * T, y = (exitRow - 3) * T;
   ctx.fillStyle = '#2a2a2a'; ctx.fillRect(x + 4, y + 4, 2 * T - 8, 3 * T - 4);
   ctx.fillStyle = '#0a0a0a'; ctx.fillRect(x + 46, y + 50, 6, 3);
+}
+function drawSecurityDoors() {                       // banded steel while locked, an empty frame once open
+  for (const d of doors) {
+    const x = d.x * T, y = d.y * T, w = d.w * T, h = d.h * T;
+    if (!d.open) {
+      ctx.fillStyle = '#1e1e1e'; ctx.fillRect(x, y, w, h);
+      ctx.fillStyle = '#141414'; for (let by = y + 10; by < y + h - 6; by += 16) ctx.fillRect(x + 3, by, w - 6, 3);
+    } else {
+      ctx.fillStyle = '#0a0a0a'; ctx.fillRect(x, y, 4, h); ctx.fillRect(x + w - 4, y, 4, h);
+    }
+  }
+}
+function drawLevers() {                              // a plate on the wall; the handle swings down when pulled
+  ctx.fillStyle = ctx.strokeStyle = '#101010'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  for (const sw of switches) {
+    const px = sw.x * T, py = sw.row * T - 35, k = leverKnob(sw);
+    ctx.fillStyle = '#1a1a1a'; ctx.fillRect(px - 6, py - 12, 12, 24);
+    ctx.fillStyle = '#101010';
+    ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(k.x, k.y); ctx.stroke();
+    ctx.beginPath(); ctx.arc(k.x, k.y, 3.5, 0, Math.PI * 2); ctx.fill();
+  }
 }
 function drawFixtures() {
   ctx.fillStyle = '#0a0a0a';
@@ -970,6 +1116,19 @@ function drawFixtures() {
     ctx.save(); ctx.translate(L.x, L.y); ctx.rotate(L.dir);
     ctx.fillRect(-8, -6, 20, 12); ctx.fillRect(12, -4, 5, 8);
     ctx.restore();
+  }
+}
+function drawStatusLights() {                       // lock lights (blink while locked) and server-rack lights
+  for (const d of doors) if (!d.open && time % 1.2 < 0.6) {
+    const x = d.x * T + d.w * T / 2, y = d.y * T - 8;
+    ctx.fillStyle = 'rgba(255,255,255,0.2)'; ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.beginPath(); ctx.arc(x, y, 2, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  for (const p of PROPS) if (p.type === 'rack') for (let k = 0; k < 6; k++) {
+    if ((time * (0.7 + k * 0.23) + p.x * 1.7 + k * 0.37) % 1 < 0.55) {
+      ctx.beginPath(); ctx.arc(p.x * T + 8 + (k % 3) * 11, p.y - 78 + Math.floor(k / 3) * 36, 1.3, 0, Math.PI * 2); ctx.fill();
+    }
   }
 }
 function drawCameraLeds() {                         // blinks while watching, solid when it sees you
@@ -1107,7 +1266,13 @@ function drawNinja() {
   }
   withLean((cx, by) => {
     c.lineWidth = 4; c.beginPath();
-    if (P.onGround) {
+    if (P.flipSw >= 0) {                          // pulling a lever: one hand on the knob
+      const k = leverKnob(switches[P.flipSw]);
+      c.moveTo(cx, by - 15); c.lineTo(cx + 3, by - 1);
+      c.moveTo(cx, by - 15); c.lineTo(cx - 4, by - 1);
+      c.moveTo(cx, by - 28); c.lineTo(cx - f * 4, by - 17);
+      c.moveTo(cx, by - 28); c.lineTo(k.x, k.y);
+    } else if (P.onGround) {
       c.moveTo(cx, by - 15); c.lineTo(cx + sw * 8, by - 1);
       c.moveTo(cx, by - 15); c.lineTo(cx - sw * 8, by - 1);
       c.moveTo(cx, by - 28); c.lineTo(cx - sw * 7, by - 17);
@@ -1249,6 +1414,21 @@ function drawMenu(paused) {
     footer('← →  choose    ·    ENTER  select    ·    ESC  back');
     return;
   }
+  if (menuPage === 'levels') {
+    centerText('LEVELS', 150, '30px Georgia, serif', 0.9, '10px');
+    LEVELS.forEach((L, i) => {
+      const y = LEVELS_Y + i * MENU_DY, sel = i === levelSel, label = `${L.name}   ·   ${L.subtitle}`;
+      centerText(label, y, '18px Georgia, serif', sel ? 0.95 : 0.42, '3px');
+      if (sel) {
+        ctx.font = '18px Georgia, serif'; ctx.letterSpacing = '3px';
+        const half = ctx.measureText(label).width / 2; ctx.letterSpacing = '0px';
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.fillRect(VIEW_W / 2 - half - 44, y - 6, 28, 1); ctx.fillRect(VIEW_W / 2 + half + 16, y - 6, 28, 1);
+      }
+    });
+    footer('↑ ↓  choose    ·    ENTER  play    ·    ESC  back');
+    return;
+  }
   if (menuPage === 'about') {
     centerText('ABOUT', 80, '30px Georgia, serif', 0.9, '10px');
     ABOUT.forEach((line, i) => centerText(line, 125 + i * 22, 'italic 15px Georgia, serif', 0.75));
@@ -1315,15 +1495,15 @@ function render() {
 
   // back to front: fog, far city, mid office wall
   ctx.fillStyle = fogGrad; ctx.fillRect(0, 0, VIEW_W, VIEW_H);
-  ctx.drawImage(farCv, -Math.round(cx * PAR_FAR), -cy);
-  ctx.drawImage(midCv, -Math.round(cx * PAR_MID), -cy);
+  ctx.drawImage(farCv, -Math.round(cx * PAR_FAR), -Math.round(cy * PAR_FAR_Y));
+  ctx.drawImage(midCv, -Math.round(cx * PAR_MID), -Math.round(cy * PAR_MID_Y));
 
   // main layer
   ctx.save(); ctx.translate(-cx, -cy);
-  drawTiles(cx); drawDoor();
+  drawTiles(cx); drawDoor(); drawSecurityDoors();
   if (showPlayer && P.hidden) drawNinja();          // hidden: furniture draws over you
   for (const p of PROPS) drawProp(p);
-  drawFixtures();
+  drawFixtures(); drawLevers();
   for (const g of guards) drawGuard(g);
   if (showPlayer && !P.hidden) drawNinja();
   ctx.restore();
@@ -1339,7 +1519,7 @@ function render() {
   ctx.globalCompositeOperation = 'source-over';
 
   ctx.save(); ctx.translate(-cx, -cy);
-  drawHints(); drawExitSign(); drawCameraLeds();
+  drawHints(); drawExitSign(); drawCameraLeds(); drawStatusLights();
   if (showPlayer && P.cover && !P.hidden) {         // nudge: you could hide here
     ctx.font = '13px Georgia, serif'; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(255,255,255,0.45)';
     ctx.fillText('↓', P.cover.x * T + PROP_W[P.cover.type] / 2, P.cover.y - 66);
@@ -1352,7 +1532,7 @@ function render() {
   ctx.restore();
 
   // foreground silhouettes sweep past faster than the world
-  ctx.drawImage(fgCv, -Math.round(cx * PAR_FG), -cy);
+  ctx.drawImage(fgCv, -Math.round(cx * PAR_FG), 0);
 
   // aim arc + cursor on top of everything in the world (the system cursor is hidden while playing)
   ctx.save(); ctx.translate(-cx, -cy); drawAim(); ctx.restore();
