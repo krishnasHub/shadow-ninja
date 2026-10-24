@@ -204,6 +204,19 @@ var music_on := true
 var tension := 0.0
 const MUSIC_BASE_DB := -7.0
 const MUSIC_TENSION_DB := -5.0
+# the meter's own sound: a heartbeat that quickens, an uneasy tone that rises, the music pulling
+# back - and a sting when you're caught. These are sound effects: M only toggles the music.
+const METER_AUDIO := {
+	"heart_from": 0.25, "bpm_min": 70.0, "bpm_max": 150.0,   # heartbeat starts at 25% full, 70 -> 150 BPM
+	"riser_from": 0.45, "riser_db": -4.0, "riser_pitch": 0.18, # the tone fades in past 45%, rising up to +18%
+	"duck": 0.35,                                              # the base music dips by up to 35% at full
+}
+var sfx_heart: AudioStreamPlayer
+var sfx_riser: AudioStreamPlayer
+var sfx_caught: AudioStreamPlayer
+var heart_t := 0.0              # time since the last heartbeat
+var last_beat := -99.0          # when it last beat (the screen's red-edge pulse follows it)
+var was_caught := false
 
 # capture mode (dev tool): godot --path . -- --capture=out.png --setup=chase --frames=40
 var _capture := {}
@@ -267,6 +280,22 @@ func _setup_music() -> void:
 	music_tension.volume_db = -80.0
 	music_base.play()                        # started together, so the two layers stay in step
 	music_tension.play()
+	sfx_heart = _sfx_player("heartbeat")
+	sfx_riser = _sfx_player("riser", true)
+	sfx_caught = _sfx_player("caught")
+	sfx_riser.volume_db = -80.0
+	sfx_riser.play()
+
+func _sfx_player(file: String, loop := false) -> AudioStreamPlayer:
+	var st := AudioStreamWAV.load_from_file("res://audio/%s.wav" % file)
+	var p := AudioStreamPlayer.new()
+	if st != null:
+		if loop:
+			st.loop_mode = AudioStreamWAV.LOOP_FORWARD
+			st.loop_end = int(st.get_length() * st.mix_rate)
+		p.stream = st
+	add_child(p)
+	return p
 
 # How much danger the music should carry, 0..1.
 func music_danger() -> float:
@@ -287,6 +316,29 @@ func update_music(dt: float) -> void:
 	var target := music_danger() if state == "play" else 0.0
 	tension = move_toward(tension, target, dt * (0.6 if target > tension else 0.2))   # rises quickly, settles slowly
 	music_tension.volume_db = linear_to_db(maxf(tension, 0.0001)) + MUSIC_TENSION_DB
+	update_meter_audio(dt)
+
+# The meter, heard: a heartbeat that quickens and grows, a tone that rises, the music pulling back.
+func update_meter_audio(dt: float) -> void:
+	var playing := state == "play"
+	var m := meter if playing else 0.0
+	var k := clampf((m - METER_AUDIO.heart_from) / (1.0 - METER_AUDIO.heart_from), 0.0, 1.0)
+	if playing and m > METER_AUDIO.heart_from:
+		heart_t += dt
+		if heart_t >= 60.0 / lerpf(METER_AUDIO.bpm_min, METER_AUDIO.bpm_max, k):
+			heart_t = 0.0
+			last_beat = time
+			sfx_heart.volume_db = linear_to_db(lerpf(0.3, 1.0, k)) - 2.0
+			sfx_heart.play()
+	else:
+		heart_t = 0.6                       # so the first beat comes soon after the meter crosses in
+	var r := clampf((m - METER_AUDIO.riser_from) / (1.0 - METER_AUDIO.riser_from), 0.0, 1.0)
+	sfx_riser.volume_db = linear_to_db(maxf(pow(r, 1.5), 0.0001)) + METER_AUDIO.riser_db
+	sfx_riser.pitch_scale = 1.0 + METER_AUDIO.riser_pitch * r * r
+	music_base.volume_db = MUSIC_BASE_DB + linear_to_db(1.0 - METER_AUDIO.duck * m)
+	if state == "caught" and not was_caught:
+		sfx_caught.play()
+	was_caught = state == "caught"
 
 func _make_fonts() -> void:
 	var names := PackedStringArray(["Georgia", "Times New Roman", "serif"])
@@ -1468,9 +1520,10 @@ func _process(dt: float) -> void:
 	camera.position = cam.round()
 	mouse_world = get_global_mouse_position()
 	Input.mouse_mode = Input.MOUSE_MODE_HIDDEN if state == "play" else Input.MOUSE_MODE_VISIBLE
-	var hb := 0.0
-	if state != "title" and meter > 0.5:
-		hb = (meter - 0.5) * 2 * (0.5 + 0.5 * sin(time * (6 + meter * 6)))
+	var hb := 0.0                            # the red-edge pulse: one throb per heartbeat
+	if state != "title" and meter > METER_AUDIO.heart_from:
+		var k := clampf((meter - METER_AUDIO.heart_from) / (1.0 - METER_AUDIO.heart_from), 0.0, 1.0)
+		hb = (0.35 + 0.65 * k) * exp(-(time - last_beat) * 5.0)
 	post_mat.set_shader_parameter("heartbeat", hb)
 	update_music(dt)
 	post_mat.set_shader_parameter("seed", randf() * 100.0)
@@ -1927,6 +1980,23 @@ func _selftest_music() -> void:
 	for i in 300:
 		update_music(1.0 / 60.0)
 	print("  safe again for 5s: tension %.2f" % tension)
+	for level_m in [0.2, 0.5, 0.8, 0.98]:            # the meter, heard: beats per minute and the rising tone
+		start_run(0)
+		var beats := 0
+		var prev := last_beat
+		for i in 60 * 6:
+			meter = level_m
+			update_music(1.0 / 60.0)
+			time += 1.0 / 60.0
+			if last_beat != prev:
+				beats += 1
+				prev = last_beat
+		print("  meter %.2f: heartbeat %d BPM, tone %.0f dB at pitch x%.2f, base music %.1f dB" % [level_m, beats * 10, sfx_riser.volume_db, sfx_riser.pitch_scale, music_base.volume_db])
+	meter = 1.0
+	state = "caught"
+	update_music(1.0 / 60.0)
+	print("  caught -> sting playing: ", sfx_caught.playing)
+	start_run(0)
 	var ev := InputEventKey.new()
 	ev.physical_keycode = KEY_M
 	ev.pressed = true

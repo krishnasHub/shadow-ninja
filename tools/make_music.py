@@ -7,6 +7,10 @@
   godot/audio/music_tension.wav  same key, chords and length: a muted bass ostinato, a faint tick
                                  and a thin high shimmer. The game fades it in as danger rises.
 
+  godot/audio/heartbeat.wav      a muffled lub-dub; the game plays it faster and louder as the meter fills
+  godot/audio/riser.wav          an uneasy high cluster (loops); fades in and rises in pitch near full
+  godot/audio/caught.wav         a deep impact and a dissonant stab, when the meter fills
+
 Both versions of the game play these files (the HTML one from godot/audio/). Everything here is
 synthesised with numpy, so the music is original and easy to change: edit, run, replay.
 """
@@ -174,9 +178,41 @@ def write(path, x, peak):
         w.writeframes(pcm.tobytes())
     print(f'{path}: {len(x) / SR:.1f}s, {os.path.getsize(path) / 1e6:.1f} MB')
 
+# ---------------------------------------------------------------- meter sounds (one-shots and a loop)
+def heartbeat():                                         # lub-dub: two muffled low thumps
+    x = np.zeros(int(0.7 * SR))
+    place(x, thump(48, 0.45), 0.0)
+    place(x, thump(60, 0.4) * 0.7, 0.19)
+    return lowpass(x, 220)
+
+def riser(seconds=8.0):                                  # an uneasy high cluster that loops seamlessly
+    n = int(seconds * SR)
+    tt = np.arange(n + SR) / SR
+    x = np.zeros(len(tt))
+    for note, amp in (('D5', 1.0), ('Eb5', 0.8), ('A5', 0.5), ('Ab4', 0.6)):   # minor seconds and a tritone: unease
+        f = hz(note)
+        x += amp * np.sin(2 * np.pi * f * tt + rng.uniform(0, 6)) * (0.6 + 0.4 * np.sin(2 * np.pi * rng.uniform(4, 7) * tt))
+    x += 0.3 * lowpass(rng.standard_normal(len(tt)), 900)  # a breath of noise underneath
+    x = lowpass(x, 2200)
+    fade = np.linspace(0, 1, SR)                         # crossfade the extra second back onto the start
+    y = x[:n].copy()
+    y[:SR] = y[:SR] * fade + x[n:] * (1 - fade)
+    return y
+
+def caught_sting():                                      # a deep impact and a dissonant stab, ringing out
+    n = int(3.0 * SR)
+    tt = np.arange(n) / SR
+    boom = np.sin(2 * np.pi * np.cumsum(38 * (1 + 1.5 * np.exp(-tt / 0.05))) / SR) * np.exp(-tt / 0.6)
+    hit = lowpass(rng.standard_normal(n), 600) * np.exp(-tt / 0.08)
+    stab = sum(np.sin(2 * np.pi * hz(nn) * tt) for nn in ('D4', 'Eb4', 'Ab4', 'D5')) * np.exp(-tt / 0.9) * np.minimum(1, tt / 0.01)
+    return reverb(boom + 0.6 * hit + 0.25 * lowpass(stab, 1800), 2.4, 0.35)
+
 if __name__ == '__main__':
     root = os.path.join(os.path.dirname(__file__), '..', 'godot', 'audio')
     base = reverb(0.55 * pad() + 0.22 * drone() + 0.30 * plucks(), 2.8, 0.4) + 0.32 * pulse()
     write(os.path.join(root, 'music_base.wav'), fold(base), 0.55)
     tension = reverb(0.7 * ostinato() + 0.12 * ticks() + 0.10 * shimmer(), 1.6, 0.25)
     write(os.path.join(root, 'music_tension.wav'), fold(tension), 0.5)
+    write(os.path.join(root, 'heartbeat.wav'), heartbeat(), 0.8)
+    write(os.path.join(root, 'riser.wav'), riser(), 0.5)
+    write(os.path.join(root, 'caught.wav'), caught_sting(), 0.8)

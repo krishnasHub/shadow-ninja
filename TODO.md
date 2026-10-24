@@ -57,7 +57,8 @@ Run it: open `index.html` in a browser (single file, no build).
   - **base**: warm detuned pad (Dm(add9) - Bbmaj7 - Gm9 - A7sus4, 4 bars each), a low D drone, sparse pentatonic plucks with a dotted-eighth echo, and a soft low pulse on beats 1 and 3. Always on.
   - **tension**: a muted bass ostinato on the chord roots, a dry 16th tick, and a thin high shimmer. Same chords and length, started together with the base.
 - The tension layer's volume follows danger: meter x 1.3, a chasing guard 0.9, a searching/investigating guard 0.45, a camera on you 0.7. It rises quickly (0.6/s), settles slowly (0.2/s), and holds while paused. Levels: base -7 dB, tension -5 dB at full.
-- **M** toggles the music. In the browser it starts on the first key press or click (browsers block sound before that).
+- **The meter, heard** (`METER_AUDIO` in both versions): past 25% a muffled **heartbeat** starts and quickens from 70 to 150 BPM as the meter fills, getting louder. The screen's red-edge pulse now throbs once per beat. Past 45% an uneasy high **tone** (riser.wav: minor seconds plus a tritone, looping) fades in and rises up to +18% in pitch. The base music dips by up to 35%. Being caught plays **caught.wav** (a deep impact and a dissonant stab). Measured: meter 0.5 -> about 100 BPM, 0.8 -> 130, 0.98 -> about 145.
+- **M** toggles the music (the heartbeat, tone and sting are sound effects and keep playing). In the browser it starts on the first key press or click (browsers block sound before that).
 - Godot loads the WAVs at runtime (`AudioStreamWAV.load_from_file`), so a fresh clone needs no import step. Self-test: `--selftest=music`.
 
 ## Meter rules (current)

@@ -538,7 +538,38 @@ const music = { base: new Audio('godot/audio/music_base.wav'), tension: new Audi
 const MUSIC_BASE_VOL = 0.45, MUSIC_TENSION_VOL = 0.56;   // the same levels as the Godot version (-7 dB, -5 dB)
 for (const a of [music.base, music.tension]) { a.loop = true; a.preload = 'auto'; }
 music.base.volume = MUSIC_BASE_VOL; music.tension.volume = 0;
+// The meter's own sound: a heartbeat that quickens, an uneasy tone that rises, the music pulling
+// back - and a sting when you're caught. These are sound effects: M only toggles the music.
+const METER_AUDIO = {
+  heartFrom: 0.25, bpmMin: 70, bpmMax: 150,       // heartbeat starts at 25% full, 70 -> 150 BPM
+  riserFrom: 0.45, riserVol: 0.63, riserPitch: 0.18,   // the tone fades in past 45% (-4 dB at full), rising up to +18%
+  duck: 0.35,                                     // the base music dips by up to 35% at full
+};
+const sfx = { heart: new Audio('godot/audio/heartbeat.wav'), riser: new Audio('godot/audio/riser.wav'),
+              caught: new Audio('godot/audio/caught.wav') };
+sfx.riser.loop = true; sfx.riser.preservesPitch = false; sfx.riser.volume = 0;
+let heartT = 0, lastBeat = -99, wasCaught = false, sfxStarted = false;
+function playSfx(a, vol) { a.volume = clamp(vol, 0, 1); a.currentTime = 0; a.play().catch(() => {}); }
+function updateMeterAudio(dt) {
+  if (!sfxStarted) return;                         // nothing can play before the first key press or click
+  const playing = state === 'play', m = playing ? meter : 0;
+  const k = clamp((m - METER_AUDIO.heartFrom) / (1 - METER_AUDIO.heartFrom), 0, 1);
+  if (playing && m > METER_AUDIO.heartFrom) {
+    heartT += dt;
+    if (heartT >= 60 / lerp(METER_AUDIO.bpmMin, METER_AUDIO.bpmMax, k)) {
+      heartT = 0; lastBeat = time;
+      playSfx(sfx.heart, lerp(0.3, 1, k) * 0.79);  // -2 dB
+    }
+  } else heartT = 0.6;                             // so the first beat comes soon after the meter crosses in
+  const r = clamp((m - METER_AUDIO.riserFrom) / (1 - METER_AUDIO.riserFrom), 0, 1);
+  sfx.riser.volume = METER_AUDIO.riserVol * Math.pow(r, 1.5);
+  sfx.riser.playbackRate = 1 + METER_AUDIO.riserPitch * r * r;
+  music.base.volume = MUSIC_BASE_VOL * (1 - METER_AUDIO.duck * m);
+  if (state === 'caught' && !wasCaught) playSfx(sfx.caught, 1);
+  wasCaught = state === 'caught';
+}
 function startMusic() {
+  if (!sfxStarted) { sfxStarted = true; sfx.riser.play().catch(() => { sfxStarted = false; }); }
   if (music.started || !music.on) return;
   music.started = true;
   for (const a of [music.base, music.tension]) a.play().catch(() => { music.started = false; });
@@ -560,6 +591,7 @@ function musicDanger() {
 }
 function updateMusic(dt) {
   if (state === 'pause') return;                   // hold the mood while paused
+  updateMeterAudio(dt);
   const target = state === 'play' ? musicDanger() : 0;
   music.level = approach(music.level, target, dt * (target > music.level ? 0.6 : 0.2));   // rises quickly, settles slowly
   music.tension.volume = MUSIC_TENSION_VOL * music.level;
@@ -1592,8 +1624,9 @@ function render() {
   ctx.fillStyle = grainPattern; ctx.fillRect(-256, -256, VIEW_W + 256, VIEW_H + 256);
   ctx.restore();
   ctx.drawImage(vignetteCv, 0, 0);
-  if (showPlayer && meter > 0.5) {
-    ctx.globalAlpha = (meter - 0.5) * 2 * (0.5 + 0.5 * Math.sin(time * (6 + meter * 6)));
+  if (showPlayer && meter > METER_AUDIO.heartFrom) {   // the red-edge pulse: one throb per heartbeat
+    const k = clamp((meter - METER_AUDIO.heartFrom) / (1 - METER_AUDIO.heartFrom), 0, 1);
+    ctx.globalAlpha = (0.35 + 0.65 * k) * Math.exp(-(time - lastBeat) * 5);
     ctx.drawImage(vignetteCv, 0, 0); ctx.globalAlpha = 1;
   }
 
