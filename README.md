@@ -8,8 +8,8 @@ The rule the whole game is built on: **the light you see is the light that catch
 
 | Folder | What | Run it |
 |---|---|---|
-| `index.html` | The original prototype: one HTML file, canvas 2D, soft-edged lights | Open it in a browser |
-| `godot/` | A port in Godot 4.7: same level and rules, Godot 2D lights with hard-edged cones, menus | Double-click `godot/run.bat` (fullscreen), or open `godot/project.godot` in Godot and press F5 |
+| `godot/` | **The game** (Godot 4.7): the story, four floors, Godot 2D lights with hard-edged cones, menus, keyboard or Xbox controller | Double-click `godot/run.bat` (fullscreen), or open `godot/project.godot` in Godot and press F5 |
+| `index.html` | The original prototype, **frozen** at phase A (no story; its own three floors): one HTML file, canvas 2D | Open it in a browser (serve it over http for the sounds) |
 
 ## Controls
 

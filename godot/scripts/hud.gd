@@ -18,7 +18,33 @@ func _text(s: String, pos: Vector2, font: Font, size: int, col: Color, spacing :
 func _draw() -> void:
 	if m.state != "title":
 		_hud()
+		_opening()
 	_screens()
+
+# The opening scene: a white fade as the chemical wears off, the prompt to hide, then the
+# letterbox and the guards' lines over their heads.
+func _opening() -> void:
+	if m.state != "play":
+		return
+	if m.intro == "hide" and m.intro_t > 1.6:
+		var left := maxf(0.0, m.level.intro.hide - m.intro_t)
+		var a := clampf((m.intro_t - 1.6) / 0.8, 0.0, 1.0)
+		_text(_k("footsteps.  hide  -  ↓  behind the bench.", "footsteps.  hide  -  B  behind the bench."), Vector2(480, 140), m.font_italic, 18, Color(1, 1, 1, 0.8 * a), 0, true)
+		_text("%d" % ceili(left), Vector2(480, 172), m.font_regular, 15, Color(1, 1, 1, 0.5 * a), 3, true)
+	if m.bars > 0.0:
+		var h: float = 62.0 * m.bars
+		draw_rect(Rect2(0, 0, 960, h), Color(0, 0, 0))
+		draw_rect(Rect2(0, 540 - h, 960, h), Color(0, 0, 0))
+	if m.intro == "talk":
+		var line: Array = m.level.intro.talk[m.talk_i]
+		var ig: Array = m.intro_guards()
+		var g = ig[line[0]]
+		var a := clampf(m.talk_t / 0.25, 0.0, 1.0)
+		var p: Vector2 = Vector2(g.x, g.y - 84) - m.cam
+		_text(line[1], Vector2(clampf(p.x, 200, 760), p.y), m.font_italic, 16, Color(1, 1, 1, 0.92 * a), 0, true)
+		_text(_k("SPACE  next    ·    ESC  skip", "A  next    ·    START  skip"), Vector2(480, 520), m.font_regular, 10, Color(1, 1, 1, 0.35), 2, true)
+	if m.level.has("intro") and m.intro == "hide" and m.intro_t < 2.6:   # waking: the white goes
+		draw_rect(Rect2(0, 0, 960, 540), Color(1, 1, 1, pow(1.0 - m.intro_t / 2.6, 1.6)))
 
 func _eye(c: Vector2, o: float) -> void:            # opens with exposure
 	var hh := 1 + o * 8
@@ -130,7 +156,13 @@ func _screens() -> void:
 				_text(_k("ENTER  menu    ·    R  replay this floor", "A  menu    ·    VIEW  replay this floor"), Vector2(480, 375), m.font_regular, 13, Color(1, 1, 1, 0.5), 2, true)
 			else:
 				_text(m.level.name + "  CLEARED", Vector2(480, 260), m.font_regular, 40, Color(1, 1, 1, 0.92), 12, true)
-				_text("down the stairs, into the dark.", Vector2(480, 300), m.font_italic, 16, Color(1, 1, 1, 0.6), 0, true)
+				if m.level.has("remember"):         # what this floor brought back
+					var mem: Dictionary = m.level.remember
+					var accent := Color(0.62, 0.08, 0.1, 0.95) if mem.has("colors") else Color(1, 1, 1, 0.75)
+					_text(mem.lines[0], Vector2(480, 296), m.font_italic, 16, accent, 0, true)
+					_text(mem.lines[1], Vector2(480, 316), m.font_regular, 12, Color(1, 1, 1, 0.5), 1, true)
+				else:
+					_text("down the stairs, into the dark.", Vector2(480, 300), m.font_italic, 16, Color(1, 1, 1, 0.6), 0, true)
 				_times(t)
 				_text(_k("ENTER  next floor    ·    R  replay this floor    ·    ESC  menu", "A  next floor    ·    VIEW  replay this floor    ·    START  menu"), Vector2(480, 375), m.font_regular, 13, Color(1, 1, 1, 0.5), 2, true)
 
@@ -142,9 +174,9 @@ func _times(t: float) -> void:
 		line += "    ·    new best"
 	elif m.best.has(m.level_idx):
 		line += "    ·    best  " + m.clock(m.best[m.level_idx])
-	_text(line, Vector2(480, 333), m.font_regular, 14, Color(1, 1, 1, 0.75 * a), 3, true)
+	_text(line, Vector2(480, 340), m.font_regular, 14, Color(1, 1, 1, 0.75 * a), 3, true)
 	if m.alarm_raised:
-		_text("alarm raised", Vector2(480, 352), m.font_italic, 13, Color(1, 1, 1, 0.5 * a), 0, true)
+		_text("alarm raised", Vector2(480, 357), m.font_italic, 13, Color(1, 1, 1, 0.5 * a), 0, true)
 
 func _menu(paused: bool) -> void:
 	draw_rect(Rect2(0, 0, 960, 540), Color(0, 0, 0, 0.62 if paused else 0.55))

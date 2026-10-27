@@ -132,6 +132,7 @@ class Guard:
 	var knows_hide := -1
 	var aim := 0.15
 	var invest_x := 0.0
+	var intro_to := -1.0     # the opening: where he runs in to (px), or -1
 	var hunting_you := false
 	var alert := false
 	var found := false
@@ -175,6 +176,18 @@ var spawn := Vector2.ZERO
 var exit_x := 0.0
 var door_x := 0                 # tiles
 var level_t := 0.0              # seconds since this floor started (drives the floor-name banner)
+# Memory: what the floors before this one brought back. Abilities ("cling", "takedown") and colours ("scarf").
+var can := {}
+var scarf_red := false
+# The opening scene (Floor 1): "hide" (fade in, ~10 s to get out of sight) -> "arrive" (two guards run
+# in) -> "talk" (letterbox, no control, their lines over their heads) -> "leave" (they go to their
+# rounds, the bars slide away). Spotted at any point: it's just the game, they hunt you.
+var intro := ""
+var intro_t := 0.0
+var intro_seen := false         # the talk played once this session: a retry skips it
+var talk_i := 0
+var talk_t := 0.0
+var bars := 0.0                 # letterbox, 0..1
 var notice := ""                # a line that fades in mid-screen, e.g. "a door unlocks below."
 var pad := false                # the last input came from a controller: prompts name its buttons
 var pad_aim := Vector2.ZERO     # controller throw mode: where the stone goes, relative to the ninja
@@ -299,6 +312,8 @@ func _ready() -> void:
 			_selftest_lockon()
 		elif _capture.selftest == "alarm":
 			_selftest_alarm()
+		elif _capture.selftest == "intro":
+			_selftest_intro()
 		elif _capture.selftest == "music":
 			_selftest_music()
 		else:
@@ -360,7 +375,7 @@ func music_danger() -> float:
 	return clampf(d, 0.0, 1.0)
 
 func update_music(dt: float) -> void:
-	var siren_on := alarm != "" and state == "play"
+	var siren_on := (alarm != "" or intro == "hide" or intro == "arrive") and state == "play"
 	if siren_on != sfx_siren.playing and sfx_siren.stream != null:
 		if siren_on:
 			sfx_siren.play()
@@ -538,8 +553,66 @@ func update_hints(dt: float) -> void:
 		var x0: float = h[0] * T
 		var dx := maxf(0.0, maxf(x0 - mid, mid - (x0 + w)))
 		var up: float = P.y + P.h - h[1]
-		var near: bool = dx < HINT_NEAR.x and up >= 0.0 and up < HINT_NEAR.y
+		var near: bool = dx < HINT_NEAR.x and up >= 0.0 and up < HINT_NEAR.y and intro != "talk"
 		hint_a[i] = move_toward(hint_a[i], 1.0 if near else 0.0, dt * (HINT_NEAR["in"] if near else HINT_NEAR.out))
+
+# The opening scene. See `intro` above.
+func intro_guards() -> Array:
+	return guards.filter(func(g): return g.intro_to >= 0.0)
+
+func update_intro(dt: float) -> void:
+	bars = move_toward(bars, 1.0 if intro == "talk" else 0.0, dt * 1.6)
+	if intro == "":
+		return
+	intro_t += dt
+	var ig := intro_guards()
+	var waiting := ["intro", "intro_run", "intro_talk"]
+	if intro != "talk" and intro != "leave" and ig.any(func(g): return not g.state in waiting):
+		intro = ""                          # they saw or heard you: no scene, just the hunt
+		level_t = 0.0
+		return
+	match intro:
+		"hide":
+			if intro_t >= level.intro.hide:
+				intro = "arrive"
+				for g in ig:
+					g.state = "intro_run"
+		"arrive":
+			if ig.all(func(g): return absf(g.x - g.intro_to) < 3.0):
+				intro = "talk"
+				talk_i = 0
+				talk_t = 0.0
+				aiming = false
+				P.vx = 0.0
+				for g in ig:
+					g.state = "intro_talk"
+					g.facing = -1
+					g.moving = false
+					g.cur_v = 0.0
+				if intro_seen:
+					end_talk()              # a retry: you've heard it
+		"talk":
+			talk_t += dt
+			var line: Array = level.intro.talk[talk_i]
+			if talk_t > 1.3 + 0.045 * String(line[1]).length():
+				next_line()
+		"leave":
+			if bars <= 0.0:
+				intro = ""
+
+func next_line() -> void:
+	talk_i += 1
+	talk_t = 0.0
+	if talk_i >= level.intro.talk.size():
+		end_talk()
+
+func end_talk() -> void:
+	intro = "leave"
+	intro_seen = true
+	level_t = 0.0                           # now the floor's name
+	for g in intro_guards():
+		if g.state == "intro_talk":
+			g.state = "return"              # off to their rounds, looking for the thief
 
 # A camera saw you: start the countdown (unless one's running, or every panel is already dead).
 func raise_alarm(x: float) -> void:
@@ -963,6 +1036,25 @@ func start_run(idx := -1) -> void:
 	state_t = 0.0
 	level_t = 0.0
 	notice_t = 99.0
+	can = {}
+	scarf_red = false
+	for i in level_idx:                     # everything the floors before this one brought back
+		var mem: Dictionary = Levels.LEVELS[i].get("remember", {})
+		for a in mem.get("abilities", []):
+			can[a] = true
+		if "scarf" in mem.get("colors", []):
+			scarf_red = true
+	intro = ""
+	bars = 0.0
+	if level.has("intro"):
+		intro = "hide"
+		intro_t = 0.0
+		level_t = 99.0                      # the floor's name waits for the scene to end
+		P.facing = -1                       # facing the machine
+		for g in guards:
+			if g.intro_to >= 0.0:
+				g.state = "intro"
+				g.facing = -1
 
 var test_keys = null    # self-test: a Dictionary of held keys replaces the keyboard
 
@@ -1013,6 +1105,12 @@ func pad_button(b: int) -> void:
 			JOY_BUTTON_DPAD_LEFT: KEY_LEFT, JOY_BUTTON_DPAD_RIGHT: KEY_RIGHT}.get(b, 0)
 		if code != 0 or menu_page == "howto":
 			menu_key(code)
+		return
+	if intro == "talk" and state == "play":
+		if b == JOY_BUTTON_A:
+			next_line()
+		elif b == JOY_BUTTON_START or b == JOY_BUTTON_B:
+			end_talk()
 		return
 	match b:
 		JOY_BUTTON_A:
@@ -1081,6 +1179,12 @@ func _unhandled_input(e: InputEvent) -> void:
 			return
 		if in_menu():
 			menu_key(code)
+			return
+		if intro == "talk" and state == "play":
+			if code in [KEY_SPACE, KEY_ENTER, KEY_KP_ENTER, KEY_W, KEY_UP]:
+				next_line()
+			elif code in [KEY_ESCAPE, KEY_P]:
+				end_talk()
 			return
 		match code:
 			KEY_SPACE, KEY_W, KEY_UP:
@@ -1415,7 +1519,7 @@ func update_player(dt: float) -> void:
 		else:
 			P.y = (floorf(P.y / T) + 1) * T
 			P.vy = 0.0
-			if grip_over(P.x) and not held("down"):   # head hits a duct: grab on
+			if can.has("cling") and grip_over(P.x) and not held("down"):   # head hits a duct: grab on (once remembered)
 				start_cling()
 				return
 	# a hard landing is loud unless you're sneaking (Shift)
@@ -1499,8 +1603,8 @@ func update_detection(dt: float) -> void:
 	var e := 0.0
 	var fill_amt := 0.0
 	for L in all_lights():
-		if P.hidden and not light_reaches_hidden(L):
-			continue
+		if L.danger <= 0.0 or (P.hidden and not light_reaches_hidden(L)):
+			continue                         # (danger 0: lights that can't catch you, like the vial machine's alarm)
 		var s := 0.0
 		for p in pts:
 			s += light_at(L, p)
@@ -1696,6 +1800,7 @@ func make_guard(d: Dictionary, idx: int) -> Guard:
 	g.to_x = d["to"] * T
 	g.min_x = d.min_x * T + 12
 	g.max_x = d.max_x * T - 12
+	g.intro_to = d.get("intro_to", -1.0) * T if d.has("intro_to") else -1.0
 	if torch_pool.size() <= idx:
 		torch_pool.append(make_light("torch", Vector2(g.x, g.y - 32), 0.0, GUARD.torch_spread,
 			GUARD.torch_radius, 1.0, STOPS_LAMP, GUARD.danger))
@@ -1786,6 +1891,9 @@ func update_guard(g: Guard, dt: float) -> void:
 		g.facing = g.search_facing * (-1 if floori((time - g.search_start) / 1.3) % 2 == 1 else 1)
 		if time - g.search_start > (GUARD.alert_search if g.alert else GUARD.search_time):
 			g.state = "return"
+	elif g.state == "intro_run":                    # the opening: running in to the machine
+		speed = GUARD.chase * 1.6                    # running: something's been stolen
+		target = g.intro_to
 	elif g.state == "return":
 		target = clampf(g.x, g.from_x, g.to_x)
 		if absf(target - g.x) < 2:
@@ -1830,7 +1938,7 @@ func update_guards(dt: float) -> void:
 			g.knows_hide = -1
 	P.was_hidden = P.hidden
 	# takedown: come down on a guard who can't see you
-	if not P.on_ground and P.vy > 0:
+	if not P.on_ground and P.vy > 0 and can.has("takedown"):
 		for g in guards:
 			if g.state == "asleep" or time - g.seen_t < 0.15:
 				continue
@@ -1862,13 +1970,15 @@ func _physics_process(dt: float) -> void:
 		return
 	if state != "play":
 		return
-	update_player(dt)
-	update_stones(dt)
+	update_intro(dt)
+	if intro != "talk":                      # the talk is a cutscene: no control, nobody looks
+		update_player(dt)
+		update_stones(dt)
+		update_guards(dt)
+		update_detection(dt)
+		update_cameras(dt)
+		update_alarm(dt)
 	update_scarf()
-	update_guards(dt)
-	update_detection(dt)
-	update_cameras(dt)
-	update_alarm(dt)
 	update_hints(dt)
 	run_t += dt
 	level_t += dt
@@ -1907,6 +2017,7 @@ func _process(dt: float) -> void:
 
 # Dev tool: put the game in a known spot for a screenshot.
 func _capture_setup(setup: String) -> void:
+	load_level(1)                           # default setups are on the offices
 	match setup:
 		"title":
 			open_menu("title")
@@ -1919,15 +2030,15 @@ func _capture_setup(setup: String) -> void:
 			open_menu("pause")
 			menu_sel = 2
 		"floor2":
-			start_run(1)
+			start_run(3)
 			P.x = 3 * T
 			level_t = 1.0
 		"catwalk":
-			start_run(1)
+			start_run(3)
 			P.x = 56 * T
 			P.y = 10 * T - P.h
 		"camera":
-			start_run(1)
+			start_run(3)
 			P.x = 84 * T
 			guards[3].x = 104 * T
 		"floor3":
@@ -1945,15 +2056,43 @@ func _capture_setup(setup: String) -> void:
 			P.y = 12 * T - P.h
 			P.facing = 1
 			level_t = 9.0
+		"opening":                              # floor 1: waking by the machine, told to hide
+			start_run(0)
+			intro_t = 3.0
+		"talk":                                 # floor 1: hidden behind the bench, the guards talking
+			start_run(0)
+			P.x = 5.6 * T - P.w / 2
+			P.y = 15 * T - TUNE.crawl_h
+			P.h = TUNE.crawl_h
+			P.crawling = true
+			for g in guards:
+				g.x = g.intro_to
+				g.state = "intro_talk"
+				g.torch.pos = Vector2(g.x - 14, g.y - 32)
+				g.torch.dir = PI - g.aim
+				g.torch.node.position = g.torch.pos
+				g.torch.node.rotation = g.torch.dir
+			intro = "talk"
+			talk_i = 1
+			bars = 1.0
+		"remember":                             # floor 3 cleared: the scarf comes back
+			start_run(2)
+			run_t = 151.0
+			state = "escaped"
+			state_t = 3.0
+		"scarf":                                # floor 4, under a lamp: the red scarf
+			start_run(3)
+			P.x = 12.2 * T
+			level_t = 9.0
 		"howto":                                # the how-to-play card before the first New Game
 			open_menu("title")
 			menu_page = "howto"
 		"alarm":                                # floor 2: the camera has you, the alarm clock runs
-			start_run(1)
+			start_run(3)
 			P.x = 87 * T
 			level_t = 9.0
 		"cleared":                              # floor 2's end screen, with the alarm raised
-			start_run(1)
+			start_run(3)
 			run_t = 83.0
 			alarm_raised = true
 			best[1] = 71.0
@@ -1988,6 +2127,7 @@ func _run(frames: int) -> void:
 		_physics_process(1.0 / 60.0)
 
 func _selftest() -> void:
+	load_level(1)                           # these scenarios were built on the offices
 	var out := {}
 	test_keys = {}
 	# hiding under the first lamp
@@ -2119,6 +2259,7 @@ func _selftest() -> void:
 # Dev tool: throw mode - Ctrl toggles it, the mouse only throws inside it, and it ends after one throw.
 #   godot_console --headless --path . -- --selftest=throwmode
 func _selftest_throw_mode() -> void:
+	load_level(1)
 	var press := func(code):
 		var ev := InputEventKey.new()
 		ev.physical_keycode = code
@@ -2230,10 +2371,10 @@ func _selftest_floor2() -> void:
 		ev.pressed = true
 		_unhandled_input(ev)
 	test_keys = {}
-	start_run(0)
+	start_run(2)
 	P.x = exit_x
 	_run(2)
-	print("  floor 1 exit -> state: ", state)
+	print("  floor 3 exit -> state: ", state)
 	press.call(KEY_ENTER)
 	print("  Enter -> ", level.name, " (", level.subtitle, "), width ", LW, ", guards ", guards.size(), ", lights ", lights.size())
 	# the climb: floor -> crate -> crate -> catwalk, one held jump each
@@ -2259,7 +2400,7 @@ func _selftest_floor2() -> void:
 	for L in lights:
 		if L.kind == "camera":
 			cam_l = L
-	start_run(1)
+	start_run(3)
 	for L in lights:                       # the floor was reloaded: find its camera again
 		if L.kind == "camera":
 			cam_l = L
@@ -2275,7 +2416,7 @@ func _selftest_floor2() -> void:
 		if g.state == "investigate" or g.state == "search" or g.state == "chase":
 			called.append(guards.find(g))
 	print("  standing under the camera: seen after %.1fs, guards called: %s, meter %.2f" % [seen_t, called, meter])
-	start_run(1)
+	start_run(3)
 	for L in lights:
 		if L.kind == "camera":
 			cam_l = L
@@ -2347,7 +2488,7 @@ func _selftest_floor3() -> void:
 #   godot_console --headless --path . -- --selftest=lockon
 func _selftest_lockon() -> void:
 	test_keys = {}
-	start_run(0)
+	start_run(1)
 	var g: Guard = guards[0]
 	for o in guards:
 		if o != g:
@@ -2369,7 +2510,7 @@ func _selftest_lockon() -> void:
 	var lost := _walk({}, func(): return g.state == "search", 400)
 	print("  out of reach (x%.0f, he's at x%.0f): gives up and searches after %.1fs" % [P.x / T, g.x / T, lost / 60.0])
 	# camera: locks on and follows; hiding breaks it; it eases back into the sweep
-	start_run(1)
+	start_run(3)
 	_sleep_all()
 	var cam_l: Lt = null
 	for L in lights:
@@ -2407,7 +2548,7 @@ func _selftest_lockon() -> void:
 #   godot_console --headless --path . -- --selftest=alarm
 func _selftest_alarm() -> void:
 	test_keys = {}
-	start_run(1)
+	start_run(3)
 	_sleep_all()
 	P.x = 90 * T
 	_walk({}, func(): return alarm != "", 60 * 7)
@@ -2426,7 +2567,7 @@ func _selftest_alarm() -> void:
 	print("  stone from behind the cooler (in range: %s): panel broken after %.2fs, alarm: '%s', told: '%s'" % [a.in_range, hit / 60.0, alarm, notice])
 	_run(60)
 	print("  camera sees you again with the panel dead -> alarm: '%s'" % alarm)
-	start_run(1)
+	start_run(3)
 	print("  retry: panel whole again: ", not panels[0].broken, ", alarm '", alarm, "'")
 	# the countdown runs out: lockdown
 	for g in guards:
@@ -2447,17 +2588,62 @@ func _selftest_alarm() -> void:
 		after.append("%s%s" % [g.state, "!" if g.alert else ""])
 	print("  lockdown over -> alarm '%s'; 12s later guards: %s (! = still alert)" % [alarm, after])
 	# floor time and best
-	start_run(0)
+	start_run(1)
 	_run(90)
 	P.x = exit_x
 	_run(2)
 	var t1 := run_t
-	print("  floor 1 cleared in %s, new best: %s, saved best: %s" % [clock(run_t), new_best, clock(best.get(0, -1.0))])
-	start_run(0)
+	print("  offices cleared in %s, new best: %s, saved best: %s" % [clock(run_t), new_best, clock(best.get(1, -1.0))])
+	start_run(1)
 	_run(200)
 	P.x = exit_x
 	_run(2)
-	print("  slower run %s -> new best: %s (best still %s)" % [clock(run_t), new_best, clock(best[0])])
+	print("  slower run %s -> new best: %s (best still %s)" % [clock(run_t), new_best, clock(best[1])])
+	test_keys = null
+
+
+# Dev tool: the opening scene, memory, and the lab's route.
+#   godot_console --headless --path . -- --selftest=intro
+func _selftest_intro() -> void:
+	test_keys = {}
+	start_run(0)
+	print("  %s (%s): scene '%s', facing %+d, remembers %s" % [level.name, level.subtitle, intro, P.facing, can.keys()])
+	P.x = 5.6 * T - P.w / 2                      # behind the bench, ducked
+	var talk := _walk({"down": true}, func(): return intro == "talk", 60 * 16)
+	print("  hidden behind the bench: the guards arrive, the talk starts at %.1fs; hidden %s, meter %.2f" % [talk / 60.0, P.hidden, meter])
+	var seen_lines := {}                          # (a dictionary: lambdas capture it by reference)
+	var leave := _walk({"down": true}, func():
+		seen_lines[talk_i] = true
+		return intro != "talk", 60 * 60)
+	print("  the talk: %d lines over %.1fs, bars %.2f, meter %.2f, now '%s'" % [seen_lines.size(), leave / 60.0, bars, meter, intro])
+	_walk({"down": true}, func(): return intro == "", 120)
+	_run(60 * 6)
+	print("  after: scene over, guards %s at x %s, floor name showing: %s" % [guards.map(func(g): return g.state), guards.map(func(g): return int(g.x / T)), level_t < 3.5])
+	start_run(0)                                  # a retry, hidden: the talk is skipped
+	P.x = 5.6 * T - P.w / 2
+	_walk({"down": true}, func(): return intro == "leave" or intro == "", 60 * 16)
+	print("  retry, hidden: talk skipped -> '%s'" % intro)
+	start_run(0)                                  # standing in the open by the machine
+	var hunt := _walk({}, func(): return intro == "", 60 * 16)
+	for i in 60 * 8:
+		if state != "play":
+			break
+		_run(1)
+	print("  not hidden: the scene drops after %.1fs (%s), then: %s" % [hunt / 60.0, guards.map(func(g): return g.state), state])
+	for i in Levels.LEVELS.size():
+		start_run(i)
+		print("  %s remembers: %s%s" % [level.name, can.keys(), "  + red scarf" if scarf_red else ""])
+	# the lab's route, guards asleep: the pipes (crawl), the crates (jump), out
+	start_run(0)
+	intro = ""
+	_sleep_all()
+	P.x = 45 * T
+	_walk({"right": true}, func(): return false, 150)
+	var at_pipes := (P.x + P.w) / T
+	_walk({"right": true, "down": true}, func(): return P.x > 56.5 * T, 400)
+	var through := P.x / T
+	var out := _walk({"right": true, "jump": true}, func(): return state == "escaped", 900)
+	print("  lab route: stopped at the pipes x%.1f, crawled through to x%.1f, out after %.1fs: %s" % [at_pipes, through, out / 60.0, state])
 	test_keys = null
 
 
@@ -2465,7 +2651,7 @@ func _selftest_alarm() -> void:
 #   godot_console --headless --path . -- --selftest=music
 func _selftest_music() -> void:
 	print("  loops: base %.0fs, tension %.0fs, playing: %s" % [music_base.stream.get_length(), music_tension.stream.get_length(), music_base.playing and music_tension.playing])
-	start_run(0)
+	start_run(1)
 	test_keys = {}
 	for i in 120:
 		_run(1)
@@ -2483,7 +2669,7 @@ func _selftest_music() -> void:
 		update_music(1.0 / 60.0)
 	print("  safe again for 5s: tension %.2f" % tension)
 	for level_m in [0.2, 0.5, 0.8, 0.98]:            # the meter, heard: beats per minute and the rising tone
-		start_run(0)
+		start_run(1)
 		var beats := 0
 		var prev := last_beat
 		for i in 60 * 6:
@@ -2498,7 +2684,7 @@ func _selftest_music() -> void:
 	state = "caught"
 	update_music(1.0 / 60.0)
 	print("  caught -> sting playing: ", sfx_caught.playing)
-	start_run(0)
+	start_run(1)
 	var ev := InputEventKey.new()
 	ev.physical_keycode = KEY_M
 	ev.pressed = true

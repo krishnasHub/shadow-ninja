@@ -240,6 +240,21 @@ func _prop(p: Dictionary) -> void:
 			while sy < y - 6:
 				draw_rect(Rect2(x + 4, sy, 32, 2), grey(0x22))
 				sy += 12
+		"machine":                                  # the vial machine: a tall cabinet, its door swung open, one vial gone
+			draw_rect(Rect2(x - 2, y - 24, 56, 24), c)
+			draw_rect(Rect2(x, y - 116, 52, 94), c)
+			draw_rect(Rect2(x + 5, y - 110, 42, 82), grey(0x0b))
+			for sh in 3:
+				var sy := y - 106 + sh * 27
+				draw_rect(Rect2(x + 5, sy + 21, 42, 3), c)
+				for v in 5:
+					if sh == 1 and v == 2:
+						continue                    # the empty slot
+					draw_rect(Rect2(x + 9 + v * 8, sy + 5, 4, 16), grey(0x26))
+					draw_rect(Rect2(x + 9 + v * 8, sy + 3, 4, 3), grey(0x1a))
+			draw_colored_polygon(PackedVector2Array([Vector2(x + 52, y - 114), Vector2(x + 68, y - 106),
+				Vector2(x + 68, y - 34), Vector2(x + 52, y - 26)]), grey(0x19))
+			draw_rect(Rect2(x + 34, y - 18, 12, 8), grey(0x22))
 		"chair":
 			draw_rect(Rect2(x, y - 20, 22, 4), c)
 			draw_rect(Rect2(x + 18, y - 40, 4, 22), c)
@@ -309,7 +324,10 @@ func _ninja() -> void:
 	var f: float = P.facing
 	# stride grows with speed, so a slow first step is a small step
 	var sw: float = sin(P.walk_phase) * clampf(absf(P.vx) / (50.0 if (P.crawling or P.clinging) else 120.0), 0.0, 1.0)
-	draw_polyline(m.scarf_pos, col, 3.0, true)
+	var scarf := col
+	if m.scarf_red:                                 # remembered: the one colour he has. Deep red, darker in shadow
+		scarf = Color(lerpf(0.16, 0.62, P.vis), lerpf(0.02, 0.07, P.vis), lerpf(0.03, 0.08, P.vis))
+	draw_polyline(m.scarf_pos, scarf, 3.0, true)
 	var cx: float = P.x + P.w / 2
 	var by: float = P.y + P.h
 	if P.crawling or P.clinging:
@@ -365,6 +383,10 @@ func _overlay() -> void:
 		elif fmod(m.time, 1.2) < 0.6:
 			draw_circle(lp, 5.0, Color(1, 1, 1, 0.2))
 			draw_circle(lp, 2.0, Color(1, 1, 1, 0.7))
+	for L in m.lights:                              # the vial machine's alarm light: a bulb that flashes with it
+		if L.kind == "alarm" and L.level > 0.0:
+			draw_circle(L.pos, 9.0, Color(1, 1, 1, 0.25))
+			draw_circle(L.pos, 3.0, Color(1, 1, 1, 0.95))
 	for pn in m.panels:                             # panel light: a slow pulse; fast in an alarm; sparks, then dark, once broken
 		var lp := Vector2(pn.x * T, pn.row * T - 54)
 		if pn.broken:
