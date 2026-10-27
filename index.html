@@ -44,6 +44,7 @@ const TUNE = {
   exposedThreshold: 0.03,
   landNoiseV: 600,                   // landings faster than this are loud (drops of up to 3 tiles are quiet)
   flipTime: 0.65,                    // pulling a lever: the ninja stops, reaches, pulls
+  leverReach: 48,                    // a lever this close (px, either side) is pulled; he steps over to it first
 };
 // Meter bands - guards (milestone 3) will react to these.
 const METER_SUSPICIOUS = 0.35, METER_ALERT = 0.65;
@@ -80,7 +81,8 @@ const lctx = lightCv.getContext('2d');
 //    guards: x start, patrol from/to, walkable bounds minX/maxX, row they stand on
 //    exit:   the door's tile x; reaching it clears the floor (exitRow: the row it stands on, default 15)
 //    height: rows (default 17). The floor is always the bottom 2 rows; taller floors scroll vertically.
-//    doors:  [x, y, w, h] locked doors (solid);  switches: {x, row, door} - walk up to one and the
+//    doors:  [x, y, w, h] locked doors (solid);  switches: {x, row, door} - walk up to one (within
+//            TUNE.leverReach, so keep a lever within that of any wall) and the
 //            ninja pulls it, which opens doors[door]. Stairs are just 1-tile steps: walking climbs them.
 // =====================================================================
 const LEVELS = [
@@ -169,7 +171,7 @@ const LEVELS = [
     holes: [],
     ducts: [[74, 8, 9, 1], [44, 19, 8, 1]],
     doors: [[60, 21, 1, 3]],
-    switches: [{ x: 96.5, row: 12, door: 0 }],
+    switches: [{ x: 98.3, row: 12, door: 0 }],
     props: [['rack', 5, 24], ['desk', 9, 24], ['rack', 15, 24], ['desk', 20, 24], ['rack', 26, 24],
       ['cooler', 33, 24], ['desk', 41, 24], ['rack', 48, 24], ['plant', 55, 24],
       ['desk', 64, 24], ['rack', 70, 24], ['cooler', 76, 24], ['desk', 82, 24], ['rack', 88, 24], ['plant', 92, 24],
@@ -193,7 +195,7 @@ const LEVELS = [
       { kind: 'lamp', x: 52.5, spread: 0.45, radius: 420 },
       { kind: 'lamp', x: 64.5, spread: 0.45, radius: 420 },
       { kind: 'camera', x: 79.5, spread: 0.14, radius: 420, sweep: [0.6, 5], danger: 1.5 },
-      { kind: 'lamp', x: 92.5, spread: 0.4, radius: 420 },                         // over the lever
+      { kind: 'lamp', x: 93.5, spread: 0.4, radius: 420 },                         // over the lever
       { kind: 'sign', x: 96 },
     ],
     guards: [
@@ -210,6 +212,7 @@ const LEVELS = [
 let LH = 17;                                       // this floor's height in rows (tall floors scroll vertically)
 let exitRow = 15, switches = [], doors = [];       // doors: {x, y, w, h, open}; switches: {x, row, door, on, anim}
 let LW = 100, grid = new Uint8Array(0), level = null, levelIdx = 0, levelT = 0;
+let notice = '', noticeT = 99;                     // a line that fades in mid-screen, e.g. "a door unlocks below."
 let SPAWN = { x: 0, y: 0 }, EXIT_X = 0, DOOR_X = 0, PROPS = [], HINTS = [], GUARD_DEFS = [];
 function fill(x, y, w, h, v = 1) {
   for (let j = y; j < y + h; j++) for (let i = x; i < x + w; i++) grid[j * LW + i] = v;
@@ -482,7 +485,7 @@ function loadLevel(idx) {
   for (const r of level.holes) fill(r[0], r[1], r[2], r[3], 0);
   for (const r of level.ducts) fill(r[0], r[1], r[2], r[3], GRIP);
   doors = (level.doors || []).map(([x, y, w, h]) => { fill(x, y, w, h, DOOR); return { x, y, w, h, open: false }; });
-  switches = (level.switches || []).map(sw => ({ ...sw, on: false, anim: 0 }));
+  switches = (level.switches || []).map(sw => ({ ...sw, on: false, anim: 0, onT: -99 }));
   PROPS = level.props.map(([type, x, row]) => ({ type, x, y: row * T }));
   HINTS = level.hints; GUARD_DEFS = level.guards;
   SPAWN = { x: level.spawn[0] * T, y: level.spawn[1] * T - TUNE.standH };
@@ -496,6 +499,16 @@ function openDoor(i) {
   const d = doors[i];
   d.open = true;
   fill(d.x, d.y, d.w, d.h, 0);
+  rebuildGeometry();
+}
+// A retry starts the floor over: every lever up, every door it opened locked again.
+function resetDoors() {
+  for (const sw of switches) { sw.on = false; sw.anim = 0; sw.onT = -99; }
+  let changed = false;
+  for (const d of doors) if (d.open) { d.open = false; fill(d.x, d.y, d.w, d.h, DOOR); changed = true; }
+  if (changed) rebuildGeometry();
+}
+function rebuildGeometry() {
   SEGS = buildSegments();
   for (const L of LIGHTS) L.poly = visibilityPolygon(L.x, L.y, L.radius);
 }
@@ -546,7 +559,7 @@ const METER_AUDIO = {
   duck: 0.35,                                     // the base music dips by up to 35% at full
 };
 const sfx = { heart: new Audio('godot/audio/heartbeat.wav'), riser: new Audio('godot/audio/riser.wav'),
-              caught: new Audio('godot/audio/caught.wav') };
+              caught: new Audio('godot/audio/caught.wav'), lever: new Audio('godot/audio/lever.wav') };
 sfx.riser.loop = true; sfx.riser.preservesPitch = false; sfx.riser.volume = 0;
 let heartT = 0, lastBeat = -99, wasCaught = false, sfxStarted = false;
 function playSfx(a, vol) { a.volume = clamp(vol, 0, 1); a.currentTime = 0; a.play().catch(() => {}); }
@@ -700,6 +713,7 @@ let meter = 0, exposure = 0, calm = 0;
 
 function startRun(idx = -1) {
   if (idx >= 0) loadLevel(idx);
+  resetDoors();
   Object.assign(P, { x: SPAWN.x, y: SPAWN.y, w: TUNE.width, h: TUNE.standH, vx: 0, vy: 0, onGround: false,
                      facing: 1, crawling: false, running: false, coyote: 0, jumpBuf: 0, walkPhase: 0, moveT: 0, lean: 0, vis: 0, cover: null, hidden: false, wasHidden: false, clinging: false, flipSw: -1, flipT: 0 });
   guards = GUARD_DEFS.map(makeGuard);
@@ -708,7 +722,7 @@ function startRun(idx = -1) {
   resetScarf();
   cam.x = clamp(P.x - VIEW_W * 0.4, 0, LW * T - VIEW_W);
   cam.y = clamp(P.y + P.h / 2 - VIEW_H * 0.55, 0, LH * T - VIEW_H);
-  state = 'play'; stateT = 0; levelT = 0;
+  state = 'play'; stateT = 0; levelT = 0; noticeT = 99;
 }
 
 function rectHits(x, y, w, h) {
@@ -809,7 +823,7 @@ function updatePlayer(dt) {
   P.hidden = !!P.cover && P.crawling;
   // walk up to a lever and the ninja pulls it himself
   if (P.onGround && !P.crawling) {
-    const i = switches.findIndex(sw => !sw.on && Math.abs(mid - sw.x * T) < 14 && Math.abs(P.y + P.h - sw.row * T) < 4);
+    const i = switches.findIndex(sw => !sw.on && Math.abs(mid - sw.x * T) < TUNE.leverReach && Math.abs(P.y + P.h - sw.row * T) < 4);
     if (i >= 0) { P.flipSw = i; P.flipT = 0; P.vx = 0; P.lean = 0; }
   }
 
@@ -823,9 +837,19 @@ function updatePlayer(dt) {
   P.lean = approach(P.lean, P.crawling || !moving ? 0 : P.facing * (P.running ? 0.18 : 0.06), dt * 1.5);
 }
 
-// Pulling a lever: stand still, reach, pull it down (the handle swings), clunk - the door unlocks.
+// Pulling a lever: step up to it, stand still, reach, pull it down (the handle swings), clunk - the door unlocks.
 function updateFlip(dt) {
   const sw = switches[P.flipSw];
+  const mid = P.x + P.w / 2;
+  const to = clamp(mid, sw.x * T - 12, sw.x * T + 12);      // close enough for the hand to reach the knob
+  if (Math.abs(to - mid) > 0.01) {
+    const step = approach(mid, to, TUNE.walk * dt) - mid;
+    P.x += step; P.vx = step / dt;                          // so the legs walk
+    P.facing = step > 0 ? 1 : -1;
+    P.walkPhase += Math.abs(P.vx) * dt * 0.075;
+    jumpQueued = false;
+    return;
+  }
   P.flipT += dt; P.vx = 0; P.moveT = 0; jumpQueued = false;
   const k = clamp((P.flipT - 0.12) / 0.3, 0, 1);
   sw.anim = k * k * (3 - 2 * k);
@@ -833,8 +857,18 @@ function updateFlip(dt) {
     sw.on = true;
     openDoor(sw.door);
     makeNoise(sw.x * T, sw.row * T - 30, NOISE.lever);          // the clunk carries
+    // and the player is told: a clunk you hear, the lever's light flares, a line on screen
+    sw.onT = time;
+    playSfx(sfx.lever, 0.9);
+    const d = doors[sw.door];
+    notice = d.y > sw.row ? 'a door unlocks below.' : d.y + d.h < sw.row ? 'a door unlocks above.' : 'a door unlocks.';
+    noticeT = 0;
   }
   if (P.flipT >= TUNE.flipTime) P.flipSw = -1;
+}
+// Pulling, and close enough that the hand is on the knob (not still stepping over to it).
+function atLever() {
+  return P.flipSw >= 0 && Math.abs(P.x + P.w / 2 - switches[P.flipSw].x * T) <= 12.5;
 }
 // Where the lever's knob is (the handle swings from up to down as anim goes 0 -> 1).
 function leverKnob(sw) {
@@ -1111,7 +1145,7 @@ function step(dt) {
   if (state === 'title') { cam.x = (0.5 - 0.5 * Math.cos(time * 0.04)) * (LW * T - VIEW_W); return; }
   if (state !== 'play') return;
   updatePlayer(dt); updateStones(dt); updateScarf(); updateGuards(dt); updateDetection(dt); updateCameras(); updateCamera(dt);
-  levelT += dt;
+  levelT += dt; noticeT += dt;
   if (state === 'play' && P.x + P.w > EXIT_X && Math.abs(P.y + P.h - exitRow * T) < T) { state = 'escaped'; stateT = 0; }
 }
 
@@ -1196,7 +1230,18 @@ function drawFixtures() {
     ctx.restore();
   }
 }
-function drawStatusLights() {                       // lock lights (blink while locked) and server-rack lights
+function drawStatusLights() {                       // lever and lock lights, server-rack lights
+  for (const sw of switches) {                     // lever light: blinks while armed; flares when pulled, then stays on
+    const x = sw.x * T, y = sw.row * T - 52;
+    if (sw.on) {
+      const flare = Math.exp(-(time - sw.onT) * 2.5);
+      ctx.fillStyle = `rgba(255,255,255,${0.22 + 0.4 * flare})`; ctx.beginPath(); ctx.arc(x, y, 5 + 26 * flare, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.95)'; ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI * 2); ctx.fill();
+    } else if (time % 1.2 < 0.6) {
+      ctx.fillStyle = 'rgba(255,255,255,0.2)'; ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.beginPath(); ctx.arc(x, y, 2, 0, Math.PI * 2); ctx.fill();
+    }
+  }
   for (const d of doors) if (!d.open && time % 1.2 < 0.6) {
     const x = d.x * T + d.w * T / 2, y = d.y * T - 8;
     ctx.fillStyle = 'rgba(255,255,255,0.2)'; ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill();
@@ -1344,7 +1389,7 @@ function drawNinja() {
   }
   withLean((cx, by) => {
     c.lineWidth = 4; c.beginPath();
-    if (P.flipSw >= 0) {                          // pulling a lever: one hand on the knob
+    if (atLever()) {                              // pulling a lever: one hand on the knob
       const k = leverKnob(switches[P.flipSw]);
       c.moveTo(cx, by - 15); c.lineTo(cx + 3, by - 1);
       c.moveTo(cx, by - 15); c.lineTo(cx - 4, by - 1);
@@ -1423,6 +1468,10 @@ function drawHUD() {
     const a = clamp(Math.min(levelT / 0.6, (3.5 - levelT) / 1), 0, 1);
     centerText(level.name, 130, '30px Georgia, serif', 0.85 * a, '12px');
     centerText(level.subtitle, 162, 'italic 16px Georgia, serif', 0.6 * a);
+  }
+  if (state === 'play' && noticeT < 3.5) {         // a notice (a lever pulled), fading the same way
+    const a = clamp(Math.min(noticeT / 0.4, (3.5 - noticeT) / 1), 0, 1);
+    centerText(notice, 150, 'italic 18px Georgia, serif', 0.75 * a);
   }
   const x = 28, y = 30, w = 230, h = 8;
   ctx.font = '11px Georgia, serif'; ctx.letterSpacing = '3px';

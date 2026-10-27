@@ -10,6 +10,7 @@
   godot/audio/heartbeat.wav      a muffled lub-dub; the game plays it faster and louder as the meter fills
   godot/audio/riser.wav          an uneasy high cluster (loops); fades in and rises in pitch near full
   godot/audio/caught.wav         a deep impact and a dissonant stab, when the meter fills
+  godot/audio/lever.wav          a heavy metal clunk, then a door bolt sliding back somewhere off
 
 Both versions of the game play these files (the HTML one from godot/audio/). Everything here is
 synthesised with numpy, so the music is original and easy to change: edit, run, replay.
@@ -207,6 +208,19 @@ def caught_sting():                                      # a deep impact and a d
     stab = sum(np.sin(2 * np.pi * hz(nn) * tt) for nn in ('D4', 'Eb4', 'Ab4', 'D5')) * np.exp(-tt / 0.9) * np.minimum(1, tt / 0.01)
     return reverb(boom + 0.6 * hit + 0.25 * lowpass(stab, 1800), 2.4, 0.35)
 
+def lever_clunk():                                       # pulling a lever: a heavy clunk, then a distant bolt
+    n = int(1.6 * SR)
+    tt = np.arange(n) / SR
+    x = np.zeros(n)
+    knock = lowpass(rng.standard_normal(n), 1400) * np.exp(-tt / 0.018)                  # the handle hitting home
+    ring = sum(a * np.sin(2 * np.pi * f * tt) for f, a in ((310, 1.0), (523, 0.6), (871, 0.35), (1290, 0.2)))
+    body = np.sin(2 * np.pi * np.cumsum(70 * (1 + 0.8 * np.exp(-tt / 0.03))) / SR) * np.exp(-tt / 0.12)
+    x += knock + 0.35 * ring * np.exp(-tt / 0.07) + 0.9 * body
+    bolt = lowpass(rng.standard_normal(n), 700) * np.minimum(1, tt / 0.02) * np.exp(-tt / 0.05)   # the bolt slides
+    thud = np.sin(2 * np.pi * 55 * tt) * np.exp(-tt / 0.09)
+    place(x, 0.35 * (bolt + thud)[:int(0.5 * SR)], 0.38)
+    return reverb(x, 1.2, 0.25)
+
 if __name__ == '__main__':
     root = os.path.join(os.path.dirname(__file__), '..', 'godot', 'audio')
     base = reverb(0.55 * pad() + 0.22 * drone() + 0.30 * plucks(), 2.8, 0.4) + 0.32 * pulse()
@@ -216,3 +230,4 @@ if __name__ == '__main__':
     write(os.path.join(root, 'heartbeat.wav'), heartbeat(), 0.8)
     write(os.path.join(root, 'riser.wav'), riser(), 0.5)
     write(os.path.join(root, 'caught.wav'), caught_sting(), 0.8)
+    write(os.path.join(root, 'lever.wav'), lever_clunk(), 0.8)            # last: rng order keeps the others identical

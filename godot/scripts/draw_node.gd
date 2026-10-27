@@ -316,7 +316,7 @@ func _ninja() -> void:
 		draw_set_transform_matrix(Transform2D.IDENTITY)
 		return
 	draw_set_transform_matrix(lean_tr(cx, by, P.lean))
-	if P.flip_sw >= 0:                              # pulling a lever: one hand on the knob
+	if m.at_lever():                                # pulling a lever: one hand on the knob
 		var knob: Vector2 = m.lever_knob(m.switches[P.flip_sw])
 		_limb(Vector2(cx, by - 15), Vector2(cx + 3, by - 1), 4, col)
 		_limb(Vector2(cx, by - 15), Vector2(cx - 4, by - 1), 4, col)
@@ -349,6 +349,15 @@ func _overlay() -> void:
 			var led: Vector2 = L.pos + Vector2.from_angle(L.dir) * 2.0
 			draw_circle(led, 5.0 if L.seeing else 3.0, Color(1, 1, 1, 0.25))
 			draw_circle(led, 2.0, Color(1, 1, 1, 0.95 if L.seeing else 0.6))
+	for sw in m.switches:                           # lever light: blinks while armed; flares when pulled, then stays on
+		var lp := Vector2(sw.x * T, sw.row * T - 52)
+		if sw.on:
+			var flare := exp(-(m.time - sw.on_t) * 2.5)
+			draw_circle(lp, 5.0 + 26.0 * flare, Color(1, 1, 1, 0.22 + 0.4 * flare))
+			draw_circle(lp, 2.5, Color(1, 1, 1, 0.95))
+		elif fmod(m.time, 1.2) < 0.6:
+			draw_circle(lp, 5.0, Color(1, 1, 1, 0.2))
+			draw_circle(lp, 2.0, Color(1, 1, 1, 0.7))
 	for d in m.doors:                               # lock light: blinks while locked, dark once open
 		if not d.open and fmod(m.time, 1.2) < 0.6:
 			var lp := Vector2(d.x * T + d.w * T / 2.0, d.y * T - 8)

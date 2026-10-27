@@ -33,6 +33,7 @@ const TUNE := {
 	"exposed_threshold": 0.03,
 	"land_noise_v": 600.0,                      # landings faster than this are loud (drops of up to 3 tiles are quiet)
 	"flip_time": 0.65,                          # pulling a lever: the ninja stops, reaches, pulls
+	"lever_reach": 48.0,                        # a lever this close (px, either side) is pulled; he steps over to it first
 }
 const METER_SUSPICIOUS := 0.35
 const METER_ALERT := 0.65
@@ -159,6 +160,8 @@ var spawn := Vector2.ZERO
 var exit_x := 0.0
 var door_x := 0                 # tiles
 var level_t := 0.0              # seconds since this floor started (drives the floor-name banner)
+var notice := ""                # a line that fades in mid-screen, e.g. "a door unlocks below."
+var notice_t := 99.0            # seconds since it was set
 var static_nodes: Array = []    # drawn once per floor; redrawn when a floor loads
 var level_nodes: Array = []     # this floor's lights + occluders, freed when the next one loads
 var grid := PackedByteArray()
@@ -214,6 +217,7 @@ const METER_AUDIO := {
 var sfx_heart: AudioStreamPlayer
 var sfx_riser: AudioStreamPlayer
 var sfx_caught: AudioStreamPlayer
+var sfx_lever: AudioStreamPlayer
 var heart_t := 0.0              # time since the last heartbeat
 var last_beat := -99.0          # when it last beat (the screen's red-edge pulse follows it)
 var was_caught := false
@@ -283,6 +287,7 @@ func _setup_music() -> void:
 	sfx_heart = _sfx_player("heartbeat")
 	sfx_riser = _sfx_player("riser", true)
 	sfx_caught = _sfx_player("caught")
+	sfx_lever = _sfx_player("lever")
 	sfx_riser.volume_db = -80.0
 	sfx_riser.play()
 
@@ -446,7 +451,7 @@ func load_level(idx: int) -> void:
 		doors.append({"x": r[0], "y": r[1], "w": r[2], "h": r[3], "open": false})
 	switches = []
 	for sw in level.get("switches", []):
-		switches.append({"x": sw.x, "row": sw.row, "door": sw.door, "on": false, "anim": 0.0})
+		switches.append({"x": sw.x, "row": sw.row, "door": sw.door, "on": false, "anim": 0.0, "on_t": -99.0})
 	props = []
 	for p in level.props:
 		props.append({"type": p[0], "x": float(p[1]), "y": float(p[2] * T)})
@@ -466,6 +471,24 @@ func open_door(i: int) -> void:
 	var d: Dictionary = doors[i]
 	d.open = true
 	fill(d.x, d.y, d.w, d.h, 0)
+	rebuild_geometry()
+
+# A retry starts the floor over: every lever up, every door it opened locked again.
+func reset_doors() -> void:
+	for sw in switches:
+		sw.on = false
+		sw.anim = 0.0
+		sw.on_t = -99.0
+	var changed := false
+	for d in doors:
+		if d.open:
+			d.open = false
+			fill(d.x, d.y, d.w, d.h, DOOR)
+			changed = true
+	if changed:
+		rebuild_geometry()
+
+func rebuild_geometry() -> void:
 	build_segments()
 	for n in occ_nodes:
 		n.queue_free()
@@ -742,6 +765,7 @@ func light_at(L: Lt, p: Vector2) -> float:
 func start_run(idx := -1) -> void:
 	if idx >= 0:
 		load_level(idx)
+	reset_doors()
 	P = Player.new()
 	P.x = spawn.x
 	P.y = spawn.y
@@ -767,6 +791,7 @@ func start_run(idx := -1) -> void:
 	state = "play"
 	state_t = 0.0
 	level_t = 0.0
+	notice_t = 99.0
 
 var test_keys = null    # self-test: a Dictionary of held keys replaces the keyboard
 
@@ -968,9 +993,19 @@ static func ramp(t: float, secs: float) -> float:
 	var k := clampf(t / secs, 0.0, 1.0)
 	return TUNE.ramp_floor + (1.0 - TUNE.ramp_floor) * k * k * (3.0 - 2.0 * k)
 
-# Pulling a lever: stand still, reach, pull it down (the handle swings), clunk - the door unlocks.
+# Pulling a lever: step up to it, stand still, reach, pull it down (the handle swings), clunk - the door unlocks.
 func update_flip(dt: float) -> void:
 	var sw: Dictionary = switches[P.flip_sw]
+	var mid := P.x + P.w / 2
+	var to := clampf(mid, sw.x * T - 12, sw.x * T + 12)      # close enough for the hand to reach the knob
+	if absf(to - mid) > 0.01:
+		var step := move_toward(mid, to, TUNE.walk * dt) - mid
+		P.x += step
+		P.vx = step / dt                                      # so the legs walk
+		P.facing = 1 if step > 0 else -1
+		P.walk_phase += absf(P.vx) * dt * 0.075
+		jump_queued = false
+		return
 	P.flip_t += dt
 	P.vx = 0.0
 	P.move_t = 0.0
@@ -981,8 +1016,18 @@ func update_flip(dt: float) -> void:
 		sw.on = true
 		open_door(sw.door)
 		make_noise(sw.x * T, sw.row * T - 30, NOISE.lever)          # the clunk carries
+		# and the player is told: a clunk you hear, the lever's light flares, a line on screen
+		sw.on_t = time
+		sfx_lever.play()
+		var d: Dictionary = doors[sw.door]
+		notice = "a door unlocks below." if d.y > sw.row else ("a door unlocks above." if d.y + d.h < sw.row else "a door unlocks.")
+		notice_t = 0.0
 	if P.flip_t >= TUNE.flip_time:
 		P.flip_sw = -1
+
+# Pulling, and close enough that the hand is on the knob (not still stepping over to it).
+func at_lever() -> bool:
+	return P.flip_sw >= 0 and absf(P.x + P.w / 2 - switches[P.flip_sw].x * T) <= 12.5
 
 # Where the lever's knob is (handle swings from up to down as anim goes 0 -> 1).
 func lever_knob(sw: Dictionary) -> Vector2:
@@ -1112,7 +1157,7 @@ func update_player(dt: float) -> void:
 	if P.on_ground and not P.crawling:
 		for i in switches.size():
 			var sw: Dictionary = switches[i]
-			if not sw.on and absf(mid - (sw.x * T)) < 14 and absf(P.y + P.h - sw.row * T) < 4:
+			if not sw.on and absf(mid - (sw.x * T)) < TUNE.lever_reach and absf(P.y + P.h - sw.row * T) < 4:
 				P.flip_sw = i
 				P.flip_t = 0.0
 				P.vx = 0.0
@@ -1507,6 +1552,7 @@ func _physics_process(dt: float) -> void:
 	update_detection(dt)
 	update_cameras()
 	level_t += dt
+	notice_t += dt
 	var target := clampf(P.x + P.w / 2 - VIEW_W * 0.45 + P.facing * 70, 0, LW * T - VIEW_W)
 	cam.x = lerpf(cam.x, target, 1 - exp(-dt * 4))
 	var target_y := clampf(P.y + P.h / 2 - VIEW_H * 0.55, 0, LH * T - VIEW_H)   # tall floors scroll vertically
@@ -1573,7 +1619,7 @@ func _capture_setup(setup: String) -> void:
 			level_t = 9.0
 		"lever":
 			start_run(2)
-			P.x = 96.5 * T - 9                  # right at the lever: the pull starts on the first frame
+			P.x = switches[0].x * T - 9         # right at the lever: the pull starts on the first frame
 			P.y = 12 * T - P.h
 			P.facing = 1
 			level_t = 9.0

@@ -40,6 +40,9 @@ func _hud() -> void:
 		var a := clampf(minf(m.level_t / 0.6, (3.5 - m.level_t) / 1.0), 0.0, 1.0)
 		_text(m.level.name, Vector2(480, 130), m.font_regular, 30, Color(1, 1, 1, 0.85 * a), 12, true)
 		_text(m.level.subtitle, Vector2(480, 162), m.font_italic, 16, Color(1, 1, 1, 0.6 * a), 0, true)
+	if m.state == "play" and m.notice_t < 3.5:      # a notice (a lever pulled), fading the same way
+		var a := clampf(minf(m.notice_t / 0.4, (3.5 - m.notice_t) / 1.0), 0.0, 1.0)
+		_text(m.notice, Vector2(480, 150), m.font_italic, 18, Color(1, 1, 1, 0.75 * a), 0, true)
 	var x := 28.0
 	var y := 30.0
 	var w := 230.0

@@ -11,7 +11,9 @@ extends RefCounted
 ##   exit:   the door's tile x; reaching it clears the floor (exit_row: the row it stands on, default 15)
 ##   height: rows (default 17). The floor is always the bottom 2 rows; taller floors scroll vertically.
 ##   doors:  [x, y, w, h] locked doors (solid);  switches: {x, row, door} - walk up to one and the
-##           ninja pulls it, which opens doors[door]. Stairs are just 1-tile steps: walking climbs them.
+##           ninja pulls it, which opens doors[door]. He reaches it from TUNE.lever_reach px either side,
+##           so keep a lever within that of any wall (no spot to stand next to it out of reach).
+##           Stairs are just 1-tile steps: walking climbs them.
 
 const LEVELS := [
 	{
@@ -99,7 +101,7 @@ const LEVELS := [
 		"holes": [],
 		"ducts": [[74, 8, 9, 1], [44, 19, 8, 1]],
 		"doors": [[60, 21, 1, 3]],
-		"switches": [{"x": 96.5, "row": 12, "door": 0}],
+		"switches": [{"x": 98.3, "row": 12, "door": 0}],
 		"props": [["rack", 5, 24], ["desk", 9, 24], ["rack", 15, 24], ["desk", 20, 24], ["rack", 26, 24],
 			["cooler", 33, 24], ["desk", 41, 24], ["rack", 48, 24], ["plant", 55, 24],
 			["desk", 64, 24], ["rack", 70, 24], ["cooler", 76, 24], ["desk", 82, 24], ["rack", 88, 24], ["plant", 92, 24],
@@ -123,7 +125,7 @@ const LEVELS := [
 			{"kind": "lamp", "x": 52.5, "spread": 0.45, "radius": 420},
 			{"kind": "lamp", "x": 64.5, "spread": 0.45, "radius": 420},
 			{"kind": "camera", "x": 79.5, "spread": 0.14, "radius": 420, "sweep": [0.6, 5.0], "danger": 1.5},
-			{"kind": "lamp", "x": 92.5, "spread": 0.4, "radius": 420},                         # over the lever
+			{"kind": "lamp", "x": 93.5, "spread": 0.4, "radius": 420},                         # over the lever
 			{"kind": "sign", "x": 96},
 		],
 		"guards": [
