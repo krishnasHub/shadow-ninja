@@ -2,7 +2,19 @@
 
 2D side-scrolling stealth game. A ninja has broken into a high-security office tower and has to get **out**. Stay in shadow; light gets you caught.
 
-Run it: open `index.html` in a browser (single file, no build).
+Run it: double-click `godot/run.bat` (the game). `index.html` is the old HTML prototype, frozen at phase A.
+
+## Start here (next session)
+Where we left off (2026-10-26, pushed as f53eda7): phases A, B and the first part of C are done. The game runs Floors 1-4: the lab opening (wake, hide, the letterbox talk), the offices, the archive (lever), and security (the throwing stars). All 11 self-tests pass (`godot_console --headless --path godot -- --selftest=<name>`: 1, throwmode, menu, quit, floor2, floor3, lockon, alarm, intro, music, stars).
+
+Next, in order:
+1. **Floor 5 - moving objects.** He remembers he can push/pull furniture (desks, carts, crates) to make new shadows and cover, or to block a beam. Decide the controls (e.g. hold a key next to a prop), what can move, and the noise it makes; build the floor around it. Clearing Floor 4 should set `remember.scarf: 0.45` and the ability (e.g. "push"), with two memory lines.
+2. **Floor 6 - fighting.** Bigger floor. A new guard type: vigilant, no torch. Fights only work in shadow (step into light and you're caught anyway). Prototype the moves on `tools/characters.html` first (the user likes to see animations there before they go in). `remember.scarf: 0.65`.
+3. **Floors 7-8 - Evil Co.** He remembers he works for Evil Co and the formula is a vaccine he was sent to steal. Scarf 0.85, then 1.0 with `colors: ["mark"]` (the grey Evil Co mark on his chest - already drawn by `_mark`). Cutscene(s) in the letterbox style of the opening.
+4. **Floors 8-10 - redemption.**
+5. Later / open: hand-tune difficulty by playtest (Floor 4's star count, glass noise radius, the new lamp at 16.5 are first guesses); the Levels menu is a dev convenience and may go; murmur sounds for the talk were prototyped but left out.
+
+How the user likes to work: discuss before building; prototype looks and animations in `tools/characters.html` first; keep the noir greyscale (colour only on the scarf, only in shadow); commit and push only when asked. Audio: re-running `tools/make_music.py` changes caught.wav and riser.wav - restore them with `git checkout -- godot/audio/caught.wav godot/audio/riser.wav`.
 
 ## Pillars
 - **The light you see is the light that catches you.** Rendering and detection use the same geometry (visibility polygon + cone + falloff). Never fake one without the other.
@@ -11,7 +23,7 @@ Run it: open `index.html` in a browser (single file, no build).
 - **Caught is a meter, not a moment.** Exposure fills it, shadow drains it. Over the threshold = game over. In between, guards hunt you: hide, then flee.
 
 ## Story and progression (user's design, 2026-10-26)
-- **Premise:** the ninja broke into the tower and stole "the formula" from a machine full of vials. Its countermeasure sprayed him, and he **lost his memory**. He has to get out, floor by floor, and remembers more as he goes. Remembering brings back abilities, and each memory adds **one dash of colour** somewhere (first: his scarf turns deep red).
+- **Premise:** the ninja broke into the tower and stole "the formula" from a machine full of vials. Its countermeasure sprayed him, and he **lost his memory**. He has to get out, floor by floor, and remembers more as he goes. Remembering brings back abilities, and the colour is the scarf alone, seen only in shadow, climbing from its tip floor by floor (see Phase C, "Memory colour").
 - **Art rule:** everything stays greyscale, the vials included. No fog or haze effects. Colour appears only as these memory accents.
 - **Opening (start of Floor 1):** fade in on the ninja facing the left wall, by an open machine with vials, its alarm light pulsing. A hint tells you to hide behind the nearest furniture, with about 10 s to do it. Two guards come running. If they see you, it's the normal meter and caught. If you stay hidden, a **cutscene** plays: black letterbox bars, no control, text lines over the guards:
   "What happened?" / "Looks like someone stole the formula!" / "What was it?" / "I don't know, but I heard it has a countermeasure.. it sprays a chemical at anyone trying to steal it." / "Ohh? What does the chemical do?" / "I'm not sure.. but I think the thief loses memory.. maybe temporarily?"
@@ -124,17 +136,18 @@ A full port of the HTML version (same level, mechanics and numbers) in Godot 4.7
 - Render order: fog → far city (0.18) → mid office wall (0.5) → tiles/props/ninja → **multiply lightmap** → **screen haze** (light shafts) → eyes/hints → foreground (1.35, blurred) → grain + vignette → HUD.
 - `G` toggles debug: occluder segments, light polygons, body sample points, fps.
 
-## Next
-1. **Playtest by hand** (not done yet): tune jump, crawl speed, meter fill/drain, lamp radius, guard speeds (`GUARD`).
-2. All the core mechanics from the original idea are in. Next: a real designed floor (top of the tower, working down), then a sound pass.
-3. Difficulty settings: wakeAfter, guard speeds, torch reach, meter fill rate.
-4. Known simplification: sound travels in straight lines only (no bending around corners), though it does pass through openings like the vent gap.
+## Older notes
+(The current plan is under "Start here" at the top.)
+- Difficulty settings: wakeAfter, guard speeds, torch reach, meter fill rate.
+- Known simplification: sound travels in straight lines only (no bending around corners), though it does pass through openings like the vent gap.
 
 Verified by script (M4): jump into a duct → cling at its underside, shimmy stops at the duct's end, ↓ drops; a guard patrolling right under a clinging ninja doesn't see him; dropping onto him puts him to sleep. Sound: open floor 256px → heard; behind the raised floor 304px → not heard.
 
 Verified by script (M5): running behind a guard draws him over and sneaking doesn't; a stone thrown from behind a desk lands past a guard and he walks away to check it (meter stays 0); jumping on a guard from behind puts him to sleep; the other guard finds the body and goes on alert.
 
 Verified by script (not by hand): ducking in a beam → guard walks over and catches you; hiding before he looks → he patrols right over you with the meter at 0; spotted then out of sight → chase > search > return > patrol.
+
+## Phase C (in progress, Godot, 2026-10-26)
 - **Characters:** `tools/characters.html` is the character sheet (stand, sneak, the anime run, jump, crawl, cling; the guards' gaits; the speech mock-ups). Knee rule: standing, the leg's segments are exactly half the hip-to-floor length, so it's straight; moving, they grow and the knee comes forward. Running flat out (`dashing()`) is the anime run: body pitched 0.62 rad from the hip, arms streaming back. Elbows only in cutscenes; in play the arms stay as they were.
 - **Throwing stars (phase C, Floor 4):** remembered on clearing Floor 3 (with the scarf). Throw mode throws whatever's in hand; Q / Tab (controller X) switches stone and star, and an empty hand switches by itself. `STAR`: 3 a floor, 950 px/s in a straight line, 700 px reach, not picked up again. One through a lamp's bulb or a camera's housing puts it out until a retry (`break_light`): a lamp's shade hangs crooked and glass glints on the floor, and the glass is loud (`NOISE.glass` 300 px - guards come to look); a camera's lens droops, it sparks, and it never sees you again. A miss bites into the wall (a tink). The aim shows a dotted line and rings the light it would hit. Floor 4: a bright lamp over open floor at 16.5 to learn on; the camera at 90.5 can be blinded from the end of the catwalk (the duct blocks a throw from behind the cooler). Sounds: whoosh, glass, tink. Self-test: `--selftest=stars`.
 - **Memory colour (the rule):** one colour on one thing - the scarf - and only in shadow. Lit, he's the grey he always was. Each floor's `remember.scarf` (0..1) sets how far up the scarf the colour has climbed from the tip; it deepens from maroon to a full dark red as it climbs (`_scarf` in draw_node.gd, fading out by half-lit). Plan: 0.25 after Floor 3 (in now), then 0.45, 0.65, 0.85, and 1.0 at the last step, together with `colors: ["mark"]` - the Evil Co mark on his chest, a grey diamond a shade off his body, seen lit or not (`_mark`). No hands. Mocked up in `tools/characters.html` (Memory · colour over time).
