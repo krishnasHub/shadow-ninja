@@ -250,6 +250,13 @@ func _prop(p: Dictionary) -> void:
 #  ACTORS - guards and the ninja (lit by the lights)
 # =====================================================================
 func _actors() -> void:
+	for pn in m.panels:                             # alarm panels: a box on the wall; cracked open once a stone goes through
+		var c := Vector2(pn.x * T, pn.row * T - 48)
+		draw_rect(Rect2(c.x - 8, c.y - 10, 16, 20), grey(0x1c))
+		draw_rect(Rect2(c.x - 5, c.y - 3, 10, 9), grey(0x12))
+		if pn.broken:
+			draw_line(c + Vector2(-6, -8), c + Vector2(2, 1), grey(0x40), 1.0)
+			draw_line(c + Vector2(2, 1), c + Vector2(-1, 8), grey(0x40), 1.0)
 	for sw in m.switches:                           # levers: a plate on the wall, the handle swings down when pulled
 		var piv := Vector2(sw.x * T, sw.row * T - 35)
 		draw_rect(Rect2(piv.x - 6, piv.y - 12, 12, 24), grey(0x1a))
@@ -358,6 +365,15 @@ func _overlay() -> void:
 		elif fmod(m.time, 1.2) < 0.6:
 			draw_circle(lp, 5.0, Color(1, 1, 1, 0.2))
 			draw_circle(lp, 2.0, Color(1, 1, 1, 0.7))
+	for pn in m.panels:                             # panel light: a slow pulse; fast in an alarm; sparks, then dark, once broken
+		var lp := Vector2(pn.x * T, pn.row * T - 54)
+		if pn.broken:
+			var k: float = m.time - pn.broken_t
+			if k < 1.2 and fmod(m.time * 17.0, 1.0) < 0.4:
+				draw_circle(lp + Vector2(randf_range(-6, 6), randf_range(0, 10)), 1.5, Color(1, 1, 1, 0.9 * (1.2 - k)))
+		elif fmod(m.time, 0.3 if m.alarm != "" else 2.0) < (0.15 if m.alarm != "" else 0.25):
+			draw_circle(lp, 6.0 if m.alarm != "" else 4.0, Color(1, 1, 1, 0.22))
+			draw_circle(lp, 2.0, Color(1, 1, 1, 0.9))
 	for d in m.doors:                               # lock light: blinks while locked, dark once open
 		if not d.open and fmod(m.time, 1.2) < 0.6:
 			var lp := Vector2(d.x * T + d.w * T / 2.0, d.y * T - 8)
@@ -375,8 +391,13 @@ func _overlay() -> void:
 			sign = L
 	draw_rect(Rect2(sign.pos.x - 18, sign.pos.y - 7, 36, 14), Color(0.92, 0.92, 0.92, 0.9))
 	_text(m.font_bold, sign.pos + Vector2(0, 5), "EXIT", 10, Color.BLACK, true)
-	for h in m.hints:
-		_text(m.font_italic, Vector2(h[0] * T, h[1]), h[2], 14, Color(1, 1, 1, 0.3))
+	for i in m.hints.size():                        # [x, y, text, controller text (optional)]; they surface as you near them
+		var h: Array = m.hints[i]
+		var a: float = m.hint_a[i] if m.state != "title" else 0.0
+		if a > 0.01:
+			a = a * a * (3.0 - 2.0 * a)
+			var breathe := 0.88 + 0.12 * sin(m.time * 1.3 + i * 1.7)
+			_text(m.font_italic, Vector2(h[0] * T, h[1] + (1.0 - a) * 5.0), h[3] if m.pad and h.size() > 3 else h[2], 14, Color(1, 1, 1, 0.34 * a * breathe))
 	var P = m.P
 	if m.state != "title":
 		if P.cover >= 0 and not P.hidden:           # nudge: you could hide here

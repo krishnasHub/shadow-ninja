@@ -11,6 +11,9 @@
   godot/audio/riser.wav          an uneasy high cluster (loops); fades in and rises in pitch near full
   godot/audio/caught.wav         a deep impact and a dissonant stab, when the meter fills
   godot/audio/lever.wav          a heavy metal clunk, then a door bolt sliding back somewhere off
+  godot/audio/rattle.wav         a locked door's handle rattling: a few dull metal knocks
+  godot/audio/siren.wav          the alarm (loops): a muffled two-tone wail, as if from the next room
+  godot/audio/panel.wav          a stone through the alarm panel: a crack and a dying electric buzz
 
 Both versions of the game play these files (the HTML one from godot/audio/). Everything here is
 synthesised with numpy, so the music is original and easy to change: edit, run, replay.
@@ -221,6 +224,35 @@ def lever_clunk():                                       # pulling a lever: a he
     place(x, 0.35 * (bolt + thud)[:int(0.5 * SR)], 0.38)
     return reverb(x, 1.2, 0.25)
 
+def door_rattle():                                       # trying a locked door: the handle rattles against the bolt
+    n = int(0.7 * SR)
+    tt = np.arange(n) / SR
+    x = np.zeros(n)
+    for at, amp in ((0.0, 1.0), (0.09, 0.8), (0.17, 0.9), (0.28, 0.55)):
+        k = np.arange(int(0.12 * SR)) / SR
+        hit = lowpass(rng.standard_normal(len(k)), 1800) * np.exp(-k / 0.012)
+        ring = (np.sin(2 * np.pi * 410 * k) + 0.5 * np.sin(2 * np.pi * 690 * k)) * np.exp(-k / 0.035)
+        place(x, amp * (hit + 0.3 * ring), at)
+    return reverb(x, 0.8, 0.2)
+
+def siren(seconds=2.4):                                  # a muffled two-tone wail that loops seamlessly
+    n = int(seconds * SR)
+    tt = np.arange(n) / SR
+    f = np.where((tt // (seconds / 2)) % 2 == 0, hz('A4'), hz('Eb5'))      # a tritone apart: urgent, uneasy
+    f = lowpass(f, 12)                                                      # glide between the two, don't jump
+    ph = 2 * np.pi * np.cumsum(f) / SR
+    ph *= round(ph[-1] / (2 * np.pi)) * 2 * np.pi / ph[-1]                 # a whole number of cycles: no click at the loop
+    x = np.sin(ph) + 0.4 * np.sin(2 * ph) + 0.2 * np.sin(3 * ph)
+    return lowpass(x, 1200) * (0.85 + 0.15 * np.sin(2 * np.pi * tt * 4 / seconds))
+
+def panel_zap():                                         # a stone through the panel: crack, then a buzz that dies
+    n = int(1.2 * SR)
+    tt = np.arange(n) / SR
+    crack = lowpass(rng.standard_normal(n), 3000) * np.exp(-tt / 0.02)
+    buzz = np.sign(np.sin(2 * np.pi * 120 * tt)) * lowpass(rng.standard_normal(n), 400) * np.exp(-tt / 0.35)
+    fizz = np.sin(2 * np.pi * 120 * tt) * (np.sin(2 * np.pi * 9 * tt) > 0) * np.exp(-tt / 0.5)
+    return reverb(crack + 0.4 * lowpass(buzz, 1500) + 0.25 * fizz, 0.9, 0.2)
+
 if __name__ == '__main__':
     root = os.path.join(os.path.dirname(__file__), '..', 'godot', 'audio')
     base = reverb(0.55 * pad() + 0.22 * drone() + 0.30 * plucks(), 2.8, 0.4) + 0.32 * pulse()
@@ -231,3 +263,6 @@ if __name__ == '__main__':
     write(os.path.join(root, 'riser.wav'), riser(), 0.5)
     write(os.path.join(root, 'caught.wav'), caught_sting(), 0.8)
     write(os.path.join(root, 'lever.wav'), lever_clunk(), 0.8)            # last: rng order keeps the others identical
+    write(os.path.join(root, 'rattle.wav'), door_rattle(), 0.7)
+    write(os.path.join(root, 'siren.wav'), siren(), 0.5)
+    write(os.path.join(root, 'panel.wav'), panel_zap(), 0.75)

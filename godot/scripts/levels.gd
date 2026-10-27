@@ -14,6 +14,8 @@ extends RefCounted
 ##           ninja pulls it, which opens doors[door]. He reaches it from TUNE.lever_reach px either side,
 ##           so keep a lever within that of any wall (no spot to stand next to it out of reach).
 ##           Stairs are just 1-tile steps: walking climbs them.
+##   panels: [x, row] alarm panels on the wall. A camera that spots you raises the alarm; a stone
+##           through a panel kills it (floors with a camera should have one).
 
 const LEVELS := [
 	{
@@ -26,11 +28,13 @@ const LEVELS := [
 			["plant", 48, 15], ["desk", 55, 15], ["chair", 57.5, 15], ["cooler", 66, 15],
 			["plant", 80, 12], ["desk", 91, 15], ["plant", 94, 15]],
 		"hints": [
-			[2.5, 170, "A D / ← →  run (loud)      SHIFT  sneak (silent)      SPACE / W / ↑  jump"],
+			[2.5, 170, "A D / ← →  run (loud)      SHIFT  sneak (silent)      SPACE / W / ↑  jump",
+				"stick  run (loud)      hold LT  sneak (silent)      A  jump"],
 			[11.0, 210, "light fills the meter.  ↓ behind furniture hides you."],
 			[17.5, 300, "jump into the duct to cling.  ← → shimmy,  ↓ drop."],
 			[24.0, 170, "↓  crawl - the dark is under the walkway"],
-			[33.0, 260, "CTRL: throw mode. aim with the mouse, click to throw. the clack pulls guards to it."],
+			[33.0, 260, "CTRL: throw mode. aim with the mouse, click to throw. the clack pulls guards to it.",
+				"hold RT, aim with the right stick, let go to throw. the clack pulls guards to it."],
 			[43.0, 170, "moonlight is weaker. it is still light."],
 			[38.5, 215, "guards: hide before the torch finds you. if he sees you duck, he knows where."],
 			[56.0, 255, "jump on a guard from behind - or drop from a duct - to put him to sleep."],
@@ -85,6 +89,7 @@ const LEVELS := [
 			{"x": 64, "from": 54, "to": 73, "min_x": 52, "max_x": 105, "row": 15},
 			{"x": 102, "from": 97, "to": 108, "min_x": 52, "max_x": 115, "row": 15},
 		],
+		"panels": [[88.5, 15]],                     # a stone from behind the cooler at 81 reaches it
 		"spawn": [3, 15], "exit": 116,
 	},
 	{
@@ -118,7 +123,7 @@ const LEVELS := [
 		"lights": [
 			{"kind": "lamp", "x": 10.5, "y": 14.125, "spread": 0.5, "radius": 420},
 			{"kind": "lamp", "x": 22.5, "y": 14.125, "spread": 0.5, "radius": 420, "flicker": [2.8, 0.55]},
-			{"kind": "lamp", "x": 35.5, "spread": 0.35, "radius": 760, "intensity": 0.8},      # down the stairwell
+			{"kind": "lamp", "x": 35.5, "spread": 0.35, "radius": 760, "intensity": 0.55, "flicker": [4.0, 0.5]},   # down the stairwell: dim, and dark half the time
 			{"kind": "lamp", "x": 50.5, "y": 14.125, "spread": 0.5, "radius": 420},
 			{"kind": "lamp", "x": 68.5, "y": 14.125, "spread": 0.5, "radius": 420},
 			{"kind": "lamp", "x": 84.5, "y": 14.125, "spread": 0.5, "radius": 420, "intensity": 0.9},
@@ -134,6 +139,7 @@ const LEVELS := [
 			{"x": 75, "from": 64, "to": 90, "min_x": 61, "max_x": 95, "row": 24},
 			{"x": 60, "from": 44, "to": 88, "min_x": 40, "max_x": 95, "row": 12},      # upstairs, in the server room
 		],
+		"panels": [[83.5, 12]],                     # upstairs, in reach from behind the rack at 78
 		"spawn": [3, 24], "exit": 95, "exit_row": 24,
 	},
 ]

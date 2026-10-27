@@ -40,6 +40,10 @@ func _hud() -> void:
 		var a := clampf(minf(m.level_t / 0.6, (3.5 - m.level_t) / 1.0), 0.0, 1.0)
 		_text(m.level.name, Vector2(480, 130), m.font_regular, 30, Color(1, 1, 1, 0.85 * a), 12, true)
 		_text(m.level.subtitle, Vector2(480, 162), m.font_italic, 16, Color(1, 1, 1, 0.6 * a), 0, true)
+	if m.state == "play" and m.alarm != "":         # the alarm's clock, top centre
+		var label: String = "ALARM" if m.alarm == "alarm" else "LOCKDOWN"
+		var on: bool = m.alarm == "lockdown" or fmod(m.time, 0.8) < 0.55
+		_text(label + "   " + m.clock(maxf(m.alarm_left, 0.0) + 0.99), Vector2(480, 34), m.font_regular, 15, Color(1, 1, 1, 0.9 if on else 0.35), 4, true)
 	if m.state == "play" and m.notice_t < 3.5:      # a notice (a lever pulled), fading the same way
 		var a := clampf(minf(m.notice_t / 0.4, (3.5 - m.notice_t) / 1.0), 0.0, 1.0)
 		_text(m.notice, Vector2(480, 150), m.font_italic, 18, Color(1, 1, 1, 0.75 * a), 0, true)
@@ -60,9 +64,9 @@ func _hud() -> void:
 		else:
 			draw_arc(c, 4, 0, TAU, 16, Color(1, 1, 1, 0.35), 1.0, true)
 	if m.aiming:
-		_text("THROW MODE  ·  click to throw  ·  CTRL to cancel", Vector2(x + w + 112, y + 8), m.font_regular, 11, Color(1, 1, 1, 0.75), 2)
+		_text(_k("THROW MODE  ·  click to throw  ·  CTRL to cancel", "THROW  ·  aim with the right stick  ·  let go of RT to throw  ·  B to cancel"), Vector2(x + w + 112, y + 8), m.font_regular, 11, Color(1, 1, 1, 0.75), 2)
 	elif m.stone_count > 0:
-		_text("CTRL", Vector2(x + w + 112, y + 8), m.font_regular, 10, Color(1, 1, 1, 0.3), 2)
+		_text(_k("CTRL", "RT"), Vector2(x + w + 112, y + 8), m.font_regular, 10, Color(1, 1, 1, 0.3), 2)
 	var seen_hide := false
 	for g in m.guards:
 		if g.knows_hide >= 0:
@@ -77,19 +81,23 @@ func _hud() -> void:
 	elif m.meter > 0:
 		status = "IN SHADOW"
 	_text(status, Vector2(x, y + 26), m.font_regular, 11, Color(1, 1, 1, 0.55), 3)
-	draw_string(m.font_regular, Vector2(960 - 24 - 500, 540 - 18), "Esc menu  ·  R restart  ·  M music  ·  F11 fullscreen  ·  G debug",
+	draw_string(m.font_regular, Vector2(960 - 24 - 500, 540 - 18), _k("Esc menu  ·  R restart  ·  M music  ·  F11 fullscreen  ·  G debug", "Start menu  ·  View restart  ·  Y music"),
 		HORIZONTAL_ALIGNMENT_RIGHT, 500, 11, Color(1, 1, 1, 0.3))
 
-const CONTROLS := [
-	["A  D   /   ←  →", "run  (loud)"],
-	["hold  SHIFT", "sneak  (silent)"],
-	["SPACE  /  W  /  ↑", "jump  ·  grab a duct  ·  land on a guard to put him to sleep"],
-	["S  /  ↓", "crawl  ·  hide behind furniture  ·  drop from a duct"],
-	["CTRL", "throw mode  -  aim with the mouse, click to throw a stone"],
-	["ESC", "pause menu"],
-	["R    ·    F11", "restart    ·    fullscreen"],
-	["M", "music on / off"],
+const CONTROLS := [                                   # keyboard, controller (Xbox), what it does
+	["A  D   /   ←  →", "stick  /  d-pad", "run  (loud)"],
+	["hold  SHIFT", "hold  LT", "sneak  (silent)"],
+	["SPACE  /  W  /  ↑", "A", "jump  ·  grab a duct  ·  land on a guard to put him to sleep"],
+	["S  /  ↓", "B  /  ↓", "crawl  ·  hide behind furniture  ·  drop from a duct"],
+	["CTRL", "hold  RT", "throw  -  aim (mouse / right stick), click / let go to throw"],
+	["ESC", "START", "pause menu"],
+	["R    ·    F11", "VIEW", "restart    ·    fullscreen"],
+	["M", "Y", "music on / off"],
 ]
+
+# The prompt for whichever device you last touched.
+func _k(keys: String, pad: String) -> String:
+	return pad if m.pad else keys
 const ABOUT := [
 	"You slipped into a high-security office tower. Now you have to get out.",
 	"Light is the enemy. Lamps, moonlight and every guard's torch fill your detection meter;",
@@ -110,7 +118,7 @@ func _screens() -> void:
 		if t > 0.4:
 			_text("CAUGHT", Vector2(480, 260), m.font_regular, 56, Color(1, 1, 1, 0.92), 16, true)
 			_text("the meter filled.", Vector2(480, 305), m.font_italic, 16, Color(1, 1, 1, 0.6), 0, true)
-			_text("R  try again    ·    ESC  menu", Vector2(480, 345), m.font_regular, 13, Color(1, 1, 1, 0.5), 2, true)
+			_text(_k("R  try again    ·    ESC  menu", "A  try again    ·    START  menu"), Vector2(480, 345), m.font_regular, 13, Color(1, 1, 1, 0.5), 2, true)
 	elif st == "escaped":
 		draw_rect(Rect2(0, 0, 960, 540), Color(0, 0, 0, minf(0.8, t)))
 		if t > 0.5:
@@ -118,11 +126,25 @@ func _screens() -> void:
 			if last:
 				_text("OUT", Vector2(480, 260), m.font_regular, 56, Color(1, 1, 1, 0.92), 16, true)
 				_text("you made it out of the tower.", Vector2(480, 305), m.font_italic, 16, Color(1, 1, 1, 0.6), 0, true)
-				_text("ENTER  menu    ·    R  replay this floor", Vector2(480, 345), m.font_regular, 13, Color(1, 1, 1, 0.5), 2, true)
+				_times(t)
+				_text(_k("ENTER  menu    ·    R  replay this floor", "A  menu    ·    VIEW  replay this floor"), Vector2(480, 375), m.font_regular, 13, Color(1, 1, 1, 0.5), 2, true)
 			else:
 				_text(m.level.name + "  CLEARED", Vector2(480, 260), m.font_regular, 40, Color(1, 1, 1, 0.92), 12, true)
 				_text("down the stairs, into the dark.", Vector2(480, 300), m.font_italic, 16, Color(1, 1, 1, 0.6), 0, true)
-				_text("ENTER  next floor    ·    R  replay this floor    ·    ESC  menu", Vector2(480, 345), m.font_regular, 13, Color(1, 1, 1, 0.5), 2, true)
+				_times(t)
+				_text(_k("ENTER  next floor    ·    R  replay this floor    ·    ESC  menu", "A  next floor    ·    VIEW  replay this floor    ·    START  menu"), Vector2(480, 375), m.font_regular, 13, Color(1, 1, 1, 0.5), 2, true)
+
+# The end screen's numbers: this run's time, the best, and whether the alarm went up.
+func _times(t: float) -> void:
+	var a := clampf((t - 0.8) / 0.5, 0.0, 1.0)
+	var line: String = "time  " + m.clock(m.run_t)
+	if m.new_best:
+		line += "    ·    new best"
+	elif m.best.has(m.level_idx):
+		line += "    ·    best  " + m.clock(m.best[m.level_idx])
+	_text(line, Vector2(480, 333), m.font_regular, 14, Color(1, 1, 1, 0.75 * a), 3, true)
+	if m.alarm_raised:
+		_text("alarm raised", Vector2(480, 352), m.font_italic, 13, Color(1, 1, 1, 0.5 * a), 0, true)
 
 func _menu(paused: bool) -> void:
 	draw_rect(Rect2(0, 0, 960, 540), Color(0, 0, 0, 0.62 if paused else 0.55))
@@ -137,7 +159,7 @@ func _menu(paused: bool) -> void:
 			draw_string(m.font_regular, Vector2(x - 60, m.QUIT_Y), label, HORIZONTAL_ALIGNMENT_CENTER, 120, 20, Color(1, 1, 1, 0.95 if sel else 0.42))
 			if sel:
 				draw_line(Vector2(x - 22, m.QUIT_Y + 10), Vector2(x + 22, m.QUIT_Y + 10), Color(1, 1, 1, 0.7), 1.0)
-		_footer("← →  choose    ·    ENTER  select    ·    ESC  back")
+		_footer(_k("← →  choose    ·    ENTER  select    ·    ESC  back", "← →  choose    ·    A  select    ·    B  back"))
 		return
 	if m.menu_page == "levels":
 		_text("LEVELS", Vector2(480, 150), m.font_regular, 30, Color(1, 1, 1, 0.9), 10, true)
@@ -151,15 +173,22 @@ func _menu(paused: bool) -> void:
 				var half: float = (m.font_regular.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 18).x + label.length() * 3) / 2
 				draw_line(Vector2(480 - half - 44, y - 6), Vector2(480 - half - 16, y - 6), Color(1, 1, 1, 0.7), 1.0)
 				draw_line(Vector2(480 + half + 16, y - 6), Vector2(480 + half + 44, y - 6), Color(1, 1, 1, 0.7), 1.0)
-		_footer("↑ ↓  choose    ·    ENTER  play    ·    ESC  back")
+		_footer(_k("↑ ↓  choose    ·    ENTER  play    ·    ESC  back", "↑ ↓  choose    ·    A  play    ·    B  back"))
 		return
 	if m.menu_page == "about":
 		_about()
 		return
 	if m.menu_page == "controls":
 		_text("CONTROLS", Vector2(480, 120), m.font_regular, 30, Color(1, 1, 1, 0.9), 10, true)
-		_table(190)
-		_footer("ESC  back")
+		_table(200, true)
+		_footer(_k("ESC  back", "B  back"))
+		return
+	if m.menu_page == "howto":                       # before the first New Game
+		_text("HOW TO PLAY", Vector2(480, 105), m.font_regular, 30, Color(1, 1, 1, 0.9), 10, true)
+		_text("stay in the dark. the light you see is the light that catches you.", Vector2(480, 140), m.font_italic, 16, Color(1, 1, 1, 0.65), 0, true)
+		_table(210, true)
+		var a := 0.45 + 0.35 * sin(m.time * 3.0)
+		_text(_k("press any key", "press any button"), Vector2(480, 470), m.font_regular, 14, Color(1, 1, 1, a), 4, true)
 		return
 	_text("SHADOW NINJA", Vector2(480, 165), m.font_regular, 54, Color(1, 1, 1, 0.92), 14, true)
 	_text("paused" if paused else "stay out of the light", Vector2(480, 205), m.font_italic, 18, Color(1, 1, 1, 0.6), 0, true)
@@ -173,7 +202,8 @@ func _menu(paused: bool) -> void:
 			var half: float = (m.font_regular.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 20).x + label.length() * 5) / 2
 			draw_line(Vector2(480 - half - 44, y - 7), Vector2(480 - half - 16, y - 7), Color(1, 1, 1, 0.7), 1.0)
 			draw_line(Vector2(480 + half + 16, y - 7), Vector2(480 + half + 44, y - 7), Color(1, 1, 1, 0.7), 1.0)
-	_footer("↑ ↓  choose    ·    ENTER  select" + ("    ·    ESC  resume" if paused else ""))
+	_footer(_k("↑ ↓  choose    ·    ENTER  select" + ("    ·    ESC  resume" if paused else ""),
+		"↑ ↓  choose    ·    A  select" + ("    ·    B  resume" if paused else "")))
 
 func _about() -> void:
 	_text("ABOUT", Vector2(480, 80), m.font_regular, 30, Color(1, 1, 1, 0.9), 10, true)
@@ -182,13 +212,19 @@ func _about() -> void:
 	_text("CONTROLS", Vector2(480, 275), m.font_regular, 13, Color(1, 1, 1, 0.55), 6, true)
 	_table(305)
 	_text("a greyscale stealth prototype, after Limbo and Mark of the Ninja", Vector2(480, 482), m.font_italic, 12, Color(1, 1, 1, 0.4), 0, true)
-	_footer("ESC  back")
+	_footer(_k("ESC  back", "B  back"))
 
-func _table(y0: float) -> void:                      # keys right-aligned, actions left-aligned
+func _table(y0: float, heads := false) -> void:     # keyboard | controller | what it does; your device is brighter
+	var kb := 0.85 if not m.pad else 0.45
+	var jp := 0.85 if m.pad else 0.45
+	if heads:
+		draw_string(m.font_regular, Vector2(40, y0 - 30), "KEYBOARD", HORIZONTAL_ALIGNMENT_RIGHT, 230, 10, Color(1, 1, 1, kb * 0.6))
+		draw_string(m.font_regular, Vector2(290, y0 - 30), "CONTROLLER", HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(1, 1, 1, jp * 0.6))
 	for i in CONTROLS.size():
 		var y := y0 + i * 24
-		draw_string(m.font_regular, Vector2(100, y), CONTROLS[i][0], HORIZONTAL_ALIGNMENT_RIGHT, 300, 14, Color(1, 1, 1, 0.85))
-		draw_string(m.font_italic, Vector2(425, y), CONTROLS[i][1], HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(1, 1, 1, 0.6))
+		draw_string(m.font_regular, Vector2(40, y), CONTROLS[i][0], HORIZONTAL_ALIGNMENT_RIGHT, 230, 14, Color(1, 1, 1, kb))
+		draw_string(m.font_regular, Vector2(290, y), CONTROLS[i][1], HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(1, 1, 1, jp))
+		draw_string(m.font_italic, Vector2(420, y), CONTROLS[i][2], HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(1, 1, 1, 0.6))
 
 func _footer(s: String) -> void:
 	_text(s, Vector2(480, 515), m.font_regular, 11, Color(1, 1, 1, 0.35), 2, true)

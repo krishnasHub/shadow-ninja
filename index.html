@@ -84,6 +84,8 @@ const lctx = lightCv.getContext('2d');
 //    doors:  [x, y, w, h] locked doors (solid);  switches: {x, row, door} - walk up to one (within
 //            TUNE.leverReach, so keep a lever within that of any wall) and the
 //            ninja pulls it, which opens doors[door]. Stairs are just 1-tile steps: walking climbs them.
+//    panels: [x, row] alarm panels on the wall. A camera that spots you raises the alarm; a stone
+//            through a panel kills it (floors with a camera should have one).
 // =====================================================================
 const LEVELS = [
   {
@@ -96,11 +98,13 @@ const LEVELS = [
       ['plant', 48, 15], ['desk', 55, 15], ['chair', 57.5, 15], ['cooler', 66, 15],
       ['plant', 80, 12], ['desk', 91, 15], ['plant', 94, 15]],
     hints: [
-      [2.5, 170, 'A D / ← →  run (loud)      SHIFT  sneak (silent)      SPACE / W / ↑  jump'],
+      [2.5, 170, 'A D / ← →  run (loud)      SHIFT  sneak (silent)      SPACE / W / ↑  jump',
+                 'stick  run (loud)      hold LT  sneak (silent)      A  jump'],
       [11, 210, 'light fills the meter.  ↓ behind furniture hides you.'],
       [17.5, 300, 'jump into the duct to cling.  ← → shimmy,  ↓ drop.'],
       [24, 170, '↓  crawl - the dark is under the walkway'],
-      [33, 260, 'CTRL: throw mode. aim with the mouse, click to throw. the clack pulls guards to it.'],
+      [33, 260, 'CTRL: throw mode. aim with the mouse, click to throw. the clack pulls guards to it.',
+                'hold RT, aim with the right stick, let go to throw. the clack pulls guards to it.'],
       [43, 170, 'moonlight is weaker. it is still light.'],
       [38.5, 215, 'guards: hide before the torch finds you. if he sees you duck, he knows where.'],
       [56, 255, 'jump on a guard from behind - or drop from a duct - to put him to sleep.'],
@@ -155,6 +159,7 @@ const LEVELS = [
       { x: 64, from: 54, to: 73, minX: 52, maxX: 105, row: 15 },
       { x: 102, from: 97, to: 108, minX: 52, maxX: 115, row: 15 },
     ],
+    panels: [[88.5, 15]],                     // a stone from behind the cooler at 81 reaches it
     spawn: [3, 15], exit: 116,
   },
   {
@@ -188,7 +193,7 @@ const LEVELS = [
     lights: [
       { kind: 'lamp', x: 10.5, y: 14.125, spread: 0.5, radius: 420 },
       { kind: 'lamp', x: 22.5, y: 14.125, spread: 0.5, radius: 420, flicker: [2.8, 0.55] },
-      { kind: 'lamp', x: 35.5, spread: 0.35, radius: 760, intensity: 0.8 },      // down the stairwell
+      { kind: 'lamp', x: 35.5, spread: 0.35, radius: 760, intensity: 0.55, flicker: [4.0, 0.5] },      // down the stairwell
       { kind: 'lamp', x: 50.5, y: 14.125, spread: 0.5, radius: 420 },
       { kind: 'lamp', x: 68.5, y: 14.125, spread: 0.5, radius: 420 },
       { kind: 'lamp', x: 84.5, y: 14.125, spread: 0.5, radius: 420, intensity: 0.9 },
@@ -204,6 +209,7 @@ const LEVELS = [
       { x: 75, from: 64, to: 90, minX: 61, maxX: 95, row: 24 },
       { x: 60, from: 44, to: 88, minX: 40, maxX: 95, row: 12 },      // upstairs, in the server room
     ],
+    panels: [[83.5, 12]],                     // upstairs, in reach from behind the rack at 78
     spawn: [3, 24], exit: 95, exitRow: 24,
   },
 ];
@@ -212,7 +218,15 @@ const LEVELS = [
 let LH = 17;                                       // this floor's height in rows (tall floors scroll vertically)
 let exitRow = 15, switches = [], doors = [];       // doors: {x, y, w, h, open}; switches: {x, row, door, on, anim}
 let LW = 100, grid = new Uint8Array(0), level = null, levelIdx = 0, levelT = 0;
+let hintA = [];                                    // each hint's fade, 0..1: they surface as you come near, like something half-remembered
+const HINT_NEAR = { x: 5 * 32, y: 12 * 32, in: 1.4, out: 0.5 };   // y: on the wall of the storey you stand in
 let notice = '', noticeT = 99;                     // a line that fades in mid-screen, e.g. "a door unlocks below."
+let panels = [];                                   // {x, row, broken, brokenT}: alarm panels
+let alarm = '', alarmLeft = 0, alarmX = 0;         // alarm: '' | 'alarm' (counting down) | 'lockdown'
+let alarmRaised = false, regroupT = 0;             // raised this run (end screen); lockdown re-sends guards hunting
+let runT = 0, newBest = false;                     // this run's time on the floor
+const best = {};                                   // best clear time per floor (localStorage)
+try { Object.assign(best, JSON.parse(localStorage.getItem('shadowNinja.best') || '{}')); } catch (e) {}
 let SPAWN = { x: 0, y: 0 }, EXIT_X = 0, DOOR_X = 0, PROPS = [], HINTS = [], GUARD_DEFS = [];
 function fill(x, y, w, h, v = 1) {
   for (let j = y; j < y + h; j++) for (let i = x; i < x + w; i++) grid[j * LW + i] = v;
@@ -326,12 +340,16 @@ function makeLevelLight(d) {
                 spread: d.spread, radius: d.radius, intensity: d.intensity ?? 1, danger: d.danger ?? 1 });
   }
   if (d.flicker) L.flicker = { period: d.flicker[0], on: d.flicker[1] };
-  if (d.sweep) { L.sweep = { amp: d.sweep[0], period: d.sweep[1] }; L.baseDir = L.dir; L.alarmT = -99; L.seeing = false; }
+  if (d.sweep) { L.sweep = { amp: d.sweep[0], period: d.sweep[1] }; L.baseDir = L.dir; L.alarmT = -99; L.seeing = false;
+                 L.locked = false; L.sweepT = 0; }
   return L;
 }
 
-function updateLight(L, t) {
-  if (L.sweep) L.dir = L.baseDir + L.sweep.amp * Math.sin(2 * Math.PI * t / L.sweep.period);   // cameras sweep
+function updateLight(L, t, dt) {
+  if (L.sweep && !L.locked) {                    // cameras sweep; after a lock they ease back into it
+    L.sweepT += dt;
+    L.dir = approach(L.dir, L.baseDir + L.sweep.amp * Math.sin(2 * Math.PI * L.sweepT / L.sweep.period), CAM_LOCK.easeBack * dt);
+  }
   if (!L.flicker) { L.level = L.intensity; return; }
   const ph = (t % L.flicker.period) / L.flicker.period;
   let lit = ph < L.flicker.on;
@@ -486,8 +504,10 @@ function loadLevel(idx) {
   for (const r of level.ducts) fill(r[0], r[1], r[2], r[3], GRIP);
   doors = (level.doors || []).map(([x, y, w, h]) => { fill(x, y, w, h, DOOR); return { x, y, w, h, open: false }; });
   switches = (level.switches || []).map(sw => ({ ...sw, on: false, anim: 0, onT: -99 }));
+  panels = (level.panels || []).map(([x, row]) => ({ x, row, broken: false, brokenT: -99 }));
   PROPS = level.props.map(([type, x, row]) => ({ type, x, y: row * T }));
   HINTS = level.hints; GUARD_DEFS = level.guards;
+  hintA = HINTS.map(() => 0);
   SPAWN = { x: level.spawn[0] * T, y: level.spawn[1] * T - TUNE.standH };
   DOOR_X = level.exit; EXIT_X = level.exit * T + 8;
   SEGS = buildSegments();
@@ -500,6 +520,77 @@ function openDoor(i) {
   d.open = true;
   fill(d.x, d.y, d.w, d.h, 0);
   rebuildGeometry();
+}
+// Hints are his own memory talking: each fades in while he's near it and fades away as he moves on.
+function updateHints(dt) {
+  const mid = P.x + P.w / 2;
+  ctx.font = 'italic 14px Georgia, serif';
+  HINTS.forEach((h, i) => {
+    const x0 = h[0] * T, w = ctx.measureText(h[2]).width;
+    const near = Math.max(0, x0 - mid, mid - (x0 + w)) < HINT_NEAR.x && P.y + P.h - h[1] >= 0 && P.y + P.h - h[1] < HINT_NEAR.y;
+    hintA[i] = approach(hintA[i], near ? 1 : 0, dt * (near ? HINT_NEAR.in : HINT_NEAR.out));
+  });
+}
+// A camera saw you: start the countdown (unless one's running, or every panel is already dead).
+function raiseAlarm(x) {
+  alarmX = x;
+  if (alarm || (panels.length && panels.every(pn => pn.broken))) return;
+  alarm = 'alarm'; alarmLeft = ALARM.countdown; alarmRaised = true;
+  notice = 'the alarm is up. get out - or kill the panel.'; noticeT = 0;
+}
+function updateAlarm(dt) {
+  if (!alarm) return;
+  alarmLeft -= dt;
+  if (alarm === 'alarm' && alarmLeft <= 0) {       // too slow: every guard hunts for you
+    alarm = 'lockdown'; alarmLeft = ALARM.lockdown; regroupT = 0;
+    notice = 'lockdown. stay hidden.'; noticeT = 0;
+    for (const g of guards) if (g.state !== 'asleep') { g.lockdown = true; g.alert = true; }
+  }
+  if (alarm === 'lockdown') {
+    regroupT -= dt;
+    if (regroupT <= 0) {                           // keep them searching around where you were seen
+      regroupT = ALARM.regroup;
+      for (const g of guards) if (g.lockdown && (g.state === 'patrol' || g.state === 'return')) hear(g, alarmX + (Math.random() * 8 - 4) * T);
+    }
+    if (alarmLeft <= 0) {                          // it's over: they calm down and go back to their rounds
+      alarm = '';
+      for (const g of guards) if (g.lockdown) { g.lockdown = false; g.alert = !!g.foundBody; }
+    }
+  }
+}
+function breakPanel(pn, s) {
+  pn.broken = true; pn.brokenT = time;
+  s.vx *= -0.3;
+  playSfx(sfx.panel, 0.9);
+  makeNoise(s.x, s.y, NOISE.stone);
+  notice = alarm === 'alarm' ? 'alarm off.' : 'the alarm panel is dead.'; noticeT = 0;
+  if (alarm === 'alarm') alarm = '';
+}
+function recordTime() {
+  newBest = !(best[levelIdx] <= runT);
+  if (newBest) {
+    best[levelIdx] = runT;
+    try { localStorage.setItem('shadowNinja.best', JSON.stringify(best)); } catch (e) {}
+  }
+}
+const clock = t => `${Math.floor(t / 60)}:${String(Math.floor(t) % 60).padStart(2, '0')}`;
+// Walking into a locked door: the handle rattles and you're told where its switch is.
+function tryDoor(x) {
+  const i = Math.floor(x / T);
+  for (let j = Math.floor(P.y / T); j <= Math.floor((P.y + P.h - 0.001) / T); j++) {
+    if (i < 0 || i >= LW || j < 0 || j >= LH || grid[j * LW + i] !== DOOR) continue;
+    if (time - rattleT > 1.2) { rattleT = time; playSfx(sfx.rattle, 0.8); makeNoise(x, P.y + P.h / 2, NOISE.rattle); }
+    if (noticeT > 2) {
+      notice = 'locked.';
+      for (const sw of switches) {
+        const d = doors[sw.door];
+        if (!sw.on && i >= d.x && i < d.x + d.w)
+          notice = sw.row < d.y ? 'locked. the switch is upstairs.' : sw.row > d.y + d.h ? 'locked. the switch is downstairs.' : 'locked. find its switch.';
+      }
+      noticeT = 0;
+    }
+    return;
+  }
 }
 // A retry starts the floor over: every lever up, every door it opened locked again.
 function resetDoors() {
@@ -522,6 +613,7 @@ const KEYMAP = { ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'ri
 const held = new Set();
 let jumpQueued = false;
 addEventListener('keydown', e => {
+  pad = false;
   if (e.code === 'KeyM' && !e.repeat) { toggleMusic(); return; }   // music on / off, anywhere
   startMusic();
   const k = KEYMAP[e.code];
@@ -559,7 +651,11 @@ const METER_AUDIO = {
   duck: 0.35,                                     // the base music dips by up to 35% at full
 };
 const sfx = { heart: new Audio('godot/audio/heartbeat.wav'), riser: new Audio('godot/audio/riser.wav'),
-              caught: new Audio('godot/audio/caught.wav'), lever: new Audio('godot/audio/lever.wav') };
+              caught: new Audio('godot/audio/caught.wav'), lever: new Audio('godot/audio/lever.wav'),
+              rattle: new Audio('godot/audio/rattle.wav'), panel: new Audio('godot/audio/panel.wav'),
+              siren: new Audio('godot/audio/siren.wav') };
+sfx.siren.loop = true; sfx.siren.volume = 0.35;
+let rattleT = -99;                                 // when a locked door was last tried
 sfx.riser.loop = true; sfx.riser.preservesPitch = false; sfx.riser.volume = 0;
 let heartT = 0, lastBeat = -99, wasCaught = false, sfxStarted = false;
 function playSfx(a, vol) { a.volume = clamp(vol, 0, 1); a.currentTime = 0; a.play().catch(() => {}); }
@@ -600,9 +696,13 @@ function musicDanger() {
     else if (g.state === 'search' || g.state === 'investigate') d = Math.max(d, 0.45);
   }
   for (const L of LIGHTS) if (L.kind === 'camera' && L.seeing) d = Math.max(d, 0.7);
+  if (alarm) d = Math.max(d, 0.6);
   return clamp(d, 0, 1);
 }
 function updateMusic(dt) {
+  const sirenOn = !!alarm && state === 'play';
+  if (sirenOn && sfx.siren.paused && sfxStarted) sfx.siren.play().catch(() => {});
+  else if (!sirenOn && !sfx.siren.paused) sfx.siren.pause();
   if (state === 'pause') return;                   // hold the mood while paused
   updateMeterAudio(dt);
   const target = state === 'play' ? musicDanger() : 0;
@@ -626,8 +726,10 @@ cv.addEventListener('mousemove', e => {
 cv.addEventListener('mousedown', e => {
   startMusic();
   if (e.button !== 0) return;
+  pad = false;
   if (inMenu()) {
-    if (menuPage === 'quit') { const q = quitItemAt(mouse.x, mouse.y); if (q >= 0) quitChoose(q); }
+    if (menuPage === 'howto') menuKey('Enter');
+    else if (menuPage === 'quit') { const q = quitItemAt(mouse.x, mouse.y); if (q >= 0) quitChoose(q); }
     else if (menuPage === 'levels') { const l = levelItemAt(mouse.x, mouse.y); if (l >= 0) startRun(l); }
     else if (menuPage) menuPage = '';
     else { const i = menuItemAt(mouse.x, mouse.y); if (i >= 0) menuActivate(i); }
@@ -663,7 +765,7 @@ function openMenu(st) { state = st; stateT = 0; menuSel = 0; menuPage = ''; aimi
 function menuActivate(i) {
   const item = menuItems()[i];
   if (item === 'Resume') state = 'play';
-  else if (item === 'New Game') startRun(0);
+  else if (item === 'New Game') { if (howtoSeen) startRun(0); else { howtoSeen = true; menuPage = 'howto'; } }
   else if (item === 'Levels') { menuPage = 'levels'; levelSel = levelIdx; }   // pick any floor (a dev convenience for now)
   else if (item === 'About') menuPage = 'about';
   else if (item === 'Controls') menuPage = 'controls';
@@ -675,6 +777,7 @@ function quitChoose(i) {
   state = 'bye'; stateT = 0;
 }
 function menuKey(code) {
+  if (menuPage === 'howto') { menuPage = ''; startRun(0); return; }   // any key or button: play
   if (menuPage === 'quit') {                       // Are you sure?  ← → choose, Enter picks, Y / N shortcuts
     if (['ArrowLeft', 'ArrowRight', 'KeyA', 'KeyD', 'ArrowUp', 'ArrowDown', 'KeyW', 'KeyS'].includes(code)) quitSel = 1 - quitSel;
     else if (code === 'Enter' || code === 'Space') quitChoose(quitSel);
@@ -701,6 +804,62 @@ function menuKey(code) {
   else if (code === 'Escape' && state === 'pause') state = 'play';
 }
 addEventListener('blur', () => held.clear());
+const isHeld = k => held.has(k) || padHeld.has(k);
+
+// Controllers (Gamepad API, standard mapping = the Xbox layout), polled every frame. In menus the
+// buttons stand in for keys; in play: stick/d-pad move, A jump, B crawl, LT sneak, hold RT to aim
+// with the right stick and let go to throw, Start pause, View restart, Y music.
+const PAD = { A: 0, B: 1, X: 2, Y: 3, LB: 4, RB: 5, LT: 6, RT: 7, VIEW: 8, START: 9, UP: 12, DOWN: 13, LEFT: 14, RIGHT: 15 };
+const padHeld = new Set();
+let pad = false, padPrev = [], padStick = '', padAim = { x: 0, y: 0 };
+function pollPad() {
+  padHeld.clear();
+  const gp = [...(navigator.getGamepads ? navigator.getGamepads() : [])].find(g => g && g.connected);
+  if (!gp) return;
+  const now = gp.buttons.map(b => b.pressed || b.value > 0.5), ax = i => gp.axes[i] || 0;
+  if (now.some(Boolean) || gp.axes.some(v => Math.abs(v) > 0.5)) pad = true;
+  if (ax(0) < -0.4 || now[PAD.LEFT]) padHeld.add('left');
+  if (ax(0) > 0.4 || now[PAD.RIGHT]) padHeld.add('right');
+  if (now[PAD.A]) padHeld.add('jump');
+  if (now[PAD.B] || now[PAD.DOWN] || ax(1) > 0.7) padHeld.add('down');
+  if (now[PAD.LT] || now[PAD.LB]) padHeld.add('walk');
+  for (let i = 0; i < now.length; i++) if (now[i] && !padPrev[i] && i !== PAD.RB && i !== PAD.RT) { startMusic(); padButton(i); }
+  const thr = now[PAD.RT] || now[PAD.RB];
+  if (thr !== !!(padPrev[PAD.RT] || padPrev[PAD.RB])) padThrow(thr);
+  const d = Math.abs(ax(1)) > 0.6 ? (ax(1) < 0 ? 'ArrowUp' : 'ArrowDown') : Math.abs(ax(0)) > 0.6 ? (ax(0) < 0 ? 'ArrowLeft' : 'ArrowRight') : '';
+  if (d !== padStick) { padStick = d; if (d && inMenu()) menuKey(d); }   // menus: one step per push of the stick
+  if (aiming && pad) {                             // the right stick (or the left) aims; the push sets the range
+    let sx = ax(2), sy = ax(3);
+    if (Math.hypot(sx, sy) < 0.25) { sx = ax(0); sy = ax(1); }
+    const len = Math.hypot(sx, sy);
+    if (len > 0.25) { const r = lerp(1.5 * T, 11 * T, clamp((len - 0.25) / 0.7, 0, 1)); padAim = { x: sx / len * r, y: sy / len * r }; }
+  }
+  padPrev = now;
+}
+function padButton(b) {
+  if (b === PAD.Y) { toggleMusic(); return; }
+  if (inMenu()) {
+    const code = { [PAD.A]: 'Enter', [PAD.B]: 'Escape', [PAD.START]: 'Escape', [PAD.UP]: 'ArrowUp', [PAD.DOWN]: 'ArrowDown',
+                   [PAD.LEFT]: 'ArrowLeft', [PAD.RIGHT]: 'ArrowRight' }[b];
+    if (code || menuPage === 'howto') menuKey(code || 'Enter');
+    return;
+  }
+  if (state === 'bye') { if (b === PAD.A || b === PAD.B || b === PAD.START) openMenu('title'); return; }
+  if (b === PAD.A) {
+    if (state === 'play') jumpQueued = true;
+    else if (state === 'caught') startRun();
+    else if (state === 'escaped') { if (levelIdx + 1 < LEVELS.length) startRun(levelIdx + 1); else openMenu('title'); }
+  } else if (b === PAD.B) aiming = false;            // cancels a throw
+  else if (b === PAD.VIEW) startRun();
+  else if (b === PAD.START) openMenu(state === 'play' ? 'pause' : 'title');
+}
+function padThrow(down) {                          // hold RT (or RB) to aim, let go to throw
+  if (state !== 'play') return;
+  if (down && !aiming && stoneCount > 0) { aiming = true; padAim = { x: P.facing * 5 * T, y: -T }; }
+  else if (!down && aiming) { throwStone(); aiming = false; }
+}
+let howtoSeen = false;                             // the how-to-play card shows once, before the first New Game
+const K = (keys, padText) => pad ? padText : keys;  // the prompt for whichever device you last touched
 
 // =====================================================================
 //  PLAYER
@@ -714,6 +873,9 @@ let meter = 0, exposure = 0, calm = 0;
 function startRun(idx = -1) {
   if (idx >= 0) loadLevel(idx);
   resetDoors();
+  for (const L of LIGHTS) L.locked = false;
+  for (const pn of panels) pn.broken = false;
+  alarm = ''; alarmRaised = false; runT = 0; newBest = false;
   Object.assign(P, { x: SPAWN.x, y: SPAWN.y, w: TUNE.width, h: TUNE.standH, vx: 0, vy: 0, onGround: false,
                      facing: 1, crawling: false, running: false, coyote: 0, jumpBuf: 0, walkPhase: 0, moveT: 0, lean: 0, vis: 0, cover: null, hidden: false, wasHidden: false, clinging: false, flipSw: -1, flipT: 0 });
   guards = GUARD_DEFS.map(makeGuard);
@@ -744,7 +906,7 @@ function startCling() {
   P.clinging = true; P.crawling = false; P.h = TUNE.crawlH; P.vx = P.vy = 0;
 }
 function updateCling(dt, dir) {
-  if (held.has('down')) {                        // let go - top stays at the duct, then fall
+  if (isHeld('down')) {                        // let go - top stays at the duct, then fall
     P.clinging = false; P.h = TUNE.standH; P.vy = 0;
     return false;
   }
@@ -760,20 +922,20 @@ function updateCling(dt, dir) {
 }
 
 function updatePlayer(dt) {
-  let dir = (held.has('right') ? 1 : 0) - (held.has('left') ? 1 : 0);
+  let dir = (isHeld('right') ? 1 : 0) - (isHeld('left') ? 1 : 0);
   if (aiming) {                                  // throw mode: hold still and face the cursor (ducking still works)
     dir = 0; jumpQueued = false;
     P.facing = aimTarget().x >= P.x + P.w / 2 ? 1 : -1;
   }
   if (P.clinging && updateCling(dt, dir)) return;
   if (P.flipSw >= 0) { updateFlip(dt); return; }
-  const wantCrawl = held.has('down');
+  const wantCrawl = isHeld('down');
   if (wantCrawl && P.onGround && !P.crawling) {
     P.y += TUNE.standH - TUNE.crawlH; P.h = TUNE.crawlH; P.crawling = true;
   } else if (!wantCrawl && P.crawling && canStand()) {
     P.y -= TUNE.standH - TUNE.crawlH; P.h = TUNE.standH; P.crawling = false;
   }
-  P.running = !held.has('walk') && !P.crawling;   // running is the default; Shift sneaks
+  P.running = !isHeld('walk') && !P.crawling;   // running is the default; Shift sneaks
   if (dir) P.facing = dir;
   const maxV = P.crawling ? TUNE.crawl : P.running ? TUNE.run : TUNE.walk;
   // pushing the same way (or starting from still) builds the ramp; letting go or turning resets it
@@ -789,7 +951,7 @@ function updatePlayer(dt) {
   P.jumpBuf = jumpQueued ? TUNE.jumpBuffer : P.jumpBuf - dt;
   jumpQueued = false;
   if (P.jumpBuf > 0 && P.coyote > 0 && !P.crawling) { P.vy = -TUNE.jumpV; P.jumpBuf = 0; P.coyote = 0; }
-  if (!held.has('jump') && P.vy < 0) P.vy += TUNE.gravity * TUNE.jumpCut * dt;
+  if (!isHeld('jump') && P.vy < 0) P.vy += TUNE.gravity * TUNE.jumpCut * dt;
   P.vy = Math.min(P.vy + TUNE.gravity * dt, TUNE.maxFall);
 
   // move X, then Y, resolving against tiles
@@ -800,6 +962,7 @@ function updatePlayer(dt) {
     if (P.onGround && !P.crawling && P.y - up <= T + 0.5 && !rectHits(P.x, up, P.w, P.h)) P.y = up;
     else {
       P.x = P.vx > 0 ? Math.floor((P.x + P.w - 0.001) / T) * T - P.w : (Math.floor(P.x / T) + 1) * T;
+      tryDoor(P.vx > 0 ? P.x + P.w + 1 : P.x - 1);
       P.vx = 0;
     }
   }
@@ -810,11 +973,11 @@ function updatePlayer(dt) {
     if (P.vy > 0) { P.y = Math.floor((P.y + P.h - 0.001) / T) * T - P.h; P.onGround = true; P.vy = 0; }
     else {
       P.y = (Math.floor(P.y / T) + 1) * T; P.vy = 0;
-      if (gripOver(P.x) && !held.has('down')) { startCling(); return; }   // head hits a duct: grab on
+      if (gripOver(P.x) && !isHeld('down')) { startCling(); return; }   // head hits a duct: grab on
     }
   }
   // a hard landing is loud unless you're sneaking (Shift)
-  if (P.onGround && !wasOnGround && impactV > TUNE.landNoiseV && !held.has('walk')) makeNoise(P.x + P.w / 2, P.y + P.h, NOISE.land);
+  if (P.onGround && !wasOnGround && impactV > TUNE.landNoiseV && !isHeld('walk')) makeNoise(P.x + P.w / 2, P.y + P.h, NOISE.land);
 
   // hiding: ducked behind furniture with your middle inside its footprint
   const mid = P.x + P.w / 2;
@@ -929,7 +1092,7 @@ function updateDetection(dt) {
 //  NOISE + STONES
 //  Noise is a circle: any awake guard inside it goes to look.
 // =====================================================================
-const NOISE = { run: 150, land: 120, stone: 280, thud: 140, lever: 230 };   // radii in px
+const NOISE = { run: 150, land: 120, stone: 280, thud: 140, lever: 230, rattle: 90 };   // radii in px
 const STONE = { max: 3, maxSpeed: 700, gravity: 1400, r: 3 };   // maxSpeed sets the range: ~10 tiles on the flat
 let noises = [], stones = [], stoneCount = 0;
 let aiming = false;   // throw mode (Ctrl): the mouse aims, a click throws
@@ -950,6 +1113,7 @@ const solidPx = (x, y) => solidAt(Math.floor(x / T), Math.floor(y / T));
 // Aim at the mouse. Pick the throw that lands on it; if that needs more than maxSpeed
 // it's out of range, and you throw as hard as you can toward it (the arc shows where that lands).
 function aimTarget() {
+  if (pad && aiming) return { x: P.x + P.w / 2 + padAim.x, y: P.y + P.h / 2 + padAim.y };
   return mouse.seen ? { x: mouse.x + cam.x, y: mouse.y + cam.y } : { x: P.x + P.w / 2 + P.facing * 8 * T, y: P.y + P.h };
 }
 function aimThrow() {
@@ -997,6 +1161,8 @@ function updateStones(dt) {
       continue;
     }
     if (stoneStep(s, dt)) clack(s);
+    for (const pn of panels)                       // a stone through an alarm panel kills it
+      if (!pn.broken && Math.abs(s.x - pn.x * T) < 9 && Math.abs(s.y - (pn.row * T - 48)) < 11) breakPanel(pn, s);
   }
   stones = stones.filter(s => !s.taken);
   for (const n of noises) n.t += dt;
@@ -1014,18 +1180,33 @@ const GUARD = { walk: 55, chase: 115, investigate: 85,
                 torchRadius: 330, torchSpread: 0.32, danger: 1.3,
                 searchTime: 4, endPause: 1.5, sawYouHide: 0.4,   // sawYouHide: seconds of grace
                 alertSpeed: 1.35, alertSearch: 7,                // after finding a sleeping guard
-                wakeAfter: Infinity };   // sleepers never wake. Harder difficulty: seconds until they do
+                wakeAfter: Infinity,     // sleepers never wake. Harder difficulty: seconds until they do
+                reaction: 0.3 };         // lock-on: seconds before he turns to you once you're behind him
+// Lock-on: a camera that sees you stops sweeping and follows you (at this rate, within its arc
+// plus slack) until you hide, a wall cuts the line, or you leave its reach. Then it eases back.
+const CAM_LOCK = { track: 0.8, slack: 0.3, easeBack: 1.5 };
+// The alarm: a camera that spots you starts the countdown. Leave the floor or put a stone through
+// the alarm panel in time, or it's a lockdown: every guard on alert, hunting where you were seen.
+const ALARM = { countdown: 30, lockdown: 30, regroup: 5 };
 let guards = [];
 const allLights = () => LIGHTS.concat(guards.map(g => g.torch));
 
 function makeGuard(d) {
   const g = { x: d.x * T, y: d.row * T, facing: 1, from: d.from * T, to: d.to * T,
               minX: d.minX * T + 12, maxX: d.maxX * T - 12, state: 'patrol', pause: 0, phase: 0,
-              moving: false, searchStart: 0, searchFacing: 1, seenT: -99, lastSeen: 0, knowsHide: null, aim: 0.15 };
+              moving: false, searchStart: 0, searchFacing: 1, seenT: -99, lastSeen: 0, knowsHide: null, aim: 0.15,
+              trackT: -99, behindSince: -1 };   // lock-on: last time he had you in sight; when you got behind him
   g.torch = light({ kind: 'torch', x: g.x, y: g.y - 32, dir: 0, spread: GUARD.torchSpread,
                     radius: GUARD.torchRadius, danger: GUARD.danger });
   g.torch.guard = g;
   return g;
+}
+// Lock-on: in a chase he keeps you in sight while you're in his torch's reach with a clear line
+// (and not hidden where he didn't see you go), even when you slip out of the beam for a moment.
+function guardTracks(g) {
+  if (g.state !== 'chase' || (P.hidden && g.knowsHide !== P.cover)) return false;
+  const p = samplePoints()[1], ex = g.x, ey = g.y - 34;
+  return Math.hypot(p.x - ex, p.y - ey) < GUARD.torchRadius && !blocked(ex, ey, p.x, p.y);
 }
 function guardSees(g) {
   if (g.state === 'asleep' || (P.hidden && g.knowsHide !== P.cover)) return false;
@@ -1040,11 +1221,19 @@ function updateGuard(g, dt) {
     g.state = 'search'; g.huntingYou = false; g.searchStart = time; g.searchFacing = g.facing;
   }
   const px = P.x + P.w / 2;
-  if (guardSees(g)) { g.seenT = time; g.lastSeen = px; g.state = 'chase'; }
-  const seeing = time - g.seenT < 0.1;
+  const lit = guardSees(g);
+  if (lit) { g.seenT = time; g.state = 'chase'; }
+  if (lit || guardTracks(g)) {
+    g.trackT = time;
+    // you got behind him: he turns after a beat (a quick hop over him buys you that beat)
+    if (Math.sign(px - g.x) === g.facing || Math.abs(px - g.x) < 4) g.behindSince = -1;
+    else if (g.behindSince < 0) g.behindSince = time;
+    if (g.behindSince < 0 || time - g.behindSince > GUARD.reaction) g.lastSeen = px;
+  }
+  const seeing = time - g.trackT < 0.1 && g.state === 'chase';
   // a sleeping colleague in his torch puts him on alert
   if (!seeing) for (const o of guards) if (o.state === 'asleep' && !o.found && lightAt(g.torch, o.x, o.y - 8) > 0.05) {
-    o.found = true; g.alert = true; hear(g, o.x);
+    o.found = true; g.alert = true; g.foundBody = true; hear(g, o.x);
   }
   const boost = g.alert ? GUARD.alertSpeed : 1;
   let target = null, speed = GUARD.walk * boost;
@@ -1082,9 +1271,9 @@ function updateGuard(g, dt) {
   // torch: level-ish on patrol, on you in a chase, sweeping in a search
   const tx = g.x + g.facing * 14, ty = g.y - 32;
   let aim = 0.15;
-  if (g.state === 'chase' && seeing) aim = clamp(Math.atan2(P.y + P.h / 2 - ty, Math.abs(px - tx)), -0.6, 0.7);
+  if (g.state === 'chase' && seeing) aim = clamp(Math.atan2(P.y + P.h / 2 - ty, Math.abs(px - tx)), -1.0, 1.1);
   else if (g.state === 'search') aim = 0.1 + Math.sin(time * 2.2) * 0.35;
-  g.aim = lerp(g.aim, aim, 1 - Math.exp(-dt * 6));
+  g.aim = lerp(g.aim, aim, 1 - Math.exp(-dt * (g.state === 'chase' && seeing ? 10 : 6)));
   const L = g.torch;
   L.x = tx; L.y = ty; L.dir = g.facing > 0 ? g.aim : Math.PI - g.aim;
   L.poly = visibilityPolygon(L.x, L.y, L.radius);
@@ -1107,15 +1296,25 @@ function takedown(g) {
   makeNoise(g.x, g.y - 10, NOISE.thud);          // the thud can bring the other guard
 }
 
-// Cameras: their sweeping beam fills the meter like any light (hiding beats it). Seeing you also
-// calls the nearest awake guard over to where you were standing.
-function updateCameras() {
-  const px = P.x + P.w / 2;
+// Cameras: their sweeping beam fills the meter like any light (hiding beats it). Seeing you locks
+// them on (they follow you) and calls the nearest awake guard over to where you were standing.
+function updateCameras(dt) {
+  const px = P.x + P.w / 2, torso = samplePoints()[1];
   for (const L of LIGHTS) {
     if (L.kind !== 'camera') continue;
+    if (L.locked) {
+      const a = Math.atan2(torso.y - L.y, torso.x - L.x);
+      const wrap = v => Math.atan2(Math.sin(v), Math.cos(v));
+      const keep = !P.hidden && Math.hypot(torso.x - L.x, torso.y - L.y) < L.radius && !blocked(L.x, L.y, torso.x, torso.y) &&
+                   Math.abs(wrap(a - L.baseDir)) <= L.sweep.amp + CAM_LOCK.slack;
+      if (keep) L.dir += clamp(wrap(a - L.dir), -CAM_LOCK.track * dt, CAM_LOCK.track * dt);
+      else L.locked = false;
+    }
     let s = 0;
     if (!P.hidden) for (const p of samplePoints()) s += lightAt(L, p.x, p.y);
     L.seeing = s > 0.05;
+    if (L.seeing && L.sweep) L.locked = true;
+    if (L.seeing) raiseAlarm(px);
     if (L.seeing && time - L.alarmT > 1.5) {
       L.alarmT = time;
       let best = null, bestD = Infinity;
@@ -1139,14 +1338,20 @@ function updateCamera(dt) {
 //  STEP
 // =====================================================================
 function step(dt) {
+  pollPad();
   time += dt; stateT += dt;
-  for (const L of LIGHTS) updateLight(L, time);
+  for (const L of LIGHTS) updateLight(L, time, dt);
   updateMusic(dt);
   if (state === 'title') { cam.x = (0.5 - 0.5 * Math.cos(time * 0.04)) * (LW * T - VIEW_W); return; }
   if (state !== 'play') return;
-  updatePlayer(dt); updateStones(dt); updateScarf(); updateGuards(dt); updateDetection(dt); updateCameras(); updateCamera(dt);
+  updatePlayer(dt); updateStones(dt); updateScarf(); updateGuards(dt); updateDetection(dt); updateCameras(dt); updateAlarm(dt); updateHints(dt); updateCamera(dt);
+  runT += dt;
   levelT += dt; noticeT += dt;
-  if (state === 'play' && P.x + P.w > EXIT_X && Math.abs(P.y + P.h - exitRow * T) < T) { state = 'escaped'; stateT = 0; }
+  if (state === 'play' && P.x + P.w > EXIT_X && Math.abs(P.y + P.h - exitRow * T) < T) {
+    state = 'escaped'; stateT = 0;
+    alarm = '';                                    // out in time: the alarm stays on the floor you left
+    recordTime();
+  }
 }
 
 // =====================================================================
@@ -1207,6 +1412,17 @@ function drawSecurityDoors() {                       // banded steel while locke
     }
   }
 }
+function drawPanels() {                              // alarm panels: a box on the wall; cracked open once a stone goes through
+  for (const pn of panels) {
+    const x = pn.x * T, y = pn.row * T - 48;
+    ctx.fillStyle = '#1c1c1c'; ctx.fillRect(x - 8, y - 10, 16, 20);
+    ctx.fillStyle = '#121212'; ctx.fillRect(x - 5, y - 3, 10, 9);
+    if (pn.broken) {
+      ctx.strokeStyle = '#404040'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x - 6, y - 8); ctx.lineTo(x + 2, y + 1); ctx.lineTo(x - 1, y + 8); ctx.stroke();
+    }
+  }
+}
 function drawLevers() {                              // a plate on the wall; the handle swings down when pulled
   ctx.fillStyle = ctx.strokeStyle = '#101010'; ctx.lineWidth = 3; ctx.lineCap = 'round';
   for (const sw of switches) {
@@ -1230,7 +1446,20 @@ function drawFixtures() {
     ctx.restore();
   }
 }
-function drawStatusLights() {                       // lever and lock lights, server-rack lights
+function drawStatusLights() {                       // panel, lever and lock lights, server-rack lights
+  for (const pn of panels) {                       // panel light: a slow pulse; fast in an alarm; sparks, then dark, once broken
+    const x = pn.x * T, y = pn.row * T - 54;
+    if (pn.broken) {
+      const k = time - pn.brokenT;
+      if (k < 1.2 && (time * 17) % 1 < 0.4) {
+        ctx.fillStyle = `rgba(255,255,255,${0.9 * (1.2 - k)})`;
+        ctx.beginPath(); ctx.arc(x + Math.random() * 12 - 6, y + Math.random() * 10, 1.5, 0, Math.PI * 2); ctx.fill();
+      }
+    } else if (time % (alarm ? 0.3 : 2) < (alarm ? 0.15 : 0.25)) {
+      ctx.fillStyle = 'rgba(255,255,255,0.22)'; ctx.beginPath(); ctx.arc(x, y, alarm ? 6 : 4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.beginPath(); ctx.arc(x, y, 2, 0, Math.PI * 2); ctx.fill();
+    }
+  }
   for (const sw of switches) {                     // lever light: blinks while armed; flares when pulled, then stays on
     const x = sw.x * T, y = sw.row * T - 52;
     if (sw.on) {
@@ -1275,9 +1504,17 @@ function drawExitSign() {
   ctx.fillText('EXIT', L.x, L.y + 1);
   ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
 }
-function drawHints() {
-  ctx.font = 'italic 14px Georgia, serif'; ctx.fillStyle = 'rgba(255,255,255,0.3)';
-  for (const [tx, y, s] of HINTS) ctx.fillText(s, tx * T, y);
+function drawHints() {                              // [x, y, text, controller text (optional)]; they surface as you near them
+  if (state === 'title') return;
+  ctx.font = 'italic 14px Georgia, serif';
+  HINTS.forEach((h, i) => {
+    let a = hintA[i] || 0;
+    if (a <= 0.01) return;
+    a = a * a * (3 - 2 * a);
+    const breathe = 0.88 + 0.12 * Math.sin(time * 1.3 + i * 1.7);
+    ctx.fillStyle = `rgba(255,255,255,${0.34 * a * breathe})`;
+    ctx.fillText(pad && h[3] ? h[3] : h[2], h[0] * T, h[1] + (1 - a) * 5);
+  });
 }
 
 function drawGuard(g) {
@@ -1469,6 +1706,10 @@ function drawHUD() {
     centerText(level.name, 130, '30px Georgia, serif', 0.85 * a, '12px');
     centerText(level.subtitle, 162, 'italic 16px Georgia, serif', 0.6 * a);
   }
+  if (state === 'play' && alarm) {                 // the alarm's clock, top centre
+    const on = alarm === 'lockdown' || time % 0.8 < 0.55;
+    centerText(`${alarm === 'alarm' ? 'ALARM' : 'LOCKDOWN'}   ${clock(Math.max(alarmLeft, 0) + 0.99)}`, 34, '15px Georgia, serif', on ? 0.9 : 0.35, '4px');
+  }
   if (state === 'play' && noticeT < 3.5) {         // a notice (a lever pulled), fading the same way
     const a = clamp(Math.min(noticeT / 0.4, (3.5 - noticeT) / 1), 0, 1);
     centerText(notice, 150, 'italic 18px Georgia, serif', 0.75 * a);
@@ -1487,29 +1728,36 @@ function drawHUD() {
     if (i < stoneCount) ctx.fill(); else { ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.stroke(); }
   }
   ctx.font = '10px Georgia, serif'; ctx.letterSpacing = '2px';
-  if (aiming) { ctx.fillStyle = 'rgba(255,255,255,0.75)'; ctx.fillText('THROW MODE  ·  click to throw  ·  CTRL to cancel', x + w + 112, y + 8); }
-  else if (stoneCount > 0) { ctx.fillStyle = 'rgba(255,255,255,0.3)'; ctx.fillText('CTRL', x + w + 112, y + 8); }
+  if (aiming) { ctx.fillStyle = 'rgba(255,255,255,0.75)'; ctx.fillText(K('THROW MODE  ·  click to throw  ·  CTRL to cancel', 'THROW  ·  aim with the right stick  ·  let go of RT to throw  ·  B to cancel'), x + w + 112, y + 8); }
+  else if (stoneCount > 0) { ctx.fillStyle = 'rgba(255,255,255,0.3)'; ctx.fillText(K('CTRL', 'RT'), x + w + 112, y + 8); }
   ctx.font = '11px Georgia, serif'; ctx.letterSpacing = '3px';
   ctx.fillStyle = 'rgba(255,255,255,0.55)';
   ctx.fillText(P.hidden && guards.some(g => g.knowsHide) ? 'HE SAW YOU HIDE - GO' : P.hidden ? 'HIDDEN' : exposure > TUNE.exposedThreshold ? 'EXPOSED' : meter > 0 ? 'IN SHADOW' : 'UNSEEN', x, y + 26);
   ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(255,255,255,0.3)';
-  ctx.fillText('Esc menu  ·  R restart  ·  M music  ·  G debug', VIEW_W - 24, VIEW_H - 18);
+  ctx.fillText(K('Esc menu  ·  R restart  ·  M music  ·  G debug', 'Start menu  ·  View restart  ·  Y music'), VIEW_W - 24, VIEW_H - 18);
   ctx.textAlign = 'left'; ctx.letterSpacing = '0px';
+}
+// The end screen's numbers: this run's time, the best, and whether the alarm went up.
+function drawTimes() {
+  const a = clamp((stateT - 0.8) / 0.5, 0, 1);
+  const line = `time  ${clock(runT)}` + (newBest ? '    ·    new best' : best[levelIdx] !== undefined ? `    ·    best  ${clock(best[levelIdx])}` : '');
+  centerText(line, 333, '14px Georgia, serif', 0.75 * a, '3px');
+  if (alarmRaised) centerText('alarm raised', 352, 'italic 13px Georgia, serif', 0.5 * a);
 }
 function centerText(s, y, font, alpha, spacing = '0px') {
   ctx.font = font; ctx.letterSpacing = spacing; ctx.textAlign = 'center';
   ctx.fillStyle = `rgba(255,255,255,${alpha})`; ctx.fillText(s, VIEW_W / 2, y);
   ctx.textAlign = 'left'; ctx.letterSpacing = '0px';
 }
-const CONTROLS = [
-  ['A  D   /   ←  →', 'run  (loud)'],
-  ['hold  SHIFT', 'sneak  (silent)'],
-  ['SPACE  /  W  /  ↑', 'jump  ·  grab a duct  ·  land on a guard to put him to sleep'],
-  ['S  /  ↓', 'crawl  ·  hide behind furniture  ·  drop from a duct'],
-  ['CTRL', 'throw mode  -  aim with the mouse, click to throw a stone'],
-  ['ESC', 'pause menu'],
-  ['R', 'restart'],
-  ['M', 'music on / off'],
+const CONTROLS = [                                 // keyboard, controller (Xbox), what it does
+  ['A  D   /   ←  →', 'stick  /  d-pad', 'run  (loud)'],
+  ['hold  SHIFT', 'hold  LT', 'sneak  (silent)'],
+  ['SPACE  /  W  /  ↑', 'A', 'jump  ·  grab a duct  ·  land on a guard to put him to sleep'],
+  ['S  /  ↓', 'B  /  ↓', 'crawl  ·  hide behind furniture  ·  drop from a duct'],
+  ['CTRL', 'hold  RT', 'throw  -  aim (mouse / right stick), click / let go to throw'],
+  ['ESC', 'START', 'pause menu'],
+  ['R', 'VIEW', 'restart'],
+  ['M', 'Y', 'music on / off'],
 ];
 const ABOUT = [
   'You slipped into a high-security office tower. Now you have to get out.',
@@ -1519,11 +1767,18 @@ const ABOUT = [
   'or drop on one to put him to sleep - his torch goes dark with him.',
   "A guard who sees you duck knows where you went. One who doesn't walks right past.",
 ];
-function drawTable(y0) {                           // keys right-aligned, actions left-aligned
-  CONTROLS.forEach(([k, a], i) => {
+function drawTable(y0, heads = false) {            // keyboard | controller | what it does; your device is brighter
+  const kb = pad ? 0.45 : 0.85, jp = pad ? 0.85 : 0.45;
+  if (heads) {
+    ctx.font = '10px Georgia, serif';
+    ctx.textAlign = 'right'; ctx.fillStyle = `rgba(255,255,255,${kb * 0.6})`; ctx.fillText('KEYBOARD', 270, y0 - 30);
+    ctx.textAlign = 'left'; ctx.fillStyle = `rgba(255,255,255,${jp * 0.6})`; ctx.fillText('CONTROLLER', 290, y0 - 30);
+  }
+  CONTROLS.forEach(([k, j, a], i) => {
     const y = y0 + i * 24;
-    ctx.font = '14px Georgia, serif'; ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.fillText(k, 400, y);
-    ctx.font = 'italic 14px Georgia, serif'; ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.fillText(a, 425, y);
+    ctx.font = '14px Georgia, serif'; ctx.textAlign = 'right'; ctx.fillStyle = `rgba(255,255,255,${kb})`; ctx.fillText(k, 270, y);
+    ctx.textAlign = 'left'; ctx.fillStyle = `rgba(255,255,255,${jp})`; ctx.fillText(j, 290, y);
+    ctx.font = 'italic 14px Georgia, serif'; ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.fillText(a, 420, y);
   });
 }
 const footer = s => centerText(s, 515, '11px Georgia, serif', 0.35, '2px');
@@ -1539,7 +1794,7 @@ function drawMenu(paused) {
       if (sel) ctx.fillRect(QUIT_X[i] - 22, QUIT_Y + 10, 44, 1);
     });
     ctx.textAlign = 'left';
-    footer('← →  choose    ·    ENTER  select    ·    ESC  back');
+    footer(K('← →  choose    ·    ENTER  select    ·    ESC  back', '← →  choose    ·    A  select    ·    B  back'));
     return;
   }
   if (menuPage === 'levels') {
@@ -1554,7 +1809,7 @@ function drawMenu(paused) {
         ctx.fillRect(VIEW_W / 2 - half - 44, y - 6, 28, 1); ctx.fillRect(VIEW_W / 2 + half + 16, y - 6, 28, 1);
       }
     });
-    footer('↑ ↓  choose    ·    ENTER  play    ·    ESC  back');
+    footer(K('↑ ↓  choose    ·    ENTER  play    ·    ESC  back', '↑ ↓  choose    ·    A  play    ·    B  back'));
     return;
   }
   if (menuPage === 'about') {
@@ -1563,13 +1818,20 @@ function drawMenu(paused) {
     centerText('CONTROLS', 275, '13px Georgia, serif', 0.55, '6px');
     drawTable(305);
     centerText('a greyscale stealth prototype, after Limbo and Mark of the Ninja', 482, 'italic 12px Georgia, serif', 0.4);
-    footer('ESC  back');
+    footer(K('ESC  back', 'B  back'));
     return;
   }
   if (menuPage === 'controls') {
     centerText('CONTROLS', 120, '30px Georgia, serif', 0.9, '10px');
-    drawTable(190);
-    footer('ESC  back');
+    drawTable(200, true);
+    footer(K('ESC  back', 'B  back'));
+    return;
+  }
+  if (menuPage === 'howto') {                      // before the first New Game
+    centerText('HOW TO PLAY', 105, '30px Georgia, serif', 0.9, '10px');
+    centerText('stay in the dark. the light you see is the light that catches you.', 140, 'italic 16px Georgia, serif', 0.65);
+    drawTable(210, true);
+    centerText(K('press any key', 'press any button'), 470, '14px Georgia, serif', 0.45 + 0.35 * Math.sin(time * 3), '4px');
     return;
   }
   centerText('SHADOW NINJA', 165, '54px Georgia, serif', 0.92, '14px');
@@ -1584,7 +1846,8 @@ function drawMenu(paused) {
       ctx.fillRect(VIEW_W / 2 - half - 44, y - 7, 28, 1); ctx.fillRect(VIEW_W / 2 + half + 16, y - 7, 28, 1);
     }
   });
-  footer('↑ ↓  choose    ·    ENTER  select' + (paused ? '    ·    ESC  resume' : ''));
+  footer(K('↑ ↓  choose    ·    ENTER  select' + (paused ? '    ·    ESC  resume' : ''),
+           '↑ ↓  choose    ·    A  select' + (paused ? '    ·    B  resume' : '')));
 }
 function drawOverlay() {
   if (state === 'title' || state === 'pause') drawMenu(state === 'pause');
@@ -1598,7 +1861,7 @@ function drawOverlay() {
     if (stateT > 0.4) {
       centerText('CAUGHT', 260, '56px Georgia, serif', 0.92, '16px');
       centerText('the meter filled.', 305, 'italic 16px Georgia, serif', 0.6);
-      centerText('R  try again    ·    ESC  menu', 345, '13px Georgia, serif', 0.5, '2px');
+      centerText(K('R  try again    ·    ESC  menu', 'A  try again    ·    START  menu'), 345, '13px Georgia, serif', 0.5, '2px');
     }
   } else if (state === 'escaped') {
     ctx.fillStyle = `rgba(0,0,0,${Math.min(0.8, stateT)})`; ctx.fillRect(0, 0, VIEW_W, VIEW_H);
@@ -1606,11 +1869,13 @@ function drawOverlay() {
       if (levelIdx + 1 >= LEVELS.length) {
         centerText('OUT', 260, '56px Georgia, serif', 0.92, '16px');
         centerText('you made it out of the tower.', 305, 'italic 16px Georgia, serif', 0.6);
-        centerText('ENTER  menu    ·    R  replay this floor', 345, '13px Georgia, serif', 0.5, '2px');
+        drawTimes();
+        centerText(K('ENTER  menu    ·    R  replay this floor', 'A  menu    ·    VIEW  replay this floor'), 375, '13px Georgia, serif', 0.5, '2px');
       } else {
         centerText(level.name + '  CLEARED', 260, '40px Georgia, serif', 0.92, '12px');
         centerText('down the stairs, into the dark.', 300, 'italic 16px Georgia, serif', 0.6);
-        centerText('ENTER  next floor    ·    R  replay this floor    ·    ESC  menu', 345, '13px Georgia, serif', 0.5, '2px');
+        drawTimes();
+        centerText(K('ENTER  next floor    ·    R  replay this floor    ·    ESC  menu', 'A  next floor    ·    VIEW  replay this floor    ·    START  menu'), 375, '13px Georgia, serif', 0.5, '2px');
       }
     }
   }
@@ -1631,7 +1896,7 @@ function render() {
   drawTiles(cx); drawDoor(); drawSecurityDoors();
   if (showPlayer && P.hidden) drawNinja();          // hidden: furniture draws over you
   for (const p of PROPS) drawProp(p);
-  drawFixtures(); drawLevers();
+  drawFixtures(); drawPanels(); drawLevers();
   for (const g of guards) drawGuard(g);
   if (showPlayer && !P.hidden) drawNinja();
   ctx.restore();

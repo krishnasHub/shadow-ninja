@@ -45,8 +45,15 @@ const GUARD := {
 	"search_time": 4.0, "end_pause": 1.5, "saw_you_hide": 0.4,
 	"alert_speed": 1.35, "alert_search": 7.0,
 	"wake_after": INF,                          # sleepers never wake. Harder difficulty: seconds
+	"reaction": 0.3,                            # lock-on: seconds before he turns to you once you're behind him
 }
-const NOISE := {"run": 150.0, "land": 120.0, "stone": 280.0, "thud": 140.0, "lever": 230.0}
+# Lock-on: a camera that sees you stops sweeping and follows you (at this rate, within its arc
+# plus slack) until you hide, a wall cuts the line, or you leave its reach. Then it eases back.
+const CAM_LOCK := {"track": 0.8, "slack": 0.3, "ease_back": 1.5}
+# The alarm: a camera that spots you starts the countdown. Leave the floor or put a stone through
+# the alarm panel in time, or it's a lockdown: every guard on alert, hunting where you were seen.
+const ALARM := {"countdown": 30.0, "lockdown": 30.0, "regroup": 5.0}
+const NOISE := {"run": 150.0, "land": 120.0, "stone": 280.0, "thud": 140.0, "lever": 230.0, "rattle": 90.0}
 const STONE := {"max": 3, "max_speed": 700.0, "gravity": 1400.0, "r": 3.0}
 
 const STOPS_LAMP := [[0.0, 1.0], [0.5, 0.85], [0.8, 0.5], [1.0, 0.0]]
@@ -96,6 +103,8 @@ class Lt:
 	var sweep_period := 1.0
 	var base_dir := 0.0
 	var seeing := false
+	var locked := false      # cameras: following you instead of sweeping
+	var sweep_t := 0.0       # cameras: sweep clock (stops while locked, so the sweep resumes smoothly)
 	var alarm_t := -99.0
 	var node: PointLight2D
 	var guard = null
@@ -117,6 +126,8 @@ class Guard:
 	var search_start := 0.0
 	var search_facing := 1
 	var seen_t := -99.0
+	var track_t := -99.0     # lock-on: last time he had you in sight (in a chase)
+	var behind_since := -1.0 # lock-on: when you got behind him (-1 = you're in front)
 	var last_seen := 0.0
 	var knows_hide := -1
 	var aim := 0.15
@@ -124,6 +135,8 @@ class Guard:
 	var hunting_you := false
 	var alert := false
 	var found := false
+	var found_body := false  # alert because he found a sleeping colleague (outlasts a lockdown)
+	var lockdown := false    # hunting in a lockdown
 	var sleep_t := 0.0
 	var torch: Lt
 
@@ -155,12 +168,28 @@ var level_idx := 0
 var level: Dictionary = {}
 var props: Array = []           # {type, x (tiles), y (px: the surface it stands on)}
 var hints: Array = []
+var hint_a: Array = []          # each hint's fade, 0..1: they surface as you come near, like something half-remembered
+const HINT_NEAR := {"x": 5.0 * 32, "y": 12.0 * 32, "in": 1.4, "out": 0.5}   # y: on the wall of the storey you stand in
 var guard_defs: Array = []
 var spawn := Vector2.ZERO
 var exit_x := 0.0
 var door_x := 0                 # tiles
 var level_t := 0.0              # seconds since this floor started (drives the floor-name banner)
 var notice := ""                # a line that fades in mid-screen, e.g. "a door unlocks below."
+var pad := false                # the last input came from a controller: prompts name its buttons
+var pad_aim := Vector2.ZERO     # controller throw mode: where the stone goes, relative to the ninja
+var pad_rt := false             # right trigger held (throw mode lasts while it is)
+var pad_stick := Vector2i.ZERO  # menus: the left stick's direction (one step per push)
+var howto_seen := false         # the how-to-play card shows once, before the first New Game
+var panels: Array = []          # {x, row, broken, broken_t}: alarm panels
+var alarm := ""                 # "" | "alarm" (counting down) | "lockdown"
+var alarm_left := 0.0           # seconds left of the countdown / lockdown
+var alarm_x := 0.0              # where the camera saw you
+var alarm_raised := false       # this run: shown on the end screen
+var regroup_t := 0.0            # lockdown: guards are sent hunting again every few seconds
+var run_t := 0.0                # this run's time on the floor
+var best := {}                  # best clear time per floor index (saved in user://records.cfg)
+var new_best := false
 var notice_t := 99.0            # seconds since it was set
 var static_nodes: Array = []    # drawn once per floor; redrawn when a floor loads
 var level_nodes: Array = []     # this floor's lights + occluders, freed when the next one loads
@@ -218,6 +247,10 @@ var sfx_heart: AudioStreamPlayer
 var sfx_riser: AudioStreamPlayer
 var sfx_caught: AudioStreamPlayer
 var sfx_lever: AudioStreamPlayer
+var sfx_rattle: AudioStreamPlayer
+var sfx_siren: AudioStreamPlayer
+var sfx_panel: AudioStreamPlayer
+var rattle_t := -99.0           # when a locked door was last tried
 var heart_t := 0.0              # time since the last heartbeat
 var last_beat := -99.0          # when it last beat (the screen's red-edge pulse follows it)
 var was_caught := false
@@ -245,6 +278,7 @@ func _ready() -> void:
 		var kv: PackedStringArray = a.trim_prefix("--").split("=")
 		if kv.size() == 2:
 			_capture[kv[0]] = kv[1]
+	load_records()
 	load_level(0)
 	start_run()
 	state = "title"
@@ -261,6 +295,10 @@ func _ready() -> void:
 			_selftest_floor2()
 		elif _capture.selftest == "floor3":
 			_selftest_floor3()
+		elif _capture.selftest == "lockon":
+			_selftest_lockon()
+		elif _capture.selftest == "alarm":
+			_selftest_alarm()
 		elif _capture.selftest == "music":
 			_selftest_music()
 		else:
@@ -288,6 +326,10 @@ func _setup_music() -> void:
 	sfx_riser = _sfx_player("riser", true)
 	sfx_caught = _sfx_player("caught")
 	sfx_lever = _sfx_player("lever")
+	sfx_rattle = _sfx_player("rattle")
+	sfx_panel = _sfx_player("panel")
+	sfx_siren = _sfx_player("siren", true)
+	sfx_siren.volume_db = -9.0
 	sfx_riser.volume_db = -80.0
 	sfx_riser.play()
 
@@ -313,9 +355,17 @@ func music_danger() -> float:
 	for L in lights:
 		if L.kind == "camera" and L.seeing:
 			d = maxf(d, 0.7)
+	if alarm != "":
+		d = maxf(d, 0.6)
 	return clampf(d, 0.0, 1.0)
 
 func update_music(dt: float) -> void:
+	var siren_on := alarm != "" and state == "play"
+	if siren_on != sfx_siren.playing and sfx_siren.stream != null:
+		if siren_on:
+			sfx_siren.play()
+		else:
+			sfx_siren.stop()
 	if state == "pause":
 		return                               # hold the mood while paused
 	var target := music_danger() if state == "play" else 0.0
@@ -452,10 +502,16 @@ func load_level(idx: int) -> void:
 	switches = []
 	for sw in level.get("switches", []):
 		switches.append({"x": sw.x, "row": sw.row, "door": sw.door, "on": false, "anim": 0.0, "on_t": -99.0})
+	panels = []
+	for pn in level.get("panels", []):
+		panels.append({"x": pn[0], "row": pn[1], "broken": false, "broken_t": -99.0})
 	props = []
 	for p in level.props:
 		props.append({"type": p[0], "x": float(p[1]), "y": float(p[2] * T)})
 	hints = level.hints
+	hint_a = []
+	hint_a.resize(hints.size())
+	hint_a.fill(0.0)
 	guard_defs = level.guards
 	spawn = Vector2(level.spawn[0] * T, level.spawn[1] * T - TUNE.stand_h)
 	door_x = level.exit
@@ -472,6 +528,111 @@ func open_door(i: int) -> void:
 	d.open = true
 	fill(d.x, d.y, d.w, d.h, 0)
 	rebuild_geometry()
+
+# Hints are his own memory talking: each fades in while he's near it and fades away as he moves on.
+func update_hints(dt: float) -> void:
+	var mid := P.x + P.w / 2
+	for i in hints.size():
+		var h: Array = hints[i]
+		var w := font_italic.get_string_size(h[2], HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
+		var x0: float = h[0] * T
+		var dx := maxf(0.0, maxf(x0 - mid, mid - (x0 + w)))
+		var up: float = P.y + P.h - h[1]
+		var near: bool = dx < HINT_NEAR.x and up >= 0.0 and up < HINT_NEAR.y
+		hint_a[i] = move_toward(hint_a[i], 1.0 if near else 0.0, dt * (HINT_NEAR["in"] if near else HINT_NEAR.out))
+
+# A camera saw you: start the countdown (unless one's running, or every panel is already dead).
+func raise_alarm(x: float) -> void:
+	alarm_x = x
+	if alarm != "" or (not panels.is_empty() and panels.all(func(pn): return pn.broken)):
+		return
+	alarm = "alarm"
+	alarm_left = ALARM.countdown
+	alarm_raised = true
+	notice = "the alarm is up. get out - or kill the panel."
+	notice_t = 0.0
+
+func update_alarm(dt: float) -> void:
+	if alarm == "":
+		return
+	alarm_left -= dt
+	if alarm == "alarm" and alarm_left <= 0.0:
+		alarm = "lockdown"                  # too slow: every guard hunts for you
+		alarm_left = ALARM.lockdown
+		regroup_t = 0.0
+		notice = "lockdown. stay hidden."
+		notice_t = 0.0
+		for g in guards:
+			if g.state != "asleep":
+				g.lockdown = true
+				g.alert = true
+	if alarm == "lockdown":
+		regroup_t -= dt
+		if regroup_t <= 0.0:                # keep them searching around where you were seen
+			regroup_t = ALARM.regroup
+			for g in guards:
+				if g.lockdown and (g.state == "patrol" or g.state == "return"):
+					hear(g, alarm_x + randf_range(-4.0, 4.0) * T)
+		if alarm_left <= 0.0:               # it's over: they calm down and go back to their rounds
+			alarm = ""
+			for g in guards:
+				if g.lockdown:
+					g.lockdown = false
+					g.alert = g.found_body
+
+func break_panel(pn: Dictionary, s: Stone) -> void:
+	pn.broken = true
+	pn.broken_t = time
+	s.vx *= -0.3
+	sfx_panel.play()
+	make_noise(s.x, s.y, NOISE.stone)
+	if alarm == "alarm":
+		alarm = ""
+		notice = "alarm off."
+	else:
+		notice = "the alarm panel is dead."
+	notice_t = 0.0
+
+func record_time() -> void:
+	var prev: float = best.get(level_idx, INF)
+	new_best = run_t < prev
+	if new_best:
+		best[level_idx] = run_t
+		if _capture.has("selftest"):
+			return                           # tests teleport to the exit: keep them out of the real records
+		var cf := ConfigFile.new()
+		for k in best:
+			cf.set_value("best", str(k), best[k])
+		cf.save("user://records.cfg")
+
+func load_records() -> void:
+	if _capture.has("selftest"):
+		return
+	var cf := ConfigFile.new()
+	if cf.load("user://records.cfg") == OK and cf.has_section("best"):
+		for k in cf.get_section_keys("best"):
+			best[int(k)] = float(cf.get_value("best", k))
+
+static func clock(t: float) -> String:
+	return "%d:%02d" % [int(t) / 60, int(t) % 60]
+
+# Walking into a locked door: the handle rattles and you're told where its switch is.
+func try_door(x: float) -> void:
+	var i := floori(x / T)
+	for j in range(floori(P.y / T), floori((P.y + P.h - 0.001) / T) + 1):
+		if i >= 0 and i < LW and j >= 0 and j < LH and grid[j * LW + i] == DOOR:
+			if time - rattle_t > 1.2:
+				rattle_t = time
+				sfx_rattle.play()
+				make_noise(x, P.y + P.h / 2, NOISE.rattle)
+			if notice_t > 2.0:
+				notice = "locked."
+				for sw in switches:
+					var d: Dictionary = doors[sw.door]
+					if not sw.on and i >= d.x and i < d.x + d.w:
+						notice = "locked. the switch is upstairs." if sw.row < d.y else ("locked. the switch is downstairs." if sw.row > d.y + d.h else "locked. find its switch.")
+				notice_t = 0.0
+			return
 
 # A retry starts the floor over: every lever up, every door it opened locked again.
 func reset_doors() -> void:
@@ -727,9 +888,11 @@ func all_lights() -> Array:
 		out.append(g.torch)
 	return out
 
-func update_light(L: Lt, t: float) -> void:
-	if L.sweep_amp > 0.0:
-		L.dir = L.base_dir + L.sweep_amp * sin(TAU * t / L.sweep_period)
+func update_light(L: Lt, t: float, dt: float) -> void:
+	if L.sweep_amp > 0.0 and not L.locked:
+		L.sweep_t += dt
+		var to := L.base_dir + L.sweep_amp * sin(TAU * L.sweep_t / L.sweep_period)
+		L.dir = move_toward(L.dir, to, CAM_LOCK.ease_back * dt)     # after a lock it eases back into the sweep
 		L.node.rotation = L.dir
 	if L.flicker_period > 0.0:
 		var ph := fmod(t, L.flicker_period) / L.flicker_period
@@ -766,6 +929,14 @@ func start_run(idx := -1) -> void:
 	if idx >= 0:
 		load_level(idx)
 	reset_doors()
+	for L in lights:
+		L.locked = false
+	for pn in panels:
+		pn.broken = false
+	alarm = ""
+	alarm_raised = false
+	run_t = 0.0
+	new_best = false
 	P = Player.new()
 	P.x = spawn.x
 	P.y = spawn.y
@@ -799,20 +970,110 @@ func held(k: String) -> bool:
 	if test_keys != null:
 		return test_keys.has(k)
 	match k:
-		"left": return Input.is_physical_key_pressed(KEY_LEFT) or Input.is_physical_key_pressed(KEY_A)
-		"right": return Input.is_physical_key_pressed(KEY_RIGHT) or Input.is_physical_key_pressed(KEY_D)
-		"jump": return Input.is_physical_key_pressed(KEY_SPACE) or Input.is_physical_key_pressed(KEY_W) or Input.is_physical_key_pressed(KEY_UP)
-		"down": return Input.is_physical_key_pressed(KEY_DOWN) or Input.is_physical_key_pressed(KEY_S)
-		"walk": return Input.is_physical_key_pressed(KEY_SHIFT)
+		"left": return Input.is_physical_key_pressed(KEY_LEFT) or Input.is_physical_key_pressed(KEY_A) \
+			or joy_axis(JOY_AXIS_LEFT_X) < -0.4 or joy_btn(JOY_BUTTON_DPAD_LEFT)
+		"right": return Input.is_physical_key_pressed(KEY_RIGHT) or Input.is_physical_key_pressed(KEY_D) \
+			or joy_axis(JOY_AXIS_LEFT_X) > 0.4 or joy_btn(JOY_BUTTON_DPAD_RIGHT)
+		"jump": return Input.is_physical_key_pressed(KEY_SPACE) or Input.is_physical_key_pressed(KEY_W) or Input.is_physical_key_pressed(KEY_UP) \
+			or joy_btn(JOY_BUTTON_A)
+		"down": return Input.is_physical_key_pressed(KEY_DOWN) or Input.is_physical_key_pressed(KEY_S) \
+			or joy_btn(JOY_BUTTON_B) or joy_btn(JOY_BUTTON_DPAD_DOWN) or joy_axis(JOY_AXIS_LEFT_Y) > 0.7
+		"walk": return Input.is_physical_key_pressed(KEY_SHIFT) \
+			or joy_axis(JOY_AXIS_TRIGGER_LEFT) > 0.4 or joy_btn(JOY_BUTTON_LEFT_SHOULDER)
 	return false
 
+# Controllers (Xbox layout): any connected pad counts. The strongest push wins.
+func joy_axis(a: int) -> float:
+	var v := 0.0
+	for d in Input.get_connected_joypads():
+		var x := Input.get_joy_axis(d, a)
+		if absf(x) > absf(v):
+			v = x
+	return v
+
+func joy_btn(b: int) -> bool:
+	for d in Input.get_connected_joypads():
+		if Input.is_joy_button_pressed(d, b):
+			return true
+	return false
+
+func toggle_music() -> void:
+	music_on = not music_on
+	music_base.stream_paused = not music_on
+	music_tension.stream_paused = not music_on
+
+# A controller button, pressed. In menus the buttons stand in for keys; in play they're the controls.
+func pad_button(b: int) -> void:
+	if b == JOY_BUTTON_Y:
+		toggle_music()
+		return
+	if in_menu():
+		var code: int = {JOY_BUTTON_A: KEY_ENTER, JOY_BUTTON_B: KEY_ESCAPE, JOY_BUTTON_START: KEY_ESCAPE,
+			JOY_BUTTON_DPAD_UP: KEY_UP, JOY_BUTTON_DPAD_DOWN: KEY_DOWN,
+			JOY_BUTTON_DPAD_LEFT: KEY_LEFT, JOY_BUTTON_DPAD_RIGHT: KEY_RIGHT}.get(b, 0)
+		if code != 0 or menu_page == "howto":
+			menu_key(code)
+		return
+	match b:
+		JOY_BUTTON_A:
+			if state == "play":
+				jump_queued = true
+			elif state == "caught":
+				start_run()
+			elif state == "escaped":
+				if level_idx + 1 < Levels.LEVELS.size():
+					start_run(level_idx + 1)
+				else:
+					open_menu("title")
+		JOY_BUTTON_B:
+			aiming = false                  # cancels a throw
+		JOY_BUTTON_BACK:
+			start_run()
+		JOY_BUTTON_START:
+			open_menu("pause" if state == "play" else "title")
+
+# Hold RT (or RB) to aim with the right stick; let go to throw.
+func pad_throw(down: bool) -> void:
+	if state != "play":
+		return
+	if down and not aiming and stone_count > 0:
+		aiming = true
+		pad_aim = Vector2(P.facing * 5 * T, -T)
+	elif not down and aiming:
+		throw_stone()
+		aiming = false
+
 func _unhandled_input(e: InputEvent) -> void:
+	if e is InputEventJoypadButton:
+		pad = true
+		if e.button_index == JOY_BUTTON_RIGHT_SHOULDER:
+			pad_throw(e.pressed)
+		elif e.pressed:
+			pad_button(e.button_index)
+		return
+	if e is InputEventJoypadMotion:
+		if absf(e.axis_value) > 0.5:
+			pad = true
+		if e.axis == JOY_AXIS_TRIGGER_RIGHT and (e.axis_value > 0.5) != pad_rt:
+			pad_rt = e.axis_value > 0.5
+			pad_throw(pad_rt)
+		var sx := joy_axis(JOY_AXIS_LEFT_X)          # menus: one step per push of the stick
+		var sy := joy_axis(JOY_AXIS_LEFT_Y)
+		var d := Vector2i.ZERO
+		if absf(sy) > 0.6:
+			d.y = signi(int(signf(sy)))
+		elif absf(sx) > 0.6:
+			d.x = signi(int(signf(sx)))
+		if d != pad_stick:
+			pad_stick = d
+			if in_menu() and d != Vector2i.ZERO:
+				menu_key(KEY_UP if d.y < 0 else (KEY_DOWN if d.y > 0 else (KEY_LEFT if d.x < 0 else KEY_RIGHT)))
+		return
 	if e is InputEventKey and e.pressed and not e.echo:
+		pad = false
 		var code: int = e.physical_keycode
 		if code == KEY_M:                   # music on / off, anywhere
-			music_on = not music_on
-			music_base.stream_paused = not music_on
-			music_tension.stream_paused = not music_on
+			toggle_music()
 			return
 		if code == KEY_F11:
 			var full := DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN
@@ -854,8 +1115,11 @@ func _unhandled_input(e: InputEvent) -> void:
 			if l >= 0:
 				level_sel = l
 	elif e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT:
+		pad = false
 		if in_menu():
-			if menu_page == "quit":
+			if menu_page == "howto":
+				menu_key(KEY_ENTER)
+			elif menu_page == "quit":
 				var q := quit_item_at(get_viewport().get_mouse_position())
 				if q >= 0:
 					quit_choose(q)
@@ -914,7 +1178,11 @@ func menu_activate(i: int) -> void:
 		"Resume":
 			state = "play"
 		"New Game":
-			start_run(0)
+			if howto_seen:
+				start_run(0)
+			else:
+				howto_seen = true           # the first time: how to play, then any key starts
+				menu_page = "howto"
 		"Levels":                           # pick any floor (a dev convenience for now)
 			menu_page = "levels"
 			level_sel = level_idx
@@ -946,6 +1214,10 @@ func quit_choose(i: int) -> void:
 		menu_page = ""
 
 func menu_key(code: int) -> void:
+	if menu_page == "howto":                # any key or button: play
+		menu_page = ""
+		start_run(0)
+		return
 	if menu_page == "quit":                 # Are you sure?  ← → choose, Enter picks, Y / N shortcuts
 		match code:
 			KEY_LEFT, KEY_RIGHT, KEY_A, KEY_D, KEY_UP, KEY_DOWN, KEY_W, KEY_S:
@@ -1073,6 +1345,12 @@ func update_player(dt: float) -> void:
 	var dir := (1 if held("right") else 0) - (1 if held("left") else 0)
 	if aiming:                              # throw mode: hold still and face the cursor (ducking still works)
 		dir = 0
+		if pad and test_keys == null:       # controller: the right stick (or the left) aims; the push sets the range
+			var st := Vector2(joy_axis(JOY_AXIS_RIGHT_X), joy_axis(JOY_AXIS_RIGHT_Y))
+			if st.length() < 0.25:
+				st = Vector2(joy_axis(JOY_AXIS_LEFT_X), joy_axis(JOY_AXIS_LEFT_Y))
+			if st.length() > 0.25:
+				pad_aim = st.normalized() * lerpf(1.5 * T, 11.0 * T, clampf((st.length() - 0.25) / 0.7, 0.0, 1.0))
 		jump_queued = false
 		P.facing = 1 if aim_target().x >= P.x + P.w / 2 else -1
 	if P.clinging and update_cling(dt, dir):
@@ -1123,6 +1401,7 @@ func update_player(dt: float) -> void:
 			P.y = up
 		else:
 			P.x = floorf((P.x + P.w - 0.001) / T) * T - P.w if P.vx > 0 else (floorf(P.x / T) + 1) * T
+			try_door(P.x + P.w + 1 if P.vx > 0 else P.x - 1)
 			P.vx = 0.0
 	var was_on_ground := P.on_ground
 	var impact_v := P.vy
@@ -1246,18 +1525,32 @@ func update_detection(dt: float) -> void:
 		state = "caught"
 		state_t = 0.0
 
-# Cameras: their sweeping beam fills the meter like any light (hiding beats it). Seeing you also
-# calls the nearest awake guard over to where you were standing.
-func update_cameras() -> void:
+# Cameras: their sweeping beam fills the meter like any light (hiding beats it). Seeing you locks
+# them on (they follow you) and calls the nearest awake guard over to where you were standing.
+func update_cameras(dt: float) -> void:
 	var px := P.x + P.w / 2
+	var torso: Vector2 = sample_points()[1]
 	for L in lights:
 		if L.kind != "camera":
 			continue
+		if L.locked:
+			var a: float = (torso - L.pos).angle()
+			var keep: bool = not P.hidden and L.pos.distance_to(torso) < L.radius and not blocked(L.pos, torso) \
+				and absf(wrapf(a - L.base_dir, -PI, PI)) <= L.sweep_amp + CAM_LOCK.slack
+			if keep:
+				L.dir += clampf(wrapf(a - L.dir, -PI, PI), -CAM_LOCK.track * dt, CAM_LOCK.track * dt)
+				L.node.rotation = L.dir
+			else:
+				L.locked = false
 		var s := 0.0
 		if not P.hidden:
 			for p in sample_points():
 				s += light_at(L, p)
 		L.seeing = s > 0.05
+		if L.seeing and L.sweep_amp > 0.0:
+			L.locked = true
+		if L.seeing:
+			raise_alarm(px)
 		if L.seeing and time - L.alarm_t > 1.5:
 			L.alarm_t = time
 			var best = null
@@ -1294,6 +1587,8 @@ func hear(g: Guard, x: float) -> void:
 # Aim at the mouse. Pick the throw that lands on it; if that needs more than max_speed it's
 # out of range, and you throw as hard as you can toward it (the arc shows where that lands).
 func aim_target() -> Vector2:
+	if pad and aiming:
+		return Vector2(P.x + P.w / 2, P.y + P.h / 2) + pad_aim
 	if mouse_seen:
 		return mouse_world
 	return Vector2(P.x + P.w / 2 + P.facing * 8 * T, P.y + P.h)
@@ -1379,6 +1674,9 @@ func update_stones(dt: float) -> void:
 			continue
 		if stone_step(s, dt):
 			clack(s)
+		for pn in panels:                    # a stone through an alarm panel kills it
+			if not pn.broken and absf(s.x - pn.x * T) < 9 and absf(s.y - (pn.row * T - 48)) < 11:
+				break_panel(pn, s)
 	stones = stones.filter(func(s): return not s.taken)
 	for n in noises:
 		n.t += dt
@@ -1410,6 +1708,15 @@ func make_guard(d: Dictionary, idx: int) -> Guard:
 	g.torch.node.rotation = g.torch.dir
 	return g
 
+# Lock-on: in a chase he keeps you in sight while you're in his torch's reach with a clear line
+# (and not hidden where he didn't see you go), even when you slip out of the beam for a moment.
+func guard_tracks(g: Guard) -> bool:
+	if g.state != "chase" or (P.hidden and g.knows_hide != P.cover):
+		return false
+	var torso: Vector2 = sample_points()[1]
+	var eye := Vector2(g.x, g.y - 34)
+	return eye.distance_to(torso) < GUARD.torch_radius and not blocked(eye, torso)
+
 func guard_sees(g: Guard) -> bool:
 	if g.state == "asleep" or (P.hidden and g.knows_hide != P.cover):
 		return false
@@ -1429,17 +1736,27 @@ func update_guard(g: Guard, dt: float) -> void:
 		g.search_start = time
 		g.search_facing = g.facing
 	var px := P.x + P.w / 2
-	if guard_sees(g):
+	var lit := guard_sees(g)
+	if lit:
 		g.seen_t = time
-		g.last_seen = px
 		g.state = "chase"
-	var seeing := time - g.seen_t < 0.1
+	if lit or guard_tracks(g):
+		g.track_t = time
+		# you got behind him: he turns after a beat (a quick hop over him buys you that beat)
+		if signf(px - g.x) == g.facing or absf(px - g.x) < 4:
+			g.behind_since = -1.0
+		elif g.behind_since < 0:
+			g.behind_since = time
+		if g.behind_since < 0 or time - g.behind_since > GUARD.reaction:
+			g.last_seen = px
+	var seeing := time - g.track_t < 0.1 and g.state == "chase"
 	# a sleeping colleague in his torch puts him on alert
 	if not seeing:
 		for o in guards:
 			if o.state == "asleep" and not o.found and light_at(g.torch, Vector2(o.x, o.y - 8)) > 0.05:
 				o.found = true
 				g.alert = true
+				g.found_body = true
 				hear(g, o.x)
 	var boost: float = GUARD.alert_speed if g.alert else 1.0
 	var target = null
@@ -1492,10 +1809,10 @@ func update_guard(g: Guard, dt: float) -> void:
 	var tp := Vector2(g.x + g.facing * 14, g.y - 32)
 	var aim := 0.15
 	if g.state == "chase" and seeing:
-		aim = clampf(atan2(P.y + P.h / 2 - tp.y, absf(px - tp.x)), -0.6, 0.7)
+		aim = clampf(atan2(P.y + P.h / 2 - tp.y, absf(px - tp.x)), -1.0, 1.1)
 	elif g.state == "search":
 		aim = 0.1 + sin(time * 2.2) * 0.35
-	g.aim = lerpf(g.aim, aim, 1 - exp(-dt * 6))
+	g.aim = lerpf(g.aim, aim, 1 - exp(-dt * (10.0 if g.state == "chase" and seeing else 6.0)))
 	var L := g.torch
 	L.pos = tp
 	L.dir = g.aim if g.facing > 0 else PI - g.aim
@@ -1537,9 +1854,9 @@ func _physics_process(dt: float) -> void:
 	time += dt
 	state_t += dt
 	for L in lights:
-		update_light(L, time)
+		update_light(L, time, dt)
 	for L in torch_pool:
-		update_light(L, time)
+		update_light(L, time, dt)
 	if state == "title":
 		cam.x = (0.5 - 0.5 * cos(time * 0.04)) * (LW * T - VIEW_W)
 		return
@@ -1550,7 +1867,10 @@ func _physics_process(dt: float) -> void:
 	update_scarf()
 	update_guards(dt)
 	update_detection(dt)
-	update_cameras()
+	update_cameras(dt)
+	update_alarm(dt)
+	update_hints(dt)
+	run_t += dt
 	level_t += dt
 	notice_t += dt
 	var target := clampf(P.x + P.w / 2 - VIEW_W * 0.45 + P.facing * 70, 0, LW * T - VIEW_W)
@@ -1560,6 +1880,8 @@ func _physics_process(dt: float) -> void:
 	if state == "play" and P.x + P.w > exit_x and absf(P.y + P.h - exit_row * T) < T:
 		state = "escaped"
 		state_t = 0.0
+		alarm = ""                           # out in time: the alarm stays on the floor you left
+		record_time()
 
 func _process(dt: float) -> void:
 	fps = lerpf(fps, 1.0 / maxf(dt, 0.001), 0.05)
@@ -1623,6 +1945,20 @@ func _capture_setup(setup: String) -> void:
 			P.y = 12 * T - P.h
 			P.facing = 1
 			level_t = 9.0
+		"howto":                                # the how-to-play card before the first New Game
+			open_menu("title")
+			menu_page = "howto"
+		"alarm":                                # floor 2: the camera has you, the alarm clock runs
+			start_run(1)
+			P.x = 87 * T
+			level_t = 9.0
+		"cleared":                              # floor 2's end screen, with the alarm raised
+			start_run(1)
+			run_t = 83.0
+			alarm_raised = true
+			best[1] = 71.0
+			state = "escaped"
+			state_t = 3.0
 		"lamp":
 			start_run()
 			P.x = 13.2 * T
@@ -1837,7 +2173,9 @@ func _selftest_menu() -> void:
 	print("  ↑ ↑ wraps -> selected: ", menu_items()[menu_sel])
 	press.call(KEY_DOWN)
 	press.call(KEY_SPACE)
-	print("  New Game -> state: ", state, ", ninja shown: ", state == "play")
+	print("  New Game (first time) -> page: ", menu_page, " (how to play)")
+	press.call(KEY_SPACE)
+	print("  any key -> state: ", state, ", ninja shown: ", state == "play")
 	_run(10)
 	var x0 := P.x
 	press.call(KEY_ESCAPE)
@@ -1981,7 +2319,7 @@ func _selftest_floor3() -> void:
 	print("  ", level.name, " (", level.subtitle, "): ", LW, "x", LH, " tiles, door locked: ", not doors[0].open)
 	P.x = 45 * T
 	_walk({"right": true}, func(): return false, 240)
-	print("  walk right on the lower floor: stopped at x%.1f (the door is at 60)" % ((P.x + P.w) / T))
+	print("  walk right on the lower floor: stopped at x%.1f (the door is at 60), told: '%s', rattled: %s" % [(P.x + P.w) / T, notice, rattle_t > 0])
 	start_run(2)
 	_sleep_all()
 	P.x = 27 * T
@@ -2002,6 +2340,124 @@ func _selftest_floor3() -> void:
 	print("  back down the stairs: lower floor at x%.1f after %.1fs" % [P.x / T, down / 60.0])
 	var out := _walk({"right": true}, func(): return state == "escaped", 1500)
 	print("  under the stairs, through the door, out: ", state, " after %.1fs" % (out / 60.0))
+	test_keys = null
+
+
+# Dev tool: lock-on - a guard keeps you in sight once he's chasing; a camera follows you.
+#   godot_console --headless --path . -- --selftest=lockon
+func _selftest_lockon() -> void:
+	test_keys = {}
+	start_run(0)
+	var g: Guard = guards[0]
+	for o in guards:
+		if o != g:
+			o.state = "asleep"
+			o.torch.level = 0.0
+	g.facing = 1
+	g.pause = 0.0
+	P.y = g.y - P.h
+	P.x = g.x + 110
+	var spotted := _walk({}, func(): return g.state == "chase", 60)
+	print("  in his torch: chasing after %d frames" % spotted)
+	P.x = g.x - 70                               # hop over him: now behind his back
+	_run(10)
+	print("  behind him for 0.17s: still facing %+d (reaction), state %s" % [g.facing, g.state])
+	_run(40)
+	print("  behind him for 0.83s: facing %+d, state %s (old rule: lost you)" % [g.facing, g.state])
+	P.x = g.x + 450                              # behind him again and far out of his reach (open floor)
+	meter = 0.0
+	var lost := _walk({}, func(): return g.state == "search", 400)
+	print("  out of reach (x%.0f, he's at x%.0f): gives up and searches after %.1fs" % [P.x / T, g.x / T, lost / 60.0])
+	# camera: locks on and follows; hiding breaks it; it eases back into the sweep
+	start_run(1)
+	_sleep_all()
+	var cam_l: Lt = null
+	for L in lights:
+		if L.kind == "camera":
+			cam_l = L
+	P.x = 90 * T
+	var seen := _walk({}, func(): return cam_l.locked, 60 * 7)
+	var d0 := cam_l.dir
+	var lit := 0
+	for i in 60:                                 # walk away at sneak speed for a second
+		P.x += 140.0 / 60.0
+		_run(1)
+		meter = 0.0
+		lit += 1 if cam_l.seeing else 0
+	print("  camera: locked on after %.1fs; sneaking away for 1s it followed (%.2f rad), on you %d/60 frames" % [seen / 60.0, cam_l.dir - d0, lit])
+	P.x = 81 * T + 4                             # behind the cooler
+	P.y = 15 * T - TUNE.crawl_h
+	P.h = TUNE.crawl_h
+	P.crawling = true
+	test_keys = {"down": true}
+	_run(2)
+	print("  hidden behind the cooler: locked ", cam_l.locked)
+	var max_step := 0.0
+	var prev := cam_l.dir
+	for i in 180:
+		_run(1)
+		max_step = maxf(max_step, absf(cam_l.dir - prev))
+		prev = cam_l.dir
+	print("  back to sweeping, smoothly: biggest step per frame %.3f rad" % max_step)
+	test_keys = null
+
+
+# Dev tool: the alarm - a camera raises it, a stone through the panel kills it, letting it run
+# out means a lockdown that ends after a while; the floor time and best time are recorded.
+#   godot_console --headless --path . -- --selftest=alarm
+func _selftest_alarm() -> void:
+	test_keys = {}
+	start_run(1)
+	_sleep_all()
+	P.x = 90 * T
+	_walk({}, func(): return alarm != "", 60 * 7)
+	print("  spotted by the camera -> alarm: '%s', %.0fs on the clock, told: '%s'" % [alarm, alarm_left, notice])
+	P.x = 81 * T + 4                             # duck behind the cooler, then throw at the panel
+	P.y = 15 * T - TUNE.crawl_h
+	P.h = TUNE.crawl_h
+	P.crawling = true
+	test_keys = {"down": true}
+	_run(2)
+	mouse_seen = true
+	mouse_world = Vector2(panels[0].x * T, panels[0].row * T - 48)
+	var a := aim_throw()
+	throw_stone()
+	var hit := _walk({"down": true}, func(): return panels[0].broken, 120)
+	print("  stone from behind the cooler (in range: %s): panel broken after %.2fs, alarm: '%s', told: '%s'" % [a.in_range, hit / 60.0, alarm, notice])
+	_run(60)
+	print("  camera sees you again with the panel dead -> alarm: '%s'" % alarm)
+	start_run(1)
+	print("  retry: panel whole again: ", not panels[0].broken, ", alarm '", alarm, "'")
+	# the countdown runs out: lockdown
+	for g in guards:
+		g.state = "patrol"
+	P.x = 90 * T
+	_walk({}, func(): return alarm != "", 60 * 7)
+	P.x = 3 * T                                  # far away at the start, out of sight
+	P.y = 15 * T - P.h
+	_walk({}, func(): return alarm == "lockdown", 60 * 31)
+	var hunting := []
+	for g in guards:
+		hunting.append("%s%s" % [g.state, "*" if g.lockdown else ""])
+	print("  30s later -> '%s', told '%s'; guards: %s (* = in lockdown, alert)" % [alarm, notice, hunting])
+	_walk({}, func(): return alarm == "", 60 * 31)
+	_run(60 * 12)
+	var after := []
+	for g in guards:
+		after.append("%s%s" % [g.state, "!" if g.alert else ""])
+	print("  lockdown over -> alarm '%s'; 12s later guards: %s (! = still alert)" % [alarm, after])
+	# floor time and best
+	start_run(0)
+	_run(90)
+	P.x = exit_x
+	_run(2)
+	var t1 := run_t
+	print("  floor 1 cleared in %s, new best: %s, saved best: %s" % [clock(run_t), new_best, clock(best.get(0, -1.0))])
+	start_run(0)
+	_run(200)
+	P.x = exit_x
+	_run(2)
+	print("  slower run %s -> new best: %s (best still %s)" % [clock(run_t), new_best, clock(best[0])])
 	test_keys = null
 
 

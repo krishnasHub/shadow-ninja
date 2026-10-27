@@ -10,6 +10,37 @@ Run it: open `index.html` in a browser (single file, no build).
 - **Limbo look.** Strict greyscale, black silhouettes, fog, film grain, parallax: far layers drift slowly, near/foreground layers sweep past fast.
 - **Caught is a meter, not a moment.** Exposure fills it, shadow drains it. Over the threshold = game over. In between, guards hunt you: hide, then flee.
 
+## Story and progression (user's design, 2026-10-26)
+- **Premise:** the ninja broke into the tower and stole "the formula" from a machine full of vials. Its countermeasure sprayed him, and he **lost his memory**. He has to get out, floor by floor, and remembers more as he goes. Remembering brings back abilities, and each memory adds **one dash of colour** somewhere (first: his scarf turns deep red).
+- **Art rule:** everything stays greyscale, the vials included. No fog or haze effects. Colour appears only as these memory accents.
+- **Opening (start of Floor 1):** fade in on the ninja facing the left wall, by an open machine with vials, its alarm light pulsing. A hint tells you to hide behind the nearest furniture, with about 10 s to do it. Two guards come running. If they see you, it's the normal meter and caught. If you stay hidden, a **cutscene** plays: black letterbox bars, no control, text lines over the guards:
+  "What happened?" / "Looks like someone stole the formula!" / "What was it?" / "I don't know, but I heard it has a countermeasure.. it sprays a chemical at anyone trying to steal it." / "Ohh? What does the chemical do?" / "I'm not sure.. but I think the thief loses memory.. maybe temporarily?"
+  They leave to search, the bars go, and Floor 1 starts. (Make it skippable, and skip it on a retry.)
+- **Floor ladder:**
+  | Floor | What's new |
+  |---|---|
+  | 1 | intro: basic moves, the exit (no ducts, no takedowns) |
+  | 2 | remembers clinging to ceilings and putting guards to sleep; a camera to avoid |
+  | 3 | everything so far, plus up to the lever and back down (current Floor 3) |
+  | 4 | throwing stars: break lights and cameras |
+  | 5 | moving objects to make new shadows |
+  | 6 | bigger; he can **fight** (karate/judo moves) a new guard type, vigilant and with no torch. A fight only works in shadow: step into light and you're caught anyway |
+  | 7-8 | he remembers who he is: he works for **Evil Co**, and the formula is a **vaccine** he was sent to steal |
+  | 8-10 | redemption |
+- Rework needed: the current Floor 1 uses ducts and takedowns, so it moves to Floor 2's role. Floor 1 becomes the intro.
+
+## Phase A (done, both versions, 2026-10-26)
+- Only a **camera** spotting you raises the alarm: a 30 s countdown. Leave the floor in time, or hit the **alarm panel** with a stone, to cancel it.
+- If it runs out: **lockdown.** Every guard goes on alert and hunts for you for about 30 s, then they go back to normal. Stay hidden.
+- The end screen shows clear time, best time per floor, and "alarm raised" if it went off.
+- How it's built: `panels: [[x, row]]` in the level data (Floor 2 at 88.5, reachable from behind the cooler at 81; Floor 3 at 83.5 upstairs, from behind the rack at 78). The panel light pulses slowly, blinks fast during an alarm, and sparks out when broken. Sounds: siren.wav (loop) and panel.wav. `ALARM` = countdown 30, lockdown 30, and a regroup every 5 s (guards in lockdown are sent searching near where you were seen). "ALARM 0:24" / "LOCKDOWN" shows top centre. Best times: Godot `user://records.cfg` (self-tests never touch it), HTML localStorage `shadowNinja.best`. Self-test: `--selftest=alarm`.
+- **Lock-on:** a chasing guard keeps you in sight while you're within his torch's reach with a clear line, even outside the beam. He turns to you after `GUARD.reaction` (0.3 s) once you're behind him, and his torch tracks faster. He loses you only if you hide, a wall cuts the line, or you get out of reach. A camera that sees you stops sweeping and follows you (`CAM_LOCK`: 0.8 rad/s, within its arc + 0.3), lets go when you hide or break the line, then eases back into its sweep. Standing still under a camera now gets you caught. Self-test: `--selftest=lockon`.
+- **Locked doors:** walking into one rattles it (rattle.wav, a small noise) and says "locked. the switch is upstairs." (or downstairs, from where its lever is).
+- **Floor 3 stairs lamp:** dimmed to 0.55 and flickering (4 s cycle, on half of it), so there's a dark window to climb in.
+- **Hints are his memory:** each fades in when he's within 5 tiles of it on the same storey (it's on the wall above his feet, less than 12 tiles up), and fades away as he moves on. They also drift into place and breathe gently. Hidden on the title screen.
+- **Controller (Xbox layout, both versions):** stick/d-pad move, A jump, B crawl (and cancel a throw), hold LT (or LB) sneak, hold RT (or RB) to aim with the right stick and let go to throw (how far you push sets the range), Start pause, View restart, Y music. In menus: stick/d-pad, A select, B back. Every prompt (footers, end screens, the throw-mode line, the HUD's key line, Floor 1's hints via an optional 4th hint field) switches to button names when the pad was the last thing used. Godot uses `Input` joypads (any connected pad); HTML uses the Gamepad API (polled each step).
+- **How to play:** the first New Game shows a card with both columns (keyboard | controller), with the active device brighter. Any key or button starts. The Controls page uses the same 3-column table.
+
 ## Platform decision
 - Prototype in **HTML5 Canvas** (here) to find the fun fast.
 - If it grows: **Godot 4** for pure 2D (built-in 2D lights/occluders, HTML export).
