@@ -53,8 +53,12 @@ const CAM_LOCK := {"track": 0.8, "slack": 0.3, "ease_back": 1.5}
 # The alarm: a camera that spots you starts the countdown. Leave the floor or put a stone through
 # the alarm panel in time, or it's a lockdown: every guard on alert, hunting where you were seen.
 const ALARM := {"countdown": 30.0, "lockdown": 30.0, "regroup": 5.0}
-const NOISE := {"run": 150.0, "land": 120.0, "stone": 280.0, "thud": 140.0, "lever": 230.0, "rattle": 90.0}
+const NOISE := {"run": 150.0, "land": 120.0, "stone": 280.0, "thud": 140.0, "lever": 230.0, "rattle": 90.0,
+	"glass": 300.0, "tink": 80.0}
 const STONE := {"max": 3, "max_speed": 700.0, "gravity": 1400.0, "r": 3.0}
+# Throwing stars (remembered after Floor 3): straight and fast; one through a lamp or a camera's lens
+# puts it out for good. Not picked up again.
+const STAR := {"max": 3, "speed": 950.0, "range": 700.0, "gravity": 1400.0}
 
 const STOPS_LAMP := [[0.0, 1.0], [0.5, 0.85], [0.8, 0.5], [1.0, 0.0]]
 const STOPS_FLAT := [[0.0, 1.0], [1.0, 1.0]]
@@ -106,6 +110,9 @@ class Lt:
 	var locked := false      # cameras: following you instead of sweeping
 	var sweep_t := 0.0       # cameras: sweep clock (stops while locked, so the sweep resumes smoothly)
 	var alarm_t := -99.0
+	var broken := false      # a star put it out (lamps, cameras); back on a retry
+	var broken_t := -99.0
+	var shard_y := 0.0       # lamps: the floor the glass fell on
 	var node: PointLight2D
 	var guard = null
 
@@ -154,6 +161,15 @@ class Stone:
 	var clacked := false
 	var taken := false
 
+class Star:
+	var x := 0.0
+	var y := 0.0
+	var vx := 0.0
+	var vy := 0.0
+	var ang := 0.0
+	var dist := 0.0
+	var state := "fly"       # fly (straight) -> fall (spent, or off a lamp) -> stuck (in a wall, or on the floor)
+
 class NoiseEvent:
 	var x := 0.0
 	var y := 0.0
@@ -180,9 +196,13 @@ var spawn := Vector2.ZERO
 var exit_x := 0.0
 var door_x := 0                 # tiles
 var level_t := 0.0              # seconds since this floor started (drives the floor-name banner)
-# Memory: what the floors before this one brought back. Abilities ("cling", "takedown") and colours ("scarf").
+# Memory: what the floors before this one brought back. Abilities ("cling", "takedown", "stars"); how far
+# up the scarf the colour has climbed (scarf_reach 0..1, the furthest any earlier floor reached - only
+# seen in shadow, see _scarf in draw_node.gd); and at the last step the Evil Co mark ("mark").
 var can := {}
-var scarf_red := false
+var scarf_red := false          # any colour at all (scarf_reach > 0)
+var scarf_reach := 0.0
+var evil_mark := false
 # The opening scene (Floor 1): "hide" (fade in, ~10 s to get out of sight) -> "arrive" (two guards run
 # in) -> "talk" (letterbox, no control, their lines over their heads; they shut the alarm off) ->
 # "leave" (they run off to search elsewhere, the bars slide away; skipped, they're just gone). Spotted
@@ -225,6 +245,9 @@ var guards: Array = []
 var noises: Array = []
 var stones: Array = []
 var stone_count := 0
+var stars: Array[Star] = []
+var star_count := 0
+var weapon := "stone"           # what throw mode throws: "stone" or "star" (Q / X switches)
 var P := Player.new()
 var scarf_pos := PackedVector2Array()
 var scarf_prev := PackedVector2Array()
@@ -273,6 +296,9 @@ var sfx_lever: AudioStreamPlayer
 var sfx_rattle: AudioStreamPlayer
 var sfx_siren: AudioStreamPlayer
 var sfx_panel: AudioStreamPlayer
+var sfx_whoosh: AudioStreamPlayer
+var sfx_glass: AudioStreamPlayer
+var sfx_tink: AudioStreamPlayer
 var rattle_t := -99.0           # when a locked door was last tried
 var heart_t := 0.0              # time since the last heartbeat
 var last_beat := -99.0          # when it last beat (the screen's red-edge pulse follows it)
@@ -320,6 +346,8 @@ func _ready() -> void:
 			_selftest_floor3()
 		elif _capture.selftest == "lockon":
 			_selftest_lockon()
+		elif _capture.selftest == "stars":
+			_selftest_stars()
 		elif _capture.selftest == "alarm":
 			_selftest_alarm()
 		elif _capture.selftest == "intro":
@@ -353,6 +381,9 @@ func _setup_music() -> void:
 	sfx_lever = _sfx_player("lever")
 	sfx_rattle = _sfx_player("rattle")
 	sfx_panel = _sfx_player("panel")
+	sfx_whoosh = _sfx_player("whoosh")
+	sfx_glass = _sfx_player("glass")
+	sfx_tink = _sfx_player("tink")
 	sfx_siren = _sfx_player("siren", true)
 	sfx_siren.volume_db = -9.0
 	sfx_riser.volume_db = -80.0
@@ -1034,7 +1065,7 @@ func all_lights() -> Array:
 	return out
 
 func update_light(L: Lt, t: float, dt: float) -> void:
-	if L.sweep_amp > 0.0 and not L.locked:
+	if L.sweep_amp > 0.0 and not L.locked and not L.broken:
 		L.sweep_t += dt
 		var to := L.base_dir + L.sweep_amp * sin(TAU * L.sweep_t / L.sweep_period)
 		L.dir = move_toward(L.dir, to, CAM_LOCK.ease_back * dt)     # after a lock it eases back into the sweep
@@ -1049,6 +1080,8 @@ func update_light(L: Lt, t: float, dt: float) -> void:
 		L.level = L.intensity if lit else 0.0
 	if L.kind == "alarm":
 		L.level = 0.0 if alarm_quiet else L.level * minf(1.0, wake_alarm() * 3.0)
+	if L.broken:
+		L.level = 0.0
 	L.node.energy = L.level
 	L.node.enabled = L.level > 0.0
 
@@ -1078,6 +1111,9 @@ func start_run(idx := -1) -> void:
 	reset_doors()
 	for L in lights:
 		L.locked = false
+		if L.broken:                         # a retry: the lamps and cameras are back
+			L.broken = false
+			L.level = L.intensity
 	for pn in panels:
 		pn.broken = false
 	alarm = ""
@@ -1097,6 +1133,7 @@ func start_run(idx := -1) -> void:
 		torch_pool[i].guard = null
 	noises.clear()
 	stones.clear()
+	stars.clear()
 	stone_count = STONE.max
 	meter = 0.0
 	exposure = 0.0
@@ -1111,13 +1148,18 @@ func start_run(idx := -1) -> void:
 	level_t = 0.0
 	notice_t = 99.0
 	can = {}
-	scarf_red = false
+	scarf_reach = 0.0
+	evil_mark = false
 	for i in level_idx:                     # everything the floors before this one brought back
 		var mem: Dictionary = Levels.LEVELS[i].get("remember", {})
 		for a in mem.get("abilities", []):
 			can[a] = true
-		if "scarf" in mem.get("colors", []):
-			scarf_red = true
+		scarf_reach = maxf(scarf_reach, mem.get("scarf", 0.0))
+		if "mark" in mem.get("colors", []):
+			evil_mark = true
+	scarf_red = scarf_reach > 0.0
+	star_count = STAR.max if can.has("stars") else 0
+	weapon = "stone"
 	intro = ""
 	bars = 0.0
 	alarm_quiet = false
@@ -1204,6 +1246,8 @@ func pad_button(b: int) -> void:
 					open_menu("title")
 		JOY_BUTTON_B:
 			aiming = false                  # cancels a throw
+		JOY_BUTTON_X:
+			switch_weapon()
 		JOY_BUTTON_BACK:
 			start_run()
 		JOY_BUTTON_START:
@@ -1213,11 +1257,12 @@ func pad_button(b: int) -> void:
 func pad_throw(down: bool) -> void:
 	if state != "play":
 		return
-	if down and not aiming and stone_count > 0:
+	if down and not aiming and has_ammo():
 		aiming = true
+		pick_loaded()
 		pad_aim = Vector2(P.facing * 5 * T, -T)
 	elif not down and aiming:
-		throw_stone()
+		throw_now()
 		aiming = false
 
 func _unhandled_input(e: InputEvent) -> void:
@@ -1270,7 +1315,11 @@ func _unhandled_input(e: InputEvent) -> void:
 				jump_queued = true
 			KEY_CTRL:                       # throw mode on/off
 				if state == "play":
-					aiming = not aiming and stone_count > 0
+					aiming = not aiming and has_ammo()
+					if aiming:
+						pick_loaded()
+			KEY_Q, KEY_TAB:                 # stone or star
+				switch_weapon()
 			KEY_R:
 				start_run()
 			KEY_ESCAPE, KEY_P:
@@ -1318,7 +1367,7 @@ func _unhandled_input(e: InputEvent) -> void:
 				if i >= 0:
 					menu_activate(i)
 		elif aiming:                        # outside throw mode the mouse does nothing
-			throw_stone()
+			throw_now()
 			aiming = false                  # one throw per Ctrl
 
 # =====================================================================
@@ -1729,6 +1778,9 @@ func update_cameras(dt: float) -> void:
 	for L in lights:
 		if L.kind != "camera":
 			continue
+		if L.broken:
+			L.seeing = false
+			continue
 		if L.locked:
 			var a: float = (torso - L.pos).angle()
 			var keep: bool = not P.hidden and L.pos.distance_to(torso) < L.radius and not blocked(L.pos, torso) \
@@ -1813,6 +1865,140 @@ func throw_stone() -> void:
 	s.vx = a.v.x
 	s.vy = a.v.y
 	stones.append(s)
+
+func has_ammo() -> bool:
+	return stone_count > 0 or star_count > 0
+
+func ammo() -> int:
+	return star_count if weapon == "star" else stone_count
+
+# Stone or star. Only once the stars are remembered.
+func switch_weapon() -> void:
+	if state != "play" or not can.has("stars"):
+		return
+	weapon = "star" if weapon == "stone" else "stone"
+
+func pick_loaded() -> void:                  # into throw mode with an empty hand: take the other one
+	if ammo() == 0:
+		weapon = "star" if weapon == "stone" else "stone"
+
+func throw_now() -> void:
+	if weapon == "star":
+		throw_star()
+	else:
+		throw_stone()
+
+func breakable(L: Lt) -> bool:
+	return (L.kind == "lamp" or L.kind == "camera") and not L.broken
+
+# Does a star at p go through L? Lamps: the bulb under the shade. Cameras: the housing.
+func star_hits(L: Lt, p: Vector2) -> bool:
+	var c: Vector2 = L.pos + (Vector2(0, 4) if L.kind == "lamp" else Vector2.ZERO)
+	return p.distance_to(c) < (12.0 if L.kind == "lamp" else 13.0)
+
+# Where a star thrown along dir from o goes: the light it would put out, or where it bites into a wall,
+# or where it's spent. Used for the aim line and checked again in flight.
+func star_trace(o: Vector2, dir: Vector2, max_d: float) -> Dictionary:
+	var d := 0.0
+	while d < max_d:
+		var p := o + dir * d
+		if solid_px(p.x, p.y):
+			return {"end": p - dir * 4.0, "light": null, "wall": true}
+		for L in lights:
+			if breakable(L) and star_hits(L, p):
+				return {"end": p, "light": L, "wall": false}
+		d += 4.0
+	return {"end": o + dir * max_d, "light": null, "wall": false}
+
+func star_aim() -> Dictionary:
+	var a := aim_throw()                    # same hand, same side as a stone
+	var dir: Vector2 = (a.tgt - a.o).normalized()
+	if dir == Vector2.ZERO:
+		dir = Vector2(P.facing, 0)
+	a["dir"] = dir
+	a["trace"] = star_trace(a.o, dir, STAR.range)
+	return a
+
+func throw_star() -> void:
+	if state != "play" or star_count <= 0:
+		return
+	var a := star_aim()
+	star_count -= 1
+	P.facing = a.side
+	var st := Star.new()
+	st.x = a.o.x
+	st.y = a.o.y
+	st.vx = a.dir.x * STAR.speed
+	st.vy = a.dir.y * STAR.speed
+	stars.append(st)
+	sfx_whoosh.play()
+
+# A star through a lamp or a camera: out for good (this run). Glass is loud - whoever hears it comes
+# to look where it fell.
+func break_light(L: Lt) -> void:
+	L.broken = true
+	L.broken_t = time
+	L.locked = false
+	L.seeing = false
+	L.level = 0.0
+	var y: float = L.pos.y + 8
+	while y < LH * T and not solid_px(L.pos.x, y):
+		y += 4.0
+	L.shard_y = y
+	if L.kind == "lamp":
+		sfx_glass.play()
+		make_noise(L.pos.x, y, NOISE.glass)
+		notice = "glass. someone will come to look."
+	else:
+		L.dir = PI / 2 + 0.5 * (1 if L.base_dir < PI / 2 else -1)   # the lens droops
+		L.node.rotation = L.dir
+		sfx_panel.play()
+		make_noise(L.pos.x, y, NOISE.thud)
+		notice = "the camera's blind."
+	notice_t = 0.0
+
+func update_stars(dt: float) -> void:
+	for st in stars:
+		match st.state:
+			"fly":
+				st.ang += dt * 30.0
+				var step := Vector2(st.vx, st.vy) * dt
+				var n := ceili(step.length() / 4.0)
+				for i in n:
+					var p := Vector2(st.x, st.y) + step * ((i + 1.0) / n)
+					if solid_px(p.x, p.y):
+						st.state = "stuck"             # bites into the wall
+						sfx_tink.play()
+						make_noise(st.x, st.y, NOISE.tink)
+						break
+					var hit = null
+					for L in lights:
+						if breakable(L) and star_hits(L, p):
+							hit = L
+					st.x = p.x
+					st.y = p.y
+					if hit != null:
+						break_light(hit)
+						st.state = "fall"              # through the glass, and down
+						st.vx *= 0.15
+						st.vy = -80.0
+						break
+				st.dist += step.length()
+				if st.state == "fly" and st.dist > STAR.range:
+					st.state = "fall"                  # spent
+					st.vx *= 0.3
+					st.vy *= 0.3
+			"fall":
+				st.ang += dt * 18.0
+				st.vy += STAR.gravity * dt
+				var nx: float = st.x + st.vx * dt
+				var ny: float = st.y + st.vy * dt
+				if solid_px(nx, ny):
+					st.state = "stuck"
+					sfx_tink.play()
+				else:
+					st.x = nx
+					st.y = ny
 
 # One physics step for a flying stone (used by the real stone AND the aim preview). True on impact.
 func stone_step(s: Stone, dt: float) -> bool:
@@ -2072,6 +2258,7 @@ func _physics_process(dt: float) -> void:
 		if not waking():                     # coming to: he can't move yet
 			update_player(dt)
 		update_stones(dt)
+		update_stars(dt)
 		update_guards(dt)
 		update_detection(dt)
 		update_cameras(dt)
@@ -2157,6 +2344,22 @@ func _capture_setup(setup: String) -> void:
 		"dash":                                 # floor 2: running flat out (the anime run)
 			start_run(1)
 			test_keys = {"right": true}
+		"starthrow":                            # floor 4: stars in hand, aiming at the first lamp
+			start_run(3)
+			P.x = 13 * T
+			weapon = "star"
+			aiming = true
+			pad = true                          # aim with the stick: the real mouse would override a set target
+			for L in lights:
+				if L.kind == "lamp" and absf(L.pos.x - 16.5 * T) < 4:
+					pad_aim = L.pos + Vector2(0, 4) - Vector2(P.x + P.w / 2, 15 * T - TUNE.stand_h / 2)
+		"starbroken":                           # floor 4: the first lamp out, glass on the floor
+			start_run(3)
+			P.x = 13 * T
+			for L in lights:
+				if L.kind == "lamp" and absf(L.pos.x - 16.5 * T) < 4:
+					break_light(L)
+			star_count = 2
 		"waking":                               # floor 1: the room half out of the dark
 			start_run(0)
 			intro_t = 4.5
@@ -2181,10 +2384,15 @@ func _capture_setup(setup: String) -> void:
 			run_t = 151.0
 			state = "escaped"
 			state_t = 3.0
-		"scarf":                                # floor 4, under a lamp: the red scarf
+		"scarf":                                # floor 4, under a lamp: the scarf is plain grey here
 			start_run(3)
-			P.x = 12.2 * T
+			P.x = 16.2 * T
 			level_t = 9.0
+		"scarfdark":                            # floor 4, in shadow, running: the scarf's tail turns maroon
+			start_run(3)
+			P.x = 4 * T
+			level_t = 9.0
+			test_keys = {"right": true, "walk": true}
 		"howto":                                # the how-to-play card before the first New Game
 			open_menu("title")
 			menu_page = "howto"
@@ -2587,6 +2795,91 @@ func _selftest_floor3() -> void:
 
 # Dev tool: lock-on - a guard keeps you in sight once he's chasing; a camera follows you.
 #   godot_console --headless --path . -- --selftest=lockon
+# Throwing stars on Floor 4: switching, a lamp out (and heard), a camera blinded, a miss in the wall.
+#   godot_console --headless --path . -- --selftest=stars
+func _selftest_stars() -> void:
+	test_keys = {}
+	start_run(2)
+	switch_weapon()
+	print("  %s: stars %d, Q -> %s (not remembered yet)" % [level.name, star_count, weapon])
+	start_run(3)
+	print("  %s: remembers %s, stars %d, stones %d" % [level.name, can.keys(), star_count, stone_count])
+	switch_weapon()
+	print("  Q -> %s" % weapon)
+	var lamp: Lt = null
+	var cam_l: Lt = null
+	for L in lights:
+		if L.kind == "lamp" and absf(L.pos.x - 16.5 * T) < 4:
+			lamp = L
+		if L.kind == "camera" and absf(L.pos.x - 90.5 * T) < 4:
+			cam_l = L
+	P.x = 14 * T
+	_run(5)
+	mouse_seen = true
+	mouse_world = lamp.pos + Vector2(0, 4)
+	aiming = true
+	var aim := star_aim()
+	print("  aim line at the lamp over x16.5: would put it out: %s" % (aim.trace.light == lamp))
+	throw_now()
+	aiming = false
+	var seen := {"noise": false}                  # (a dictionary: lambdas capture it by reference)
+	var t := _walk({}, func():
+		seen.noise = seen.noise or noises.size() > 0
+		return lamp.broken, 60)
+	print("  thrown: lamp out after %d frames, level %.1f, glass heard: %s, notice '%s', stars left %d" % [t, lamp.level, seen.noise, notice, star_count])
+	_run(30)
+	print("  the star fell: %s" % stars.map(func(s): return s.state))
+	var g0: Guard = guards[0]
+	g0.x = 23 * T
+	g0.facing = 1                                 # looking away, toward his rounds
+	g0.pause = 99.0
+	g0.state = "patrol"
+	lamp.broken = false
+	lamp.level = lamp.intensity
+	stars.clear()
+	star_count = 2
+	mouse_world = lamp.pos + Vector2(0, 4)
+	aiming = true
+	throw_now()
+	aiming = false
+	_run(20)
+	print("  a guard 6 tiles off hears the glass: %s, going to x%.1f" % [g0.state, g0.invest_x / T])
+	# the camera over the end of the floor: blind it from the end of the catwalk, then walk under it
+	P.x = 73 * T
+	P.y = 10 * T - P.h
+	for g in guards:
+		g.state = "asleep"
+		g.sleep_t = time
+		g.torch.level = 0.0
+	mouse_world = cam_l.pos
+	aiming = true
+	var ca := star_aim()
+	print("  aim line at the camera: would blind it: %s" % (ca.trace.light == cam_l))
+	throw_now()
+	aiming = false
+	_walk({}, func(): return cam_l.broken, 60)
+	P.x = 90 * T
+	P.y = 15 * T - P.h
+	_run(120)
+	print("  camera blind: %s, sees you standing under it: %s, alarm '%s'" % [cam_l.broken, cam_l.seeing, alarm])
+	star_count = 1
+	mouse_world = Vector2(P.x + 300, P.y - 200)
+	aiming = true
+	var miss := star_aim()
+	throw_now()
+	aiming = false
+	_run(60)
+	print("  a miss: aimed at the wall (%s), the star %s at x%.1f" % [miss.trace.wall, stars[-1].state, stars[-1].x / T])
+	star_count = 0
+	weapon = "star"
+	pick_loaded()
+	print("  out of stars: throw mode picks up the stone: %s" % weapon)
+	start_run()                                   # R: the same floor again
+	_run(2)
+	print("  retry: lamp lit again %s, camera back %s, stars %d" % [not lamp.broken and lamp.level > 0, not cam_l.broken, star_count])
+	test_keys = null
+
+
 func _selftest_lockon() -> void:
 	test_keys = {}
 	start_run(1)
@@ -2749,7 +3042,7 @@ func _selftest_intro() -> void:
 	print("  not hidden: the scene drops after %.1fs (%s), then: %s" % [hunt / 60.0, guards.map(func(g): return g.state), state])
 	for i in Levels.LEVELS.size():
 		start_run(i)
-		print("  %s remembers: %s%s" % [level.name, can.keys(), "  + red scarf" if scarf_red else ""])
+		print("  %s remembers: %s%s" % [level.name, can.keys(), "  + scarf colour to %.2f" % scarf_reach if scarf_red else ""])
 	# the lab's route, guards asleep: the pipes (crawl), the crates (jump), out
 	start_run(0)
 	intro = ""

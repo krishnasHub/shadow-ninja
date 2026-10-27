@@ -17,8 +17,12 @@ extends RefCounted
 ##   panels: [x, row] alarm panels on the wall. A camera that spots you raises the alarm; a stone
 ##           through a panel kills it (floors with a camera should have one).
 ##   hints:  an optional 4th string is the controller version.
-##   remember: what clearing this floor brings back - {abilities: [...], colors: [...], lines: [2 lines]}.
-##           A floor's abilities are everything remembered on the floors before it ("cling", "takedown").
+##   remember: what clearing this floor brings back - {abilities: [...], scarf: 0..1, colors: [...], lines: [2 lines]}.
+##           scarf: how far up the scarf the dark red has climbed (seen only in shadow). The plan: 0.25 after
+##           Floor 3 (the tip), 0.45, 0.65, 0.85, then 1.0 (all of it, a full dark red) with colors: ["mark"],
+##           the Evil Co mark on his chest, in grey. A memory with scarf or colors shows its end-screen line in red.
+##           A floor's abilities are everything remembered on the floors before it ("cling", "takedown",
+##           "stars").
 ##   intro:  the opening scene (Floor 1): {hide: seconds before the guards come, talk: [[guard, line], ...]}.
 ##           Guards with intro_to wait off to the side, run in to that x, talk, then walk to their rounds.
 
@@ -165,14 +169,15 @@ const LEVELS := [
 			{"x": 60, "from": 44, "to": 88, "min_x": 40, "max_x": 95, "row": 12},      # upstairs, in the server room
 		],
 		"panels": [[83.5, 12]],                     # upstairs, in reach from behind the rack at 78
-		"remember": {"colors": ["scarf"], "lines": [
+		"remember": {"scarf": 0.25, "abilities": ["stars"], "lines": [
 			"your scarf.  red.  it was always red.",
-			"you remember your name...  almost."]},
+			"and a weight in your hand.  steel.  four points."]},
 		"spawn": [3, 24], "exit": 95, "exit_row": 24,
 	},
 	{
 		"name": "FLOOR 4", "subtitle": "security",
-		# for now: the old Floor 2, kept as the base for the throwing-stars floor
+		# the throwing stars: a bright lamp over open floor early (put it out, or wait out the guard who comes
+		# to look), a camera over the end you can blind instead of creeping past
 		"width": 120,
 		# crate steps up to a catwalk (row 10, x 52-74) that runs over a lower floor
 		"solids": [[49, 13, 2, 2], [51, 12, 1, 3], [52, 10, 23, 1]],
@@ -185,14 +190,18 @@ const LEVELS := [
 			["desk", 108, 15], ["plant", 113, 15]],
 		"hints": [
 			[2.5, 170, "floor 4 - security. tighter, and watched."],
+			[7.5, 205, "Q  stone or star.  a star flies straight - through a lamp, or a camera's eye.",
+				"X  stone or star.  a star flies straight - through a lamp, or a camera's eye."],
+			[7.5, 240, "glass is loud. whoever hears it comes to look."],
 			[19.5, 210, "cubicles: desk to desk, low and quiet."],
 			[46.5, 170, "up on the catwalk, or down beneath it?"],
-			[76.0, 170, "cameras sweep. they can't be put to sleep - and can't see behind furniture."],
-			[78.0, 210, "if a camera sees you, the nearest guard comes running."],
+			[76.0, 170, "cameras sweep, and can't see behind furniture."],
+			[78.0, 210, "a star through the lens, and it's blind."],
+			[70.5, 250, "from the end of the catwalk, the camera's in reach."],
 		],
 		"lights": [
-			{"kind": "lamp", "x": 12.5, "spread": 0.5, "radius": 600, "intensity": 0.9},
-			{"kind": "lamp", "x": 23.5, "spread": 0.45, "radius": 600},
+			{"kind": "lamp", "x": 16.5, "spread": 0.6, "radius": 600},                          # over open floor: the first star
+			{"kind": "lamp", "x": 26.5, "spread": 0.45, "radius": 600},
 			{"kind": "lamp", "x": 33.5, "spread": 0.45, "radius": 600, "flicker": [2.4, 0.6]},
 			{"kind": "lamp", "x": 43.5, "spread": 0.45, "radius": 600},
 			{"kind": "lamp", "x": 63.5, "spread": 0.4, "radius": 360, "intensity": 0.9},          # over the catwalk

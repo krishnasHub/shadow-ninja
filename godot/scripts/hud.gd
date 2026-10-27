@@ -88,6 +88,12 @@ func _talk_line() -> void:
 		draw_string(talk_font, Vector2(x, y + (1.0 - k) * 9.0 - out * 8.0), words[i][0], HORIZONTAL_ALIGNMENT_LEFT, -1, TALK_SIZE, col)
 		x += talk_font.get_string_size(words[i][0], HORIZONTAL_ALIGNMENT_LEFT, -1, TALK_SIZE).x + sp
 
+func _star_icon(c: Vector2, col: Color) -> void:
+	var pts := PackedVector2Array()
+	for i in 8:
+		pts.append(c + Vector2.from_angle(0.4 + i * TAU / 8.0) * (5.0 if i % 2 == 0 else 1.6))
+	draw_colored_polygon(pts, col)
+
 func _eye(c: Vector2, o: float) -> void:            # opens with exposure
 	var hh := 1 + o * 8
 	var top := PackedVector2Array()
@@ -125,16 +131,29 @@ func _hud() -> void:
 	for t in [m.METER_SUSPICIOUS, m.METER_ALERT]:
 		draw_rect(Rect2(x + w * t, y - 3, 1, h + 6), Color(1, 1, 1, 0.45))
 	_eye(Vector2(x + w + 32, y + 4), m.exposure)
-	for i in m.STONE.max:                             # stones in your pouch
+	var stars: bool = m.can.has("stars")
+	var sel_stone: bool = m.weapon == "stone"
+	for i in m.STONE.max:                             # stones in your pouch (brighter while they're in hand)
 		var c := Vector2(x + w + 72 + i * 13, y + 4)
+		var a := 0.7 if (sel_stone or not stars) else 0.4
 		if i < m.stone_count:
-			draw_circle(c, 4, Color(1, 1, 1, 0.7))
+			draw_circle(c, 4, Color(1, 1, 1, a))
 		else:
-			draw_arc(c, 4, 0, TAU, 16, Color(1, 1, 1, 0.35), 1.0, true)
+			draw_arc(c, 4, 0, TAU, 16, Color(1, 1, 1, 0.35 * a / 0.7), 1.0, true)
+	var tx := x + w + 112
+	if stars:                                         # and the stars, once he remembers them
+		for i in m.STAR.max:
+			var c := Vector2(x + w + 118 + i * 15, y + 4)
+			var a := 0.75 if not sel_stone else 0.35
+			_star_icon(c, Color(1, 1, 1, a if i < m.star_count else 0.15))
+		var u: float = (x + w + 72 - 5) if sel_stone else (x + w + 118 - 6)
+		draw_rect(Rect2(u, y + 12, (m.STONE.max * 13 - 3) if sel_stone else (m.STAR.max * 15 - 3), 1), Color(1, 1, 1, 0.5))
+		tx = x + w + 170
 	if m.aiming:
-		_text(_k("THROW MODE  ·  click to throw  ·  CTRL to cancel", "THROW  ·  aim with the right stick  ·  let go of RT to throw  ·  B to cancel"), Vector2(x + w + 112, y + 8), m.font_regular, 11, Color(1, 1, 1, 0.75), 2)
-	elif m.stone_count > 0:
-		_text(_k("CTRL", "RT"), Vector2(x + w + 112, y + 8), m.font_regular, 10, Color(1, 1, 1, 0.3), 2)
+		_text(_k("THROW MODE  ·  click to throw  ·  %sCTRL to cancel" % ("Q stone/star  ·  " if stars else ""),
+			"THROW  ·  right stick aims  ·  let go of RT  ·  %sB cancels" % ("X stone/star  ·  " if stars else "")), Vector2(tx, y + 8), m.font_regular, 11, Color(1, 1, 1, 0.75), 2)
+	elif m.has_ammo():
+		_text(_k("CTRL" + ("   Q" if stars else ""), "RT" + ("   X" if stars else "")), Vector2(tx, y + 8), m.font_regular, 10, Color(1, 1, 1, 0.3), 2)
 	var seen_hide := false
 	for g in m.guards:
 		if g.knows_hide >= 0:
@@ -158,6 +177,7 @@ const CONTROLS := [                                   # keyboard, controller (Xb
 	["SPACE  /  W  /  ↑", "A", "jump  ·  grab a duct  ·  land on a guard to put him to sleep"],
 	["S  /  ↓", "B  /  ↓", "crawl  ·  hide behind furniture  ·  drop from a duct"],
 	["CTRL", "hold  RT", "throw  -  aim (mouse / right stick), click / let go to throw"],
+	["Q", "X", "stone or star  (once you remember the stars)"],
 	["ESC", "START", "pause menu"],
 	["R    ·    F11", "VIEW", "restart    ·    fullscreen"],
 	["M", "Y", "music on / off"],
@@ -200,7 +220,7 @@ func _screens() -> void:
 				_text(m.level.name + "  CLEARED", Vector2(480, 260), m.font_regular, 40, Color(1, 1, 1, 0.92), 12, true)
 				if m.level.has("remember"):         # what this floor brought back
 					var mem: Dictionary = m.level.remember
-					var accent := Color(0.62, 0.08, 0.1, 0.95) if mem.has("colors") else Color(1, 1, 1, 0.75)
+					var accent := Color(0.62, 0.08, 0.1, 0.95) if (mem.has("colors") or mem.has("scarf")) else Color(1, 1, 1, 0.75)
 					_text(mem.lines[0], Vector2(480, 296), m.font_italic, 16, accent, 0, true)
 					_text(mem.lines[1], Vector2(480, 316), m.font_regular, 12, Color(1, 1, 1, 0.5), 1, true)
 				else:

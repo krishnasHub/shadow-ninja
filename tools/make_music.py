@@ -253,6 +253,34 @@ def panel_zap():                                         # a stone through the p
     fizz = np.sin(2 * np.pi * 120 * tt) * (np.sin(2 * np.pi * 9 * tt) > 0) * np.exp(-tt / 0.5)
     return reverb(crack + 0.4 * lowpass(buzz, 1500) + 0.25 * fizz, 0.9, 0.2)
 
+def star_whoosh():                                       # a throwing star leaving the hand: a quick, thin swish
+    n = int(0.28 * SR)
+    tt = np.arange(n) / SR
+    env = np.sin(np.pi * np.clip(tt / 0.22, 0, 1)) ** 2
+    swish = lowpass(rng.standard_normal(n), 5200) - lowpass(rng.standard_normal(n), 1400)
+    return reverb(swish * env, 0.5, 0.15)
+
+def glass_break():                                       # a lamp shattering: a crack, a spray of glass, bits landing
+    n = int(1.4 * SR)
+    tt = np.arange(n) / SR
+    x = lowpass(rng.standard_normal(n), 6000) * np.exp(-tt / 0.03)
+    for k in range(26):                                  # shards: short high rings, scattered and fading
+        at = 0.01 + rng.random() ** 1.6 * 0.9
+        f = 2400 + rng.random() * 4200
+        d = 0.05 + rng.random() * 0.12
+        m = int(d * SR)
+        t2 = np.arange(m) / SR
+        ping = np.sin(2 * np.pi * f * t2) * np.exp(-t2 / (d / 4)) * (0.5 + rng.random() * 0.5) * (1.0 - at)
+        place(x, ping, at)
+    return reverb(x, 1.0, 0.25)
+
+def star_tink():                                         # a star biting into a wall: a small metallic tink
+    n = int(0.4 * SR)
+    tt = np.arange(n) / SR
+    x = (np.sin(2 * np.pi * 2350 * tt) + 0.6 * np.sin(2 * np.pi * 3720 * tt)) * np.exp(-tt / 0.05)
+    x += lowpass(rng.standard_normal(n), 3000) * np.exp(-tt / 0.008)
+    return reverb(x, 0.4, 0.15)
+
 if __name__ == '__main__':
     root = os.path.join(os.path.dirname(__file__), '..', 'godot', 'audio')
     base = reverb(0.55 * pad() + 0.22 * drone() + 0.30 * plucks(), 2.8, 0.4) + 0.32 * pulse()
@@ -266,3 +294,6 @@ if __name__ == '__main__':
     write(os.path.join(root, 'rattle.wav'), door_rattle(), 0.7)
     write(os.path.join(root, 'siren.wav'), siren(), 0.5)
     write(os.path.join(root, 'panel.wav'), panel_zap(), 0.75)
+    write(os.path.join(root, 'whoosh.wav'), star_whoosh(), 0.55)
+    write(os.path.join(root, 'glass.wav'), glass_break(), 0.8)
+    write(os.path.join(root, 'tink.wav'), star_tink(), 0.6)

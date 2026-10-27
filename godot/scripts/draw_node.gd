@@ -227,10 +227,11 @@ func _stage() -> void:
 			draw_rect(Rect2(r.end.x - 4, r.position.y, 4, r.size.y), tile)
 	for p in m.props:
 		_prop(p)
-	for L in m.lights:                              # lamp shades
+	for L in m.lights:                              # lamp shades (a broken one hangs crooked)
 		if L.kind == "lamp":
-			draw_colored_polygon(PackedVector2Array([Vector2(L.pos.x - 5, L.pos.y - 4), Vector2(L.pos.x + 5, L.pos.y - 4),
-				Vector2(L.pos.x + 15, L.pos.y + 7), Vector2(L.pos.x - 15, L.pos.y + 7)]), tile)
+			var sh := PackedVector2Array([Vector2(-5, -4), Vector2(5, -4), Vector2(15, 7), Vector2(-15, 7)])
+			var tr := Transform2D(0.35 if L.broken else 0.0, L.pos)
+			draw_colored_polygon(tr * sh, tile)
 
 func _prop(p: Dictionary) -> void:
 	var x: float = p.x * T
@@ -297,6 +298,9 @@ func _actors() -> void:
 		draw_rect(Rect2(piv.x - 6, piv.y - 12, 12, 24), grey(0x1a))
 		_limb(piv, m.lever_knob(sw), 3.0, grey(0x10))
 		draw_circle(m.lever_knob(sw), 3.5, grey(0x10))
+	for st in m.stars:                              # a star stuck in a wall (or lying where it fell)
+		if st.state == "stuck":
+			_star(Vector2(st.x, st.y), st.ang, 4.5, grey(0x30))
 	for L in m.lights:                              # security cameras: housing on the ceiling, lens follows the sweep
 		if L.kind == "camera":
 			draw_rect(Rect2(L.pos.x - 3, 2 * T, 6, 4), grey(0x12))
@@ -308,6 +312,13 @@ func _actors() -> void:
 		_guard(g)
 	if m.state != "title" and not m.P.hidden:
 		_ninja()
+
+# A throwing star: four points.
+func _star(p: Vector2, ang: float, r: float, c: Color) -> void:
+	var pts := PackedVector2Array()
+	for i in 8:
+		pts.append(p + Vector2.from_angle(ang + i * TAU / 8.0) * (r if i % 2 == 0 else r * 0.32))
+	draw_colored_polygon(pts, c)
 
 func _guard(g) -> void:
 	var c := grey(0x12)
@@ -369,6 +380,27 @@ func _talk_arm(g, x: float, by: float, f: float, c: Color) -> void:
 	_limb(sh, elbow, 4.5, c)
 	_limb(elbow, hand, 4.5, c)
 
+# Remembered (Floor 3 on), the scarf has colour - but only in the dark. The colour sits at the tail and
+# climbs toward his neck floor by floor (m.scarf_reach), deepening from maroon to a full dark red. As light
+# finds him it fades out: lit, he's the grey he always was.
+const MAROON := Color(0.15, 0.018, 0.03)
+const DEEP_RED := Color(0.25, 0.018, 0.024)
+
+func _scarf(P, col: Color) -> void:
+	var pts: PackedVector2Array = m.scarf_pos
+	if not m.scarf_red:
+		draw_polyline(pts, col, 3.0, true)
+		return
+	var shade := 1.0 - smoothstep(0.0, 0.5, P.vis)  # colour only in shadow: gone by half-lit
+	var r: float = m.scarf_reach
+	var hue := MAROON.lerp(DEEP_RED, r)
+	var cols := PackedColorArray()
+	for i in pts.size():
+		var t := float(i) / (pts.size() - 1)          # 0 at the neck, 1 at the tip
+		var u := smoothstep(1.0 - r - 0.35, 1.0 - r + 0.05, t)
+		cols.append(col.lerp(col.lerp(hue, u), shade))
+	draw_polyline_colors(pts, cols, 3.0, true)
+
 static func lean_tr(cx: float, by: float, lean: float) -> Transform2D:
 	return Transform2D(lean, Vector2(cx, by)) * Transform2D(0.0, Vector2(-cx, -by))
 
@@ -388,10 +420,7 @@ func _ninja() -> void:
 	var f: float = P.facing
 	# stride grows with speed, so a slow first step is a small step
 	var sw: float = sin(P.walk_phase) * clampf(absf(P.vx) / (50.0 if (P.crawling or P.clinging) else 120.0), 0.0, 1.0)
-	var scarf := col
-	if m.scarf_red:                                 # remembered: the one colour he has. Deep red, darker in shadow
-		scarf = Color(lerpf(0.16, 0.62, P.vis), lerpf(0.02, 0.07, P.vis), lerpf(0.03, 0.08, P.vis))
-	draw_polyline(m.scarf_pos, scarf, 3.0, true)
+	_scarf(P, col)
 	var cx: float = P.x + P.w / 2
 	var by: float = P.y + P.h
 	if P.crawling or P.clinging:
@@ -415,6 +444,7 @@ func _ninja() -> void:
 		_limb(Vector2(cx, by - 28), Vector2(cx - f * 15, by - 24 + wob), 4, col)
 		_limb(Vector2(cx, by - 27), Vector2(cx - f * 14, by - 20 - wob), 4, col)
 		_rrect(cx - 6.5, by - 32, 13, 19, 5, col)
+		_mark(cx + f * 2, by - 25, col, P.vis)
 		draw_circle(Vector2(cx + f * 1.5, by - 38), 7.5, col)
 		draw_set_transform_matrix(Transform2D.IDENTITY)
 		return
@@ -440,8 +470,17 @@ func _ninja() -> void:
 		_limb(Vector2(cx, by - 28), Vector2(cx + f * 9, by - 36), 4, col)
 		_limb(Vector2(cx, by - 28), Vector2(cx - f * 7, by - 34), 4, col)
 	_rrect(cx - 6.5, by - 32, 13, 19, 5, col)
+	_mark(cx + f * 2, by - 25, col, P.vis)
 	draw_circle(Vector2(cx + f * 1.5, by - 38), 7.5, col)
 	draw_set_transform_matrix(Transform2D.IDENTITY)
+
+# The Evil Co mark (the last memory): a small diamond over his heart, a shade of grey off his body, lit or not.
+func _mark(x: float, y: float, col: Color, vis: float) -> void:
+	if not m.evil_mark:
+		return
+	var g := lerpf(44, 140, vis) / 255.0
+	draw_colored_polygon(PackedVector2Array([Vector2(x, y - 2.8), Vector2(x + 2.4, y), Vector2(x, y + 2.8), Vector2(x - 2.4, y)]), Color(g, g, g))
+	draw_circle(Vector2(x, y), 0.8, col)
 
 # =====================================================================
 #  OVERLAY - drawn after lighting (bulbs, exit sign, hints, eyes, noise, stones, marks)
@@ -451,8 +490,21 @@ func _overlay() -> void:
 		if L.kind == "lamp" and L.level > 0:
 			for k in 6:
 				draw_circle(L.pos + Vector2(0, 7), 26.0 * (1.0 - k / 6.0), Color(1, 1, 1, 0.12 * L.level))
+	for L in m.lights:                              # a broken light: glass glinting on the floor; a camera spits sparks
+		if not L.broken:
+			continue
+		var age: float = m.time - L.broken_t
+		if L.kind == "lamp":
+			for k in 7:
+				var gx: float = L.pos.x + (fmod(k * 37.0, 30.0) - 15.0)
+				var a: float = 0.12 + 0.25 * maxf(0.0, sin(m.time * 3.0 + k * 1.7))
+				draw_circle(Vector2(gx, L.shard_y - 1.5), 1.0, Color(1, 1, 1, a))
+		elif age < 1.6:
+			for k in 6:
+				var sp: Vector2 = L.pos + Vector2(randf_range(-8, 8), randf_range(-2, 10) + age * 30.0)
+				draw_circle(sp, 1.2, Color(1, 1, 1, (1.0 - age / 1.6) * 0.9))
 	for L in m.lights:                              # camera status light: blinks while watching, solid when it sees you
-		if L.kind == "camera" and (L.seeing or fmod(m.time, 1.0) < 0.5):
+		if L.kind == "camera" and not L.broken and (L.seeing or fmod(m.time, 1.0) < 0.5):
 			var led: Vector2 = L.pos + Vector2.from_angle(L.dir) * 2.0
 			draw_circle(led, 5.0 if L.seeing else 3.0, Color(1, 1, 1, 0.25))
 			draw_circle(led, 2.0, Color(1, 1, 1, 0.95 if L.seeing else 0.6))
@@ -547,6 +599,9 @@ func _noise_and_stones() -> void:
 			draw_polyline(outline, Color(1, 1, 1, 0.3 * (1 - k)), 1.5, true)
 	for s in m.stones:
 		draw_circle(Vector2(s.x, s.y), m.STONE.r, grey(0xb4))
+	for st in m.stars:                              # in flight: a spinning glint
+		if st.state != "stuck":
+			_star(Vector2(st.x, st.y), st.ang, 5.0, grey(0xc8))
 
 func _guard_marks() -> void:
 	for g in m.guards:
@@ -581,6 +636,9 @@ func _debug() -> void:
 func _aim() -> void:
 	if m.state != "play" or not m.aiming:          # only in throw mode (Ctrl)
 		return
+	if m.weapon == "star":
+		_aim_star()
+		return
 	var a: Dictionary = m.aim_throw()
 	var can: bool = m.stone_count > 0
 	if can:
@@ -598,3 +656,28 @@ func _aim() -> void:
 		draw_line(t + Vector2(-6, -6), t + Vector2(6, 6), col, 1.5, true)
 		draw_line(t + Vector2(6, -6), t + Vector2(-6, 6), col, 1.5, true)
 		_text(m.font_italic, t + Vector2(0, 24), "too far" if can else "no stones", 11, col, true)
+
+# A star's aim: a straight dotted line to where it goes; a ring on the light it would put out.
+func _aim_star() -> void:
+	var a: Dictionary = m.star_aim()
+	var can: bool = m.star_count > 0
+	var tr: Dictionary = a.trace
+	var end: Vector2 = tr.end
+	if can:
+		var d: float = a.o.distance_to(end)
+		var i := 10.0
+		while i < d:
+			draw_circle(a.o + a.dir * i, 1.3, Color(1, 1, 1, 0.5))
+			i += 10.0
+		if tr.light != null:
+			var L = tr.light
+			draw_arc(L.pos + (Vector2(0, 4) if L.kind == "lamp" else Vector2.ZERO), 12, 0, TAU, 28, Color(1, 1, 1, 0.9), 1.5, true)
+		elif tr.wall:
+			draw_line(end + Vector2(-4, -4), end + Vector2(4, 4), Color(1, 1, 1, 0.6), 1.5, true)
+			draw_line(end + Vector2(4, -4), end + Vector2(-4, 4), Color(1, 1, 1, 0.6), 1.5, true)
+	var t: Vector2 = a.tgt
+	var col := Color(1, 1, 1, 0.9 if can else 0.45)
+	draw_arc(t, 8, 0, TAU, 28, col, 1.5, true)
+	draw_circle(t, 1.8, col)
+	if not can:
+		_text(m.font_italic, t + Vector2(0, 24), "no stars", 11, col, true)

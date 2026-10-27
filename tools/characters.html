@@ -25,6 +25,12 @@
   .card .cap { padding: 7px 11px 9px; font-size: 13px; }
   .card .cap i { color: var(--dim); }
   .wide { padding: 0 24px; display: grid; gap: 12px; }
+  .phase { padding: 0 24px 6px; }
+  .phase h3 { font-weight: normal; font-size: 14px; margin: 18px 0 2px; letter-spacing: 1px; }
+  .phase h3 b { color: #b0283a; font-weight: normal; }
+  .phase p { margin: 0 0 10px; color: var(--dim); font-style: italic; font-size: 13px; max-width: 820px; }
+  .phase .grid { padding: 0; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+  @media (max-width: 600px) { .phase { padding: 0 16px 6px; } }
   .lede { margin: -4px 24px 12px; color: var(--dim); font-style: italic; max-width: 820px; }
   .wide .card canvas { max-height: 420px; object-fit: contain; }
   footer { color: var(--dim); font-style: italic; padding: 26px 24px 40px; max-width: 820px; }
@@ -68,9 +74,15 @@
   </fieldset>
 </div>
 
+<h2>Memory · colour over time</h2>
+<p class="lede">How he looks as he remembers, floor by floor. Every row shows each movement twice: first in shadow, then under a lamp.
+One colour, one thing: the scarf, and only in shadow. Floor by floor the colour climbs from the tip toward his neck and deepens from maroon to a full dark red, until the whole scarf is dark red. Under a lamp it's always plain grey. At the last step the Evil Co mark appears on his chest, in grey, like everything else.</p>
+<div id="memory"></div>
+
 <h2>Speech · four ways</h2>
 <p class="lede">The same scene four ways. The script is shorter and half-heard, since he's hiding and dazed: faint words are ones he doesn't quite catch. The guards gesture (a point at the empty machine, a shrug, a point to where the thief went), so the body tells half of it, the way Limbo would.</p>
 <div class="wide" id="speech"></div>
+
 
 <h2>The ninja</h2>
 <div class="grid" id="ninja"></div>
@@ -122,8 +134,8 @@
   }
 
   // ---- the ninja ----
-  function makeNinja(mode, speed) {
-    return { mode, vx: speed, f: 1, phase: 0, lean: 0, y: 0, vy: 0, t: 0, scarf: null, prev: null, dist: 0 };
+  function makeNinja(mode, speed, segs = 7) {
+    return { mode, vx: speed, f: 1, phase: 0, lean: 0, y: 0, vy: 0, t: 0, scarf: null, prev: null, dist: 0, segs };
   }
   function ninjaNeck(n, cx, by, top) {
     if (n.mode === "cling") return [cx + n.f * 9, top + 11];
@@ -149,35 +161,62 @@
     n.lean += clamp(leanTo - n.lean, -dt * 1.5, dt * 1.5);
     // the scarf: a little verlet chain blown back by the run
     const nk = ninjaNeck(n, cx, by, top);
-    if (!n.scarf) { n.scarf = []; n.prev = []; for (let i = 0; i < 7; i++) { n.scarf.push([nk[0] - n.f * i * 5, nk[1]]); n.prev.push([nk[0] - n.f * i * 5, nk[1]]); } }
+    const S = n.segs;
+    if (!n.scarf) { n.scarf = []; n.prev = []; for (let i = 0; i < S; i++) { n.scarf.push([nk[0] - n.f * i * 5, nk[1]]); n.prev.push([nk[0] - n.f * i * 5, nk[1]]); } }
     n.scarf[0] = nk;
     const wind = -n.f * (0.15 + Math.abs(n.vx) * 0.0016);
-    for (let i = 1; i < 7; i++) {
+    for (let i = 1; i < S; i++) {
       const p = n.scarf[i], q = n.prev[i];
       const vx = (p[0] - q[0]) * 0.92, vy = (p[1] - q[1]) * 0.92;
       n.prev[i] = [p[0], p[1]];
       n.scarf[i] = [p[0] + vx + wind, p[1] + vy + 0.12 + Math.sin(n.t * 7 + i) * 0.06];
     }
-    for (let k = 0; k < 3; k++) for (let i = 1; i < 7; i++) {
+    for (let k = 0; k < 3; k++) for (let i = 1; i < S; i++) {
       const a = n.scarf[i - 1], b = n.scarf[i];
       const dx = b[0] - a[0], dy = b[1] - a[1], d = Math.max(Math.hypot(dx, dy), 0.0001);
       n.scarf[i] = [b[0] - dx * (d - 5) / d, b[1] - dy * (d - 5) / d];
     }
   }
-  function drawNinja(c, n, cx, by, top, vis, time) {
+  // look: what he's remembered - {scarf, wraps, mark: vis -> colour, scratched: bool}. Empty = all grey.
+  function drawNinja(c, n, cx, by, top, vis, time, look = {}) {
     const g = Math.round(lerp(6, 215, vis)); const col = grey(g);
     const f = n.f;
     const crawling = n.mode === "crawl" || n.mode === "cling";
     const sw = Math.sin(n.phase) * clamp(Math.abs(n.vx) / (crawling ? 50 : 120), 0, 1);
-    c.strokeStyle = col; c.lineWidth = 3; c.lineJoin = "round"; c.lineCap = "round";
-    c.beginPath(); n.scarf.forEach((p, i) => i ? c.lineTo(p[0], p[1]) : c.moveTo(p[0], p[1])); c.stroke();
+    const shade = 1 - clamp(vis / 0.5, 0, 1) ** 2 * (3 - 2 * clamp(vis / 0.5, 0, 1));   // colour only in shadow: gone by half-lit
+    const body = [g / 255, g / 255, g / 255];
+    const wrap = look.wraps && shade > 0 ? rgb(mix(body, look.wraps, shade)) : null;
+    const arm = (a, b, w = 4) => {                         // an arm; the wrist wrapped once he remembers it
+      limb(c, a, b, w, col);
+      if (wrap) limb(c, [lerp(a[0], b[0], 0.66), lerp(a[1], b[1], 0.66)], b, w + 0.4, wrap);
+    };
+    const mark = (x, y) => {                               // a small mark over the heart
+      if (!look.mark) return;
+      c.fillStyle = grey(Math.round(lerp(44, 140, vis)));   // grey, a shade off his body: seen lit or not
+      c.beginPath(); c.moveTo(x, y - 2.8); c.lineTo(x + 2.4, y); c.lineTo(x, y + 2.8); c.lineTo(x - 2.4, y); c.closePath(); c.fill();
+      circle(c, x, y, 0.8, col);
+      if (look.scratched) { c.strokeStyle = grey(Math.round(lerp(40, 120, vis))); c.lineWidth = 0.9; c.beginPath(); c.moveTo(x - 3, y - 3); c.lineTo(x + 3, y + 3); c.moveTo(x + 2, y - 3.5); c.lineTo(x - 2.5, y + 2.5); c.stroke(); }
+    };
+    c.lineWidth = 3; c.lineJoin = "round"; c.lineCap = "round";
+    if (look.reach) {                                  // the colour climbs from the tip as he remembers (reach 0..1)
+      const r = look.reach, hue = mix(MAROON, DEEP_RED, r);
+      for (let i = 1; i < n.scarf.length; i++) {
+        const t = i / (n.scarf.length - 1);
+        const k0 = 1 - r - 0.35, k1 = 1 - r + 0.05, u = clamp((t - k0) / (k1 - k0), 0, 1);
+        c.strokeStyle = rgb(mix(body, mix(body, hue, u * u * (3 - 2 * u)), shade));
+        c.beginPath(); c.moveTo(n.scarf[i - 1][0], n.scarf[i - 1][1]); c.lineTo(n.scarf[i][0], n.scarf[i][1]); c.stroke();
+      }
+    } else {
+      c.strokeStyle = look.scarf ? look.scarf(vis) : col;
+      c.beginPath(); n.scarf.forEach((p, i) => i ? c.lineTo(p[0], p[1]) : c.moveTo(p[0], p[1])); c.stroke();
+    }
     if (crawling) {
       c.save();
       let b = by;
       if (n.mode === "cling") { const h = 20; b = top + h; c.translate(0, 2 * top + h); c.scale(1, -1); }
       limb(c, [cx - f * 7, b - 6], [cx - f * (13 - sw * 3), b - 1], 3.5, col);
       limb(c, [cx - f * 3, b - 6], [cx - f * (6 + sw * 3), b - 1], 3.5, col);
-      limb(c, [cx + f * 7, b - 7], [cx + f * (11 + sw * 3), b - 1], 3.5, col);
+      arm([cx + f * 7, b - 7], [cx + f * (11 + sw * 3), b - 1], 3.5);
       ellipse(c, cx, b - 8, 12, 5.5, col);
       circle(c, cx + f * 13, b - 10, 6.5, col);
       c.restore();
@@ -198,9 +237,10 @@
       leg(c, hip, [cx - s * stride, y - 1 - Math.max(-up, 0) * 8 - Math.max(up, 0) * 3], kneeSeg(14, 1), f, 4, col);
       c.translate(hip[0], hip[1]); c.rotate(n.lean); c.translate(-hip[0], -hip[1]);
       const wob = Math.sin(n.phase * 2) * 1.2;              // arms straight back, a little shake
-      limb(c, [cx, y - 28], [cx - f * 15, y - 24 + wob], 4, col);
-      limb(c, [cx, y - 27], [cx - f * 14, y - 20 - wob], 4, col);
+      arm([cx, y - 28], [cx - f * 15, y - 24 + wob]);
+      arm([cx, y - 27], [cx - f * 14, y - 20 - wob]);
       rrect(c, cx - 6.5, y - 32, 13, 19, 5, col);
+      mark(cx + f * 2, y - 25);
       circle(c, cx + f * 1.5, y - 38, 7.5, col);
       eyes(c, cx + f * 1.5, y - 38, f, time);
       c.restore();
@@ -210,8 +250,8 @@
     if (n.y < 0) {                                       // in the air: knees up
       leg(c, hip, [cx + f * 6, y - 4], kneeSeg(14, 1), f, 4, col);
       leg(c, hip, [cx - f * 3, y - 2], kneeSeg(14, 1), f, 4, col);
-      limb(c, [cx, y - 28], [cx + f * 9, y - 36], 4, col);
-      limb(c, [cx, y - 28], [cx - f * 7, y - 34], 4, col);
+      arm([cx, y - 28], [cx + f * 9, y - 36]);
+      arm([cx, y - 28], [cx - f * 7, y - 34]);
     } else {
       const amp = clamp(Math.abs(n.vx) / 120, 0, 1);
       const bend = clamp(Math.abs(n.vx) / 260, 0, 1);
@@ -219,10 +259,11 @@
       const stride = 8 * (1 + 0.25 * bend);
       step(c, hip, y, sw, Math.max(up, 0), stride, 14, bend, f, 4, col);
       step(c, hip, y, -sw, Math.max(-up, 0), stride, 14, bend, f, 4, col);
-      limb(c, [cx, y - 28], [cx - sw * 7, y - 17], 4, col);
-      limb(c, [cx, y - 28], [cx + sw * 7, y - 17], 4, col);
+      arm([cx, y - 28], [cx - sw * 7, y - 17]);
+      arm([cx, y - 28], [cx + sw * 7, y - 17]);
     }
     rrect(c, cx - 6.5, y - 32, 13, 19, 5, col);
+    mark(cx + f * 2, y - 25);
     circle(c, cx + f * 1.5, y - 38, 7.5, col);
     eyes(c, cx + f * 1.5, y - 38, f, time);
     c.restore();
@@ -294,8 +335,7 @@
   }
 
   // ---- the stage: wall, floor, a lamp when lit, ticks that scroll with the treadmill ----
-  function stage(c, w, h, floorY, dist, duct) {
-    const lit = opt.light === "lit";
+  function stage(c, w, h, floorY, dist, duct, lit = opt.light === "lit") {
     c.fillStyle = lit ? "#5a5a5c" : "#1e1e20"; c.fillRect(0, 0, w, h);
     for (let x = 18; x < w; x += 70) { c.fillStyle = lit ? "#4c4c4e" : "#19191b"; c.fillRect(x, 0, 6, floorY); }
     if (lit) {
@@ -349,6 +389,39 @@
 
   const N = document.getElementById("ninja"), G = document.getElementById("guards");
   const W = 120, H = 92, FY = 76;
+  // ---- memory: colour over time ----
+  const rgb = (a) => `rgb(${Math.round(a[0] * 255)},${Math.round(a[1] * 255)},${Math.round(a[2] * 255)})`;
+  const mix = (a, b, t) => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)];
+  // Noir: the colour is only in the dark, and dark itself. Lit, he's the grey he always was.
+  const MAROON = [0.15, 0.018, 0.03];                    // the first colour, at the tip
+  const DEEP_RED = [0.25, 0.018, 0.024];                 // the last: the whole scarf, a full dark red (still dark)
+  const PHASES = [
+    ["Floors 1–3", "nothing yet", "He doesn't know who he is. All grey, like the world.", {}],
+    ["Floor 4", "the tip", "In shadow, only the very end of the scarf: maroon, barely there. Lit, plain grey.", { reach: 0.25 }],
+    ["Floor 5", "a third", "The colour climbs.", { reach: 0.45 }],
+    ["Floor 6", "half", "Half the scarf, the red deepening.", { reach: 0.65 }],
+    ["Floor 7", "nearly all", "Almost to his neck.", { reach: 0.85 }],
+    ["Floor 8", "Evil Co", "The whole scarf, full dark red (in shadow). And the mark on his chest: he remembers who he works for. Grey, a shade off his body, and it shows lit or not.", { reach: 1.0, mark: true }],
+  ];
+  const MOVES = [["Standing", "stand", 0], ["Sneaking", "walk", 140], ["Running", "run", 260], ["Crawling", "crawl", 70], ["Clinging", "cling", 80]];
+  const MEM = document.getElementById("memory");
+  PHASES.forEach(([when, what, note, look]) => {
+    const block = document.createElement("div"); block.className = "phase";
+    block.innerHTML = `<h3>${when} · <b>${what}</b></h3><p>${note}</p>`;
+    const grid = document.createElement("div"); grid.className = "grid";
+    block.append(grid); MEM.append(block);
+    for (const lit of [false, true]) {
+      for (const [name, mode, speed] of MOVES) {
+        const n = makeNinja(mode, speed, look.segs || 7);
+        card(grid, name, lit ? "under a lamp" : "in shadow", W, H, (c, dt, time) => {
+          const top = 26, duct = mode === "cling" ? top - 12 : null;
+          updateNinja(n, dt, W / 2, FY, top);
+          stage(c, W, H, FY, n.dist, duct, lit);
+          drawNinja(c, n, W / 2, FY, top, lit ? 1.0 : 0.0, time, look);
+        });
+      }
+    }
+  });
   const nCard = (title, note, mode, speed, vis = 0) => {
     const n = makeNinja(mode, speed);
     card(N, title, note, W, H, (c, dt, time) => {

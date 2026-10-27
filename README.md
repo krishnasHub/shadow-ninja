@@ -20,6 +20,7 @@ The rule the whole game is built on: **the light you see is the light that catch
 | Space / W / ↑ | jump · grab a duct · land on a guard to put him to sleep |
 | S / ↓ | crawl · hide behind furniture · drop from a duct |
 | Ctrl | throw mode: aim with the mouse, click to throw a stone |
+| Q | stone or star (the throwing stars come back after Floor 3) |
 | Esc | pause menu |
 | R · F11 | restart · fullscreen (Godot) |
 | M | music on / off |
