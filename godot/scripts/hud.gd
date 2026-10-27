@@ -3,13 +3,20 @@ extends Control
 
 var m
 
-func _text(s: String, pos: Vector2, font: Font, size: int, col: Color, spacing := 0, center := false) -> void:
+# outline: a dark edge (px) so the line reads over a lit wall.
+func _text(s: String, pos: Vector2, font: Font, size: int, col: Color, spacing := 0, center := false, outline := 0) -> void:
 	var f := font
 	if spacing != 0:
 		var fv := FontVariation.new()
 		fv.base_font = font
 		fv.spacing_glyph = spacing
 		f = fv
+	if outline > 0:
+		var oc := Color(0.02, 0.02, 0.02, 0.85 * col.a)
+		if center:
+			draw_string_outline(f, pos - Vector2(480, 0), s, HORIZONTAL_ALIGNMENT_CENTER, 960, size, outline, oc)
+		else:
+			draw_string_outline(f, pos, s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, outline, oc)
 	if center:
 		draw_string(f, pos - Vector2(480, 0), s, HORIZONTAL_ALIGNMENT_CENTER, 960, size, col)
 	else:
@@ -21,30 +28,65 @@ func _draw() -> void:
 		_opening()
 	_screens()
 
-# The opening scene: a white fade as the chemical wears off, the prompt to hide, then the
-# letterbox and the guards' lines over their heads.
+# The opening scene: black, the room slowly fading in as he comes to, the prompt to hide, then the
+# letterbox: the guards' lines sit in the bottom bar under whoever's speaking, word by word.
 func _opening() -> void:
 	if m.state != "play":
 		return
-	if m.intro == "hide" and m.intro_t > 1.6:
-		var left := maxf(0.0, m.level.intro.hide - m.intro_t)
-		var a := clampf((m.intro_t - 1.6) / 0.8, 0.0, 1.0)
-		_text(_k("footsteps.  hide  -  ↓  behind the bench.", "footsteps.  hide  -  B  behind the bench."), Vector2(480, 140), m.font_italic, 18, Color(1, 1, 1, 0.8 * a), 0, true)
-		_text("%d" % ceili(left), Vector2(480, 172), m.font_regular, 15, Color(1, 1, 1, 0.5 * a), 3, true)
+	if m.intro == "hide" and m.intro_t > m.WAKE.prompt:
+		var left := maxf(0.0, m.WAKE.prompt + m.level.intro.hide - m.intro_t)
+		var a := clampf((m.intro_t - m.WAKE.prompt) / 0.8, 0.0, 1.0)
+		_text(_k("footsteps.  hide  -  ↓  behind the bench.", "footsteps.  hide  -  B  behind the bench."), Vector2(480, 140), m.font_italic, 14, Color(1, 1, 1, 0.8 * a), 0, true, 5)
+		_text("%d" % ceili(left), Vector2(480, 164), m.font_regular, 12, Color(1, 1, 1, 0.6 * a), 3, true, 5)
 	if m.bars > 0.0:
 		var h: float = 62.0 * m.bars
 		draw_rect(Rect2(0, 0, 960, h), Color(0, 0, 0))
 		draw_rect(Rect2(0, 540 - h, 960, h), Color(0, 0, 0))
 	if m.intro == "talk":
-		var line: Array = m.level.intro.talk[m.talk_i]
-		var ig: Array = m.intro_guards()
-		var g = ig[line[0]]
-		var a := clampf(m.talk_t / 0.25, 0.0, 1.0)
-		var p: Vector2 = Vector2(g.x, g.y - 84) - m.cam
-		_text(line[1], Vector2(clampf(p.x, 200, 760), p.y), m.font_italic, 16, Color(1, 1, 1, 0.92 * a), 0, true)
-		_text(_k("SPACE  next    ·    ESC  skip", "A  next    ·    START  skip"), Vector2(480, 520), m.font_regular, 10, Color(1, 1, 1, 0.35), 2, true)
-	if m.level.has("intro") and m.intro == "hide" and m.intro_t < 2.6:   # waking: the white goes
-		draw_rect(Rect2(0, 0, 960, 540), Color(1, 1, 1, pow(1.0 - m.intro_t / 2.6, 1.6)))
+		_talk_line()
+		var top: float = 31.0 * m.bars
+		_text(_k("SPACE  next    ·    ESC  skip", "A  next    ·    START  skip"), Vector2(480, top + 4), m.font_regular, 9, Color(1, 1, 1, 0.25), 2, true)
+	if m.wake_seen() < 1.0:                     # waking: the dark lifts
+		draw_rect(Rect2(0, 0, 960, 540), Color(0.035, 0.035, 0.04, 1.0 - m.wake_seen()))
+
+var talk_font: FontVariation
+const TALK_SIZE := 13
+const TALK_INK := Color(0.6, 0.6, 0.6)
+const TALK_FAINT := Color(0.24, 0.24, 0.25)       # the words he half-hears
+
+# One line, in the bottom bar under the speaker: small spaced caps. Each word drifts up into place
+# a beat after the last; when the line's done, it lifts away. ~faint~ words are the half-heard ones.
+func _talk_line() -> void:
+	if talk_font == null:
+		talk_font = FontVariation.new()
+		talk_font.base_font = m.font_regular
+		talk_font.spacing_glyph = 3
+	var line: Array = m.level.intro.talk[m.talk_i]
+	var g = m.intro_guards()[line[0]]
+	var t: float = m.talk_t
+	var dur: float = m.line_dur(line)
+	var words := []                                  # [word, faint]
+	var faint := false
+	for w in String(line[1]).split(" "):
+		if w.begins_with("~"):
+			faint = true
+		words.append([w.replace("~", "").to_upper(), faint])
+		if w.ends_with("~"):
+			faint = false
+	var sp := talk_font.get_string_size("  ", HORIZONTAL_ALIGNMENT_LEFT, -1, TALK_SIZE).x
+	var total := -sp
+	for w in words:
+		total += talk_font.get_string_size(w[0], HORIZONTAL_ALIGNMENT_LEFT, -1, TALK_SIZE).x + sp
+	var cx := clampf(g.x - m.cam.x, total / 2 + 24, 960 - total / 2 - 24)
+	var y: float = 540 - 31.0 * m.bars + TALK_SIZE * 0.35
+	var out := smoothstep(dur + m.TALK_GAP * 0.6 - 0.45, dur + m.TALK_GAP * 0.6, t)
+	var x := cx - total / 2
+	for i in words.size():
+		var k := smoothstep(i * 0.11, i * 0.11 + 0.5, t)
+		var col: Color = TALK_FAINT if words[i][1] else TALK_INK
+		col.a = k * (1.0 - out)
+		draw_string(talk_font, Vector2(x, y + (1.0 - k) * 9.0 - out * 8.0), words[i][0], HORIZONTAL_ALIGNMENT_LEFT, -1, TALK_SIZE, col)
+		x += talk_font.get_string_size(words[i][0], HORIZONTAL_ALIGNMENT_LEFT, -1, TALK_SIZE).x + sp
 
 func _eye(c: Vector2, o: float) -> void:            # opens with exposure
 	var hh := 1 + o * 8

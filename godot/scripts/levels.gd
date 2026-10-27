@@ -60,16 +60,16 @@ const LEVELS := [
 		],
 		"intro": {
 			"hide": 10.0,
+			# [speaker, line, gesture]. ~words~ are the ones he half-hears (drawn faint). Gestures: "machine"
+			# (points back at it), "ahead" (points the way he went), "shrug"; none = talking hands.
 			"talk": [
-				[0, "what happened?"],
-				[1, "looks like someone stole the formula!"],
-				[0, "what was it?"],
-				[1, "i don't know. but i heard it has a countermeasure..."],
-				[1, "it sprays a chemical at anyone trying to steal it."],
-				[0, "ohh? what does the chemical do?"],
-				[1, "i'm not sure... but i think the thief loses his memory."],
-				[1, "maybe for a while. maybe for good."],
-				[0, "then he can't have gone far. come on."],
+				[0, "what happened?", "machine"],
+				[1, "someone ~got in and~ took the formula."],
+				[1, "it has a countermeasure... ~it~ sprays a chemical."],
+				[0, "and?", "shrug"],
+				[1, "the thief loses his memory. ~maybe for a while.~"],
+				[1, "maybe for good."],
+				[0, "then he can't be far.", "ahead"],
 			],
 		},
 		"remember": {"abilities": ["cling", "takedown"], "lines": [

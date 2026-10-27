@@ -133,6 +133,10 @@ class Guard:
 	var aim := 0.15
 	var invest_x := 0.0
 	var intro_to := -1.0     # the opening: where he runs in to (px), or -1
+	var gest := ""           # the talk: "point" / "shrug" / "beat" (talking hands), blended in by gest_k
+	var gest_k := 0.0
+	var gest_x := 0.0        # where a point points (px)
+	var nod := 0.0           # the talk: head bob while he speaks (px)
 	var hunting_you := false
 	var alert := false
 	var found := false
@@ -180,13 +184,19 @@ var level_t := 0.0              # seconds since this floor started (drives the f
 var can := {}
 var scarf_red := false
 # The opening scene (Floor 1): "hide" (fade in, ~10 s to get out of sight) -> "arrive" (two guards run
-# in) -> "talk" (letterbox, no control, their lines over their heads) -> "leave" (they go to their
-# rounds, the bars slide away). Spotted at any point: it's just the game, they hunt you.
+# in) -> "talk" (letterbox, no control, their lines over their heads; they shut the alarm off) ->
+# "leave" (they run off to search elsewhere, the bars slide away; skipped, they're just gone). Spotted
+# before the talk: it's just the game, they hunt you. After the talk the lab has no guards.
 var intro := ""
 var intro_t := 0.0
-var intro_seen := false         # the talk played once this session: a retry skips it
+var intro_seen := false         # the talk played this run: a retry starts after it (New Game resets it)
+# The wake (s into the opening): dark until "black", the room open by "seen" (he can move), the alarm
+# light and siren from "alarm", the siren full by "loud", then "footsteps. hide" at "prompt".
+const WAKE := {"black": 1.5, "seen": 7.0, "alarm": 9.0, "loud": 13.0, "prompt": 11.0}
+var alarm_quiet := false        # the machine's alarm light is off (they shut it off in the talk)
 var talk_i := 0
 var talk_t := 0.0
+const TALK_GAP := 0.7          # s after a line before the next: it lifts away in the last part of this
 var bars := 0.0                 # letterbox, 0..1
 var notice := ""                # a line that fades in mid-screen, e.g. "a door unlocks below."
 var pad := false                # the last input came from a controller: prompts name its buttons
@@ -406,6 +416,7 @@ func update_meter_audio(dt: float) -> void:
 	sfx_riser.volume_db = linear_to_db(maxf(pow(r, 1.5), 0.0001)) + METER_AUDIO.riser_db
 	sfx_riser.pitch_scale = 1.0 + METER_AUDIO.riser_pitch * r * r
 	music_base.volume_db = MUSIC_BASE_DB + linear_to_db(1.0 - METER_AUDIO.duck * m)
+	sfx_siren.volume_db = -9.0 + linear_to_db(maxf(wake_alarm(), 0.0001))
 	if state == "caught" and not was_caught:
 		sfx_caught.play()
 	was_caught = state == "caught"
@@ -573,7 +584,7 @@ func update_intro(dt: float) -> void:
 		return
 	match intro:
 		"hide":
-			if intro_t >= level.intro.hide:
+			if intro_t >= WAKE.prompt + level.intro.hide:
 				intro = "arrive"
 				for g in ig:
 					g.state = "intro_run"
@@ -584,21 +595,40 @@ func update_intro(dt: float) -> void:
 				talk_t = 0.0
 				aiming = false
 				P.vx = 0.0
-				for g in ig:
-					g.state = "intro_talk"
-					g.facing = -1
-					g.moving = false
-					g.cur_v = 0.0
-				if intro_seen:
-					end_talk()              # a retry: you've heard it
+				face_each_other(ig)
+				alarm_quiet = true              # "someone turn that thing off"
 		"talk":
 			talk_t += dt
 			var line: Array = level.intro.talk[talk_i]
-			if talk_t > 1.3 + 0.045 * String(line[1]).length():
+			talk_body(ig, line, dt)
+			if talk_t > line_dur(line) + TALK_GAP:
 				next_line()
 		"leave":
 			if bars <= 0.0:
 				intro = ""
+
+# How long a line is up, by its length (the ~ marks don't count).
+func line_dur(line: Array) -> float:
+	return 1.4 + 0.05 * String(line[1]).replace("~", "").length()
+
+# Who's talking shows in the body: the speaker nods and his free hand moves (a point, a shrug, or
+# just talking hands); the other one stands and listens.
+func talk_body(ig: Array, line: Array, dt: float) -> void:
+	var g_line: String = line[2] if line.size() > 2 else ""
+	for i in ig.size():
+		var g: Guard = ig[i]
+		var speaking: bool = i == line[0] and talk_t < line_dur(line)
+		if speaking:
+			match g_line:
+				"machine", "ahead":
+					g.gest = "point"
+					g.gest_x = 0.0 if g_line == "machine" else LW * T
+				"shrug":
+					g.gest = "shrug"
+				_:
+					g.gest = "beat"
+		g.gest_k = move_toward(g.gest_k, 1.0 if speaking else 0.0, dt * (5.0 if speaking else 3.0))
+		g.nod = maxf(0.0, sin(talk_t * 11.0)) * 0.8 if speaking else 0.0
 
 func next_line() -> void:
 	talk_i += 1
@@ -606,13 +636,55 @@ func next_line() -> void:
 	if talk_i >= level.intro.talk.size():
 		end_talk()
 
-func end_talk() -> void:
+# The talk: they stop and turn to each other, torches down.
+func face_each_other(ig: Array) -> void:
+	var mid := 0.0
+	for g in ig:
+		mid += g.x / ig.size()
+	for g in ig:
+		g.state = "intro_talk"
+		g.facing = 1 if g.x < mid else -1
+		g.moving = false
+		g.cur_v = 0.0
+		g.aim = 0.9
+		g.torch.pos = Vector2(g.x + g.facing * 14, g.y - 32)
+		g.torch.dir = g.aim if g.facing > 0 else PI - g.aim
+		g.torch.node.position = g.torch.pos
+		g.torch.node.rotation = g.torch.dir
+
+# skip: they're gone at once; otherwise they run off to search elsewhere.
+func end_talk(skip := false) -> void:
 	intro = "leave"
 	intro_seen = true
 	level_t = 0.0                           # now the floor's name
 	for g in intro_guards():
-		if g.state == "intro_talk":
-			g.state = "return"              # off to their rounds, looking for the thief
+		g.gest_k = 0.0
+		g.nod = 0.0
+		if skip:
+			drop_guard(g)
+		elif g.state == "intro_talk":
+			g.state = "intro_exit"
+
+# A guard leaves the floor for good (the opening's two, once they've gone).
+func drop_guard(g: Guard) -> void:
+	g.torch.level = 0.0
+	g.torch.node.enabled = false
+	g.torch.guard = null
+	guards.erase(g)
+
+# The opening's wake, 0..1: how much of the room he sees, and of the sound he hears.
+func wake_seen() -> float:
+	if intro != "hide":
+		return 1.0
+	return smoothstep(WAKE.black, WAKE.seen, intro_t)
+
+func wake_alarm() -> float:                  # the machine's alarm, light and siren, coming up
+	if intro != "hide":
+		return 1.0
+	return smoothstep(WAKE.alarm, WAKE.loud, intro_t)
+
+func waking() -> bool:
+	return intro == "hide" and intro_t < WAKE.seen
 
 # A camera saw you: start the countdown (unless one's running, or every panel is already dead).
 func raise_alarm(x: float) -> void:
@@ -975,6 +1047,8 @@ func update_light(L: Lt, t: float, dt: float) -> void:
 		elif ph > L.flicker_on - 0.03 and ph < L.flicker_on:
 			lit = sin(t * 70.0) > 0.0
 		L.level = L.intensity if lit else 0.0
+	if L.kind == "alarm":
+		L.level = 0.0 if alarm_quiet else L.level * minf(1.0, wake_alarm() * 3.0)
 	L.node.energy = L.level
 	L.node.enabled = L.level > 0.0
 
@@ -1046,7 +1120,12 @@ func start_run(idx := -1) -> void:
 			scarf_red = true
 	intro = ""
 	bars = 0.0
-	if level.has("intro"):
+	alarm_quiet = false
+	if level.has("intro") and intro_seen:      # a retry: the scene's over, they've gone
+		alarm_quiet = true
+		for g in intro_guards():
+			drop_guard(g)
+	elif level.has("intro"):
 		intro = "hide"
 		intro_t = 0.0
 		level_t = 99.0                      # the floor's name waits for the scene to end
@@ -1110,7 +1189,7 @@ func pad_button(b: int) -> void:
 		if b == JOY_BUTTON_A:
 			next_line()
 		elif b == JOY_BUTTON_START or b == JOY_BUTTON_B:
-			end_talk()
+			end_talk(true)
 		return
 	match b:
 		JOY_BUTTON_A:
@@ -1184,7 +1263,7 @@ func _unhandled_input(e: InputEvent) -> void:
 			if code in [KEY_SPACE, KEY_ENTER, KEY_KP_ENTER, KEY_W, KEY_UP]:
 				next_line()
 			elif code in [KEY_ESCAPE, KEY_P]:
-				end_talk()
+				end_talk(true)
 			return
 		match code:
 			KEY_SPACE, KEY_W, KEY_UP:
@@ -1230,6 +1309,7 @@ func _unhandled_input(e: InputEvent) -> void:
 			elif menu_page == "levels":
 				var l := level_item_at(get_viewport().get_mouse_position())
 				if l >= 0:
+					intro_seen = false
 					start_run(l)
 			elif menu_page != "":
 				menu_page = ""
@@ -1282,6 +1362,7 @@ func menu_activate(i: int) -> void:
 		"Resume":
 			state = "play"
 		"New Game":
+			intro_seen = false
 			if howto_seen:
 				start_run(0)
 			else:
@@ -1320,6 +1401,7 @@ func quit_choose(i: int) -> void:
 func menu_key(code: int) -> void:
 	if menu_page == "howto":                # any key or button: play
 		menu_page = ""
+		intro_seen = false
 		start_run(0)
 		return
 	if menu_page == "quit":                 # Are you sure?  ← → choose, Enter picks, Y / N shortcuts
@@ -1341,6 +1423,7 @@ func menu_key(code: int) -> void:
 			KEY_DOWN, KEY_S:
 				level_sel = (level_sel + 1) % n
 			KEY_ENTER, KEY_KP_ENTER, KEY_SPACE:
+				intro_seen = false
 				start_run(level_sel)
 			KEY_ESCAPE, KEY_BACKSPACE:
 				menu_page = ""
@@ -1553,8 +1636,13 @@ func update_player(dt: float) -> void:
 	# running footsteps are loud; sneaking and crawling are silent
 	if P.running and P.on_ground and absf(P.vx) > 150 and floori(P.walk_phase / TAU) != floori(prev_phase / TAU):
 		make_noise(mid, P.y + P.h, NOISE.run)
-	var lean_to := 0.0 if (P.crawling or not moving) else P.facing * (0.18 if P.running else 0.06)
-	P.lean = move_toward(P.lean, lean_to, dt * 1.5)
+	# running: the anime lean, pitched from the hip (see dashing()); sneaking: a touch forward
+	var lean_to := 0.0 if (P.crawling or not moving) else P.facing * (0.62 if dashing() else 0.06)
+	P.lean = move_toward(P.lean, lean_to, dt * 2.5)
+
+# The anime run: flat out on the ground - legs under him, the body pitched forward from the hip.
+func dashing() -> bool:
+	return P.on_ground and P.running and absf(P.vx) > 200.0 and not P.crawling and not P.clinging
 
 # headband tails - a little verlet chain
 func neck() -> Vector2:
@@ -1564,7 +1652,11 @@ func neck() -> Vector2:
 		return Vector2(cx + P.facing * 9, P.y + 11)
 	if P.crawling:
 		return Vector2(cx + P.facing * 9, by - 11)
-	return Vector2(cx - P.facing * 5, by - 39)
+	var n := Vector2(cx - P.facing * 5, by - 39)
+	if dashing():                            # the neck goes with the pitched body
+		var hip := Vector2(cx, by - 15)
+		n = hip + (n - hip).rotated(P.lean)
+	return n
 
 func reset_scarf() -> void:
 	scarf_pos.clear()
@@ -1823,7 +1915,7 @@ func guard_tracks(g: Guard) -> bool:
 	return eye.distance_to(torso) < GUARD.torch_radius and not blocked(eye, torso)
 
 func guard_sees(g: Guard) -> bool:
-	if g.state == "asleep" or (P.hidden and g.knows_hide != P.cover):
+	if g.state == "asleep" or g.state == "intro_exit" or (P.hidden and g.knows_hide != P.cover):
 		return false
 	var s := 0.0
 	for p in sample_points():
@@ -1894,6 +1986,9 @@ func update_guard(g: Guard, dt: float) -> void:
 	elif g.state == "intro_run":                    # the opening: running in to the machine
 		speed = GUARD.chase * 1.6                    # running: something's been stolen
 		target = g.intro_to
+	elif g.state == "intro_exit":                   # gone to search elsewhere: off the floor
+		speed = GUARD.chase * 1.6
+		target = g.max_x
 	elif g.state == "return":
 		target = clampf(g.x, g.from_x, g.to_x)
 		if absf(target - g.x) < 2:
@@ -1946,6 +2041,8 @@ func update_guards(dt: float) -> void:
 				takedown(g)
 	for g in guards:
 		update_guard(g, dt)
+	for g in guards.filter(func(g): return g.state == "intro_exit" and (g.x > cam.x + VIEW_W + 40 or g.x >= g.max_x - 2)):
+		drop_guard(g)
 
 func takedown(g: Guard) -> void:
 	g.state = "asleep"
@@ -1972,7 +2069,8 @@ func _physics_process(dt: float) -> void:
 		return
 	update_intro(dt)
 	if intro != "talk":                      # the talk is a cutscene: no control, nobody looks
-		update_player(dt)
+		if not waking():                     # coming to: he can't move yet
+			update_player(dt)
 		update_stones(dt)
 		update_guards(dt)
 		update_detection(dt)
@@ -2056,9 +2154,15 @@ func _capture_setup(setup: String) -> void:
 			P.y = 12 * T - P.h
 			P.facing = 1
 			level_t = 9.0
+		"dash":                                 # floor 2: running flat out (the anime run)
+			start_run(1)
+			test_keys = {"right": true}
+		"waking":                               # floor 1: the room half out of the dark
+			start_run(0)
+			intro_t = 4.5
 		"opening":                              # floor 1: waking by the machine, told to hide
 			start_run(0)
-			intro_t = 3.0
+			intro_t = WAKE.prompt + 2.0
 		"talk":                                 # floor 1: hidden behind the bench, the guards talking
 			start_run(0)
 			P.x = 5.6 * T - P.w / 2
@@ -2067,11 +2171,8 @@ func _capture_setup(setup: String) -> void:
 			P.crawling = true
 			for g in guards:
 				g.x = g.intro_to
-				g.state = "intro_talk"
-				g.torch.pos = Vector2(g.x - 14, g.y - 32)
-				g.torch.dir = PI - g.aim
-				g.torch.node.position = g.torch.pos
-				g.torch.node.rotation = g.torch.dir
+			face_each_other(intro_guards())
+			alarm_quiet = true
 			intro = "talk"
 			talk_i = 1
 			bars = 1.0
@@ -2609,8 +2710,14 @@ func _selftest_intro() -> void:
 	start_run(0)
 	print("  %s (%s): scene '%s', facing %+d, remembers %s" % [level.name, level.subtitle, intro, P.facing, can.keys()])
 	P.x = 5.6 * T - P.w / 2                      # behind the bench, ducked
-	var talk := _walk({"down": true}, func(): return intro == "talk", 60 * 16)
+	_run(60)
+	var dark := wake_seen()
+	_run(60 * 3)
+	print("  waking: 1s in, room seen %.2f; 4s in, seen %.2f, alarm %.2f; moved %s" % [dark, wake_seen(), wake_alarm(), P.x != 5.6 * T - P.w / 2])
+	var talk := 240 + _walk({"down": true}, func(): return intro == "talk", 60 * 30)
 	print("  hidden behind the bench: the guards arrive, the talk starts at %.1fs; hidden %s, meter %.2f" % [talk / 60.0, P.hidden, meter])
+	_run(30)
+	print("  in the talk: the alarm light is off: %s; facing each other: %s" % [lights.filter(func(L): return L.kind == "alarm").all(func(L): return L.level == 0.0), intro_guards().map(func(g): return g.facing)])
 	var seen_lines := {}                          # (a dictionary: lambdas capture it by reference)
 	var leave := _walk({"down": true}, func():
 		seen_lines[talk_i] = true
@@ -2618,13 +2725,23 @@ func _selftest_intro() -> void:
 	print("  the talk: %d lines over %.1fs, bars %.2f, meter %.2f, now '%s'" % [seen_lines.size(), leave / 60.0, bars, meter, intro])
 	_walk({"down": true}, func(): return intro == "", 120)
 	_run(60 * 6)
-	print("  after: scene over, guards %s at x %s, floor name showing: %s" % [guards.map(func(g): return g.state), guards.map(func(g): return int(g.x / T)), level_t < 3.5])
-	start_run(0)                                  # a retry, hidden: the talk is skipped
+	print("  after: scene over, they ran off: guards left %d, floor name showing: %s" % [guards.size(), level_t < 3.5])
+	start_run(0)                                  # a retry: the scene's over, no guards, alarm off
+	_run(30)
+	print("  retry: scene '%s', guards %d, alarm light %.2f" % [intro, guards.size(), lights.filter(func(L): return L.kind == "alarm")[0].level])
+	howto_seen = true                             # finished the talk, then New Game from the menu
+	menu_activate(menu_items().find("New Game"))
+	print("  New Game after the talk: scene '%s', guards %d" % [intro, guards.size()])
+	intro_seen = false                            # skipped: they're gone at once
+	start_run(0)
 	P.x = 5.6 * T - P.w / 2
-	_walk({"down": true}, func(): return intro == "leave" or intro == "", 60 * 16)
-	print("  retry, hidden: talk skipped -> '%s'" % intro)
+	_walk({"down": true}, func(): return intro == "talk", 60 * 30)
+	end_talk(true)
+	_run(1)
+	print("  skipped: guards %d, alarm light %.2f" % [guards.size(), lights.filter(func(L): return L.kind == "alarm")[0].level])
+	intro_seen = false
 	start_run(0)                                  # standing in the open by the machine
-	var hunt := _walk({}, func(): return intro == "", 60 * 16)
+	var hunt := _walk({}, func(): return intro == "", 60 * 30)
 	for i in 60 * 8:
 		if state != "play":
 			break

@@ -43,6 +43,26 @@ func _limb(a: Vector2, b: Vector2, w: float, col: Color) -> void:   # line with 
 	draw_circle(a, w / 2, col)
 	draw_circle(b, w / 2, col)
 
+# Two segments of length seg from a to b, the joint bent out toward `toward` (a knee, an elbow).
+func _joint(a: Vector2, b: Vector2, seg: float, toward: Vector2, w: float, col: Color) -> void:
+	var d := b - a
+	var half := minf(d.length() / 2.0, seg * 0.999)
+	var n := Vector2(-d.y, d.x).normalized()
+	if n.dot(toward) < 0.0:
+		n = -n
+	var j := a + d.normalized() * half + n * sqrt(seg * seg - half * half)
+	_limb(a, j, w, col)
+	_limb(j, b, w, col)
+
+# A leg, the knee toward facing f. The knee rule: standing (bend 0) the segments are exactly half the
+# hip-to-floor length L, so the leg is straight; moving, they grow and the knee comes forward.
+func _leg(hip: Vector2, foot: Vector2, L: float, bend: float, f: float, w: float, col: Color) -> void:
+	_joint(hip, foot, L * (0.5 + 0.1 * bend), Vector2(f, 0), w, col)
+
+# A walking leg: swing s (-1..1) across the stride, the foot lifted while it swings forward.
+func _step(hip: Vector2, by: float, s: float, lift: float, stride: float, L: float, bend: float, f: float, w: float, col: Color) -> void:
+	_leg(hip, Vector2(hip.x + s * stride, by - 1 - lift), L, bend, f, w, col)
+
 func _text(font: Font, pos: Vector2, s: String, size: int, col: Color, center := false) -> void:
 	if center:
 		draw_string(font, pos - Vector2(400, 0), s, HORIZONTAL_ALIGNMENT_CENTER, 800, size, col)
@@ -301,21 +321,65 @@ func _guard(g) -> void:
 		draw_rect(Rect2(x + 30, by - 5, 18, 5), c)   # cap, fallen off
 		draw_rect(Rect2(x - 6, by - 6, 14, 6), c)    # torch, off
 		return
-	var sw: float = sin(g.phase) * clampf(g.cur_v / 50.0, 0.0, 1.0)      # stride grows with speed
-	_limb(Vector2(x, by - 20), Vector2(x + sw * 9, by - 1), 5, c)
-	_limb(Vector2(x, by - 20), Vector2(x - sw * 9, by - 1), 5, c)
+	var amp := clampf(g.cur_v / 50.0, 0.0, 1.0)                          # stride grows with speed
+	var bend := clampf(g.cur_v / 115.0, 0.0, 1.0)                        # and the knee with it; standing, straight
+	var hip := Vector2(x, by - 20)
+	var up: float = cos(g.phase) * f * amp * (3.0 + 4.0 * bend)           # the forward-swinging foot lifts
+	var stride := 9.0 * (1.0 + 0.3 * clampf((g.cur_v - 55.0) / 60.0, 0.0, 1.0))
+	_step(hip, by, sin(g.phase) * amp, maxf(up, 0.0), stride, 19, bend, f, 5, c)
+	_step(hip, by, -sin(g.phase) * amp, maxf(-up, 0.0), stride, 19, bend, f, 5, c)
+	var cut: bool = g.state == "intro_talk"                 # a cutscene: the free arm, elbows, the speaking nod
+	if cut:
+		_talk_arm(g, x, by, f, c)
 	_rrect(x - 9, by - 46, 18, 28, 5, c)                    # torso
-	draw_circle(Vector2(x + f, by - 53), 8, c)              # head
-	draw_rect(Rect2(x - 9 + f * 2, by - 62, 18, 5), c)      # cap
-	draw_rect(Rect2(x + 6 if f > 0 else x - 16, by - 59, 10, 2.5), c)   # brim
+	var ny: float = g.nod - (g.gest_k if g.gest == "shrug" else 0.0)
+	draw_circle(Vector2(x + f, by - 53 + ny), 8, c)         # head
+	draw_rect(Rect2(x - 9 + f * 2, by - 62 + ny, 18, 5), c) # cap
+	draw_rect(Rect2(x + 6 if f > 0 else x - 16, by - 59 + ny, 10, 2.5), c)   # brim
 	var L = g.torch
-	_limb(Vector2(x + f * 3, by - 41), L.pos, 4.5, c)       # arm
+	if cut:                                                 # the torch arm, bent at the elbow
+		_joint(Vector2(x + f * 3, by - 41), L.pos, 7.5, Vector2(-f * 0.3, 1), 4.5, c)
+	else:
+		_limb(Vector2(x + f * 3, by - 41), L.pos, 4.5, c)   # arm
 	draw_set_transform(L.pos, L.dir)
 	draw_rect(Rect2(-10, -3.5, 12, 7), c)                   # torch
 	draw_set_transform_matrix(Transform2D.IDENTITY)
 
+# The talk: his free arm (the far one, behind the torso). Hangs at his side; while he speaks it
+# points (at gest_x), shrugs, or moves with the words ("beat"), blended in by gest_k.
+func _talk_arm(g, x: float, by: float, f: float, c: Color) -> void:
+	var sh := Vector2(x - f * 2, by - 42)
+	var elbow := Vector2(x - f * 2.5, by - 32.5)
+	var hand := Vector2(x - f * 1, by - 23)
+	var e2 := elbow
+	var h2 := hand
+	match g.gest:
+		"point":                                    # straight out toward gest_x, a touch above level
+			var d: float = signf(g.gest_x - x) if g.gest_x != x else -f
+			e2 = sh + Vector2(d * 9, -1)
+			h2 = sh + Vector2(d * 19, -3)
+		"shrug":                                    # forearm up, palm out
+			e2 = Vector2(x - f * 8, by - 33)
+			h2 = Vector2(x - f * 12, by - 42)
+		"beat":                                     # talking hands: in front of the chest, moving with the words
+			e2 = Vector2(x + f * 1, by - 31)
+			h2 = Vector2(x + f * 9, by - 36 + sin(m.talk_t * 9.0) * 2.0)
+	elbow = elbow.lerp(e2, g.gest_k)
+	hand = hand.lerp(h2, g.gest_k)
+	_limb(sh, elbow, 4.5, c)
+	_limb(elbow, hand, 4.5, c)
+
 static func lean_tr(cx: float, by: float, lean: float) -> Transform2D:
 	return Transform2D(lean, Vector2(cx, by)) * Transform2D(0.0, Vector2(-cx, -by))
+
+# The ninja's upper body: in the anime run it pitches from the hip; otherwise the small lean from the feet.
+static func body_tr(mm) -> Transform2D:
+	var P = mm.P
+	var cx: float = P.x + P.w / 2
+	var by: float = P.y + P.h
+	if mm.dashing():
+		return lean_tr(cx, by - 15, P.lean)
+	return lean_tr(cx, by, clampf(P.lean, -0.2, 0.2))
 
 func _ninja() -> void:
 	var P = m.P
@@ -340,21 +404,39 @@ func _ninja() -> void:
 		draw_circle(Vector2(cx + f * 13, by - 10), 6.5, col)
 		draw_set_transform_matrix(Transform2D.IDENTITY)
 		return
-	draw_set_transform_matrix(lean_tr(cx, by, P.lean))
+	var hip := Vector2(cx, by - 15)
+	if m.dashing():                                 # the anime run: legs under him, body pitched from the hip, arms streaming back
+		var s := sin(P.walk_phase)
+		var u := cos(P.walk_phase) * f
+		_leg(hip, Vector2(cx + s * 12, by - 1 - maxf(u, 0.0) * 8 - maxf(-u, 0.0) * 3), 14, 1, f, 4, col)
+		_leg(hip, Vector2(cx - s * 12, by - 1 - maxf(-u, 0.0) * 8 - maxf(u, 0.0) * 3), 14, 1, f, 4, col)
+		draw_set_transform_matrix(body_tr(m))
+		var wob := sin(P.walk_phase * 2) * 1.2
+		_limb(Vector2(cx, by - 28), Vector2(cx - f * 15, by - 24 + wob), 4, col)
+		_limb(Vector2(cx, by - 27), Vector2(cx - f * 14, by - 20 - wob), 4, col)
+		_rrect(cx - 6.5, by - 32, 13, 19, 5, col)
+		draw_circle(Vector2(cx + f * 1.5, by - 38), 7.5, col)
+		draw_set_transform_matrix(Transform2D.IDENTITY)
+		return
+	draw_set_transform_matrix(body_tr(m))
 	if m.at_lever():                                # pulling a lever: one hand on the knob
 		var knob: Vector2 = m.lever_knob(m.switches[P.flip_sw])
-		_limb(Vector2(cx, by - 15), Vector2(cx + 3, by - 1), 4, col)
-		_limb(Vector2(cx, by - 15), Vector2(cx - 4, by - 1), 4, col)
+		_leg(hip, Vector2(cx + 3, by - 1), 14, 0, f, 4, col)
+		_leg(hip, Vector2(cx - 4, by - 1), 14, 0, f, 4, col)
 		_limb(Vector2(cx, by - 28), Vector2(cx - f * 4, by - 17), 4, col)
 		_limb(Vector2(cx, by - 28), knob, 4, col)
 	elif P.on_ground:
-		_limb(Vector2(cx, by - 15), Vector2(cx + sw * 8, by - 1), 4, col)
-		_limb(Vector2(cx, by - 15), Vector2(cx - sw * 8, by - 1), 4, col)
+		var amp: float = clampf(absf(P.vx) / 120.0, 0.0, 1.0)
+		var bend: float = clampf(absf(P.vx) / 260.0, 0.0, 1.0)         # standing still: straight legs
+		var up: float = cos(P.walk_phase) * f * amp * (2.0 + 4.0 * bend)   # the forward-swinging foot lifts
+		var stride: float = 8.0 * (1.0 + 0.25 * bend)
+		_step(hip, by, sw, maxf(up, 0.0), stride, 14, bend, f, 4, col)
+		_step(hip, by, -sw, maxf(-up, 0.0), stride, 14, bend, f, 4, col)
 		_limb(Vector2(cx, by - 28), Vector2(cx - sw * 7, by - 17), 4, col)
 		_limb(Vector2(cx, by - 28), Vector2(cx + sw * 7, by - 17), 4, col)
 	else:
-		_limb(Vector2(cx, by - 15), Vector2(cx + f * 6, by - 6), 4, col)
-		_limb(Vector2(cx, by - 15), Vector2(cx - f * 3, by - 3), 4, col)
+		_leg(hip, Vector2(cx + f * 6, by - 4), 14, 1, f, 4, col)       # tucked: knees up
+		_leg(hip, Vector2(cx - f * 3, by - 2), 14, 1, f, 4, col)
 		_limb(Vector2(cx, by - 28), Vector2(cx + f * 9, by - 36), 4, col)
 		_limb(Vector2(cx, by - 28), Vector2(cx - f * 7, by - 34), 4, col)
 	_rrect(cx - 6.5, by - 32, 13, 19, 5, col)
@@ -444,7 +526,7 @@ func _eyes() -> void:
 	elif P.crawling:
 		h = Vector2(cx + f * 13, by - 10)
 	else:
-		draw_set_transform_matrix(lean_tr(cx, by, P.lean))
+		draw_set_transform_matrix(body_tr(m))
 		h = Vector2(cx + f * 1.5, by - 38)
 	for e in [[Vector2(f * 2.5, -1.5), 1.7], [Vector2(f * 5.8, -1.8), 1.5]]:
 		draw_circle(h + e[0], e[1] + 2.5, Color(1, 1, 1, 0.25))

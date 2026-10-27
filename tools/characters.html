@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Character Sheet</title>
+<style>
+  :root { --bg: #0d0d0e; --panel: #18181a; --ink: #d6d6d6; --dim: #8a8a8a; --line: #2c2c2f; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.5 Georgia, "Times New Roman", serif; }
+  header { padding: 22px 24px 8px; }
+  h1 { margin: 0; font-weight: normal; letter-spacing: 6px; font-size: 22px; }
+  header p { margin: 6px 0 0; color: var(--dim); font-style: italic; max-width: 760px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 18px 28px; padding: 14px 24px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 2; }
+  .controls fieldset { border: 0; padding: 0; margin: 0; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .controls legend { float: left; color: var(--dim); font-size: 11px; letter-spacing: 2px; text-transform: uppercase; margin-right: 8px; padding: 0; }
+  .controls label { cursor: pointer; padding: 3px 9px; border: 1px solid var(--line); border-radius: 3px; font-size: 13px; user-select: none; }
+  .controls input { display: none; }
+  .controls input:checked + span { color: #fff; }
+  .controls label:has(input:checked) { border-color: #777; background: #222; }
+  h2 { font-weight: normal; letter-spacing: 4px; font-size: 13px; text-transform: uppercase; color: var(--dim); margin: 26px 24px 10px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; padding: 0 24px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .card canvas { display: block; width: 100%; height: auto; image-rendering: auto; }
+  .card .cap { padding: 7px 11px 9px; font-size: 13px; }
+  .card .cap i { color: var(--dim); }
+  .wide { padding: 0 24px; display: grid; gap: 12px; }
+  .lede { margin: -4px 24px 12px; color: var(--dim); font-style: italic; max-width: 820px; }
+  .wide .card canvas { max-height: 420px; object-fit: contain; }
+  footer { color: var(--dim); font-style: italic; padding: 26px 24px 40px; max-width: 820px; }
+  @media (max-width: 600px) { .controls, header, .grid, .wide { padding-left: 16px; padding-right: 16px; } h2 { margin-left: 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>CHARACTER SHEET</h1>
+  <p>The ninja and the guards, drawn with the game's own shapes (ported from draw_node.gd), on a treadmill. Knees bend only while moving; standing, the leg is straight. Bubble, lettering and size apply to the grey-bubble scene.</p>
+</header>
+
+<div class="controls">
+  <fieldset><legend>Bubble</legend>
+    <label><input type="radio" name="bubble" value="ink" checked><span>Grey</span></label>
+    <label><input type="radio" name="bubble" value="paper"><span>Darker grey</span></label>
+    <label><input type="radio" name="bubble" value="night"><span>Night</span></label>
+  </fieldset>
+  <fieldset><legend>Lettering</legend>
+    <label><input type="radio" name="font" value="caps" checked><span>Caps</span></label>
+    <label><input type="radio" name="font" value="italic"><span>Italic</span></label>
+    <label><input type="radio" name="font" value="roman"><span>Roman</span></label>
+  </fieldset>
+  <fieldset><legend>Size</legend>
+    <label><input type="radio" name="size" value="8"><span>8</span></label>
+    <label><input type="radio" name="size" value="9" checked><span>9</span></label>
+    <label><input type="radio" name="size" value="10"><span>10</span></label>
+    <label><input type="radio" name="size" value="11"><span>11</span></label>
+  </fieldset>
+  <fieldset><legend>Light</legend>
+    <label><input type="radio" name="light" value="dark" checked><span>Shadow</span></label>
+    <label><input type="radio" name="light" value="lit"><span>Under a lamp</span></label>
+  </fieldset>
+  <fieldset><legend>Murmurs</legend>
+    <label><input type="radio" name="murmur" value="off" checked><span>Off</span></label>
+    <label><input type="radio" name="murmur" value="on"><span>On (hover a scene)</span></label>
+  </fieldset>
+  <fieldset><legend>Speed</legend>
+    <label><input type="radio" name="speed" value="1" checked><span>1×</span></label>
+    <label><input type="radio" name="speed" value="0.3"><span>Slow</span></label>
+  </fieldset>
+</div>
+
+<h2>Speech · four ways</h2>
+<p class="lede">The same scene four ways. The script is shorter and half-heard, since he's hiding and dazed: faint words are ones he doesn't quite catch. The guards gesture (a point at the empty machine, a shrug, a point to where the thief went), so the body tells half of it, the way Limbo would.</p>
+<div class="wide" id="speech"></div>
+
+<h2>The ninja</h2>
+<div class="grid" id="ninja"></div>
+
+<h2>The guards</h2>
+<div class="grid" id="guards"></div>
+
+<footer>Game units: a tile is 32 px; the ninja is 18 × 44, a guard about 62 tall. Drawn here at the game's size, scaled up 2.5×. Nothing here changes the game.</footer>
+
+<script>
+(() => {
+  const TAU = Math.PI * 2;
+  const opt = { bubble: "ink", font: "caps", size: 9, light: "dark", speed: 1, murmur: "off" };
+  let actx = null;
+  document.querySelectorAll(".controls input").forEach(i => i.addEventListener("change", () => {
+    opt[i.name] = (i.name === "size" || i.name === "speed") ? +i.value : i.value;
+    if (i.name === "murmur" && i.value === "on" && !actx) { actx = new (window.AudioContext || window.webkitAudioContext)(); }
+  }));
+  const grey = v => `rgb(${v},${v},${v})`;
+  const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+  const lerp = (a, b, t) => a + (b - a) * t;
+
+  // ---- drawing helpers, as in draw_node.gd ----
+  function limb(c, a, b, w, col) {
+    c.strokeStyle = col; c.lineWidth = w; c.lineCap = "round";
+    c.beginPath(); c.moveTo(a[0], a[1]); c.lineTo(b[0], b[1]); c.stroke();
+  }
+  function circle(c, x, y, r, col) { c.fillStyle = col; c.beginPath(); c.arc(x, y, r, 0, TAU); c.fill(); }
+  function rrect(c, x, y, w, h, r, col) { c.fillStyle = col; c.beginPath(); c.roundRect(x, y, w, h, r); c.fill(); }
+  function ellipse(c, x, y, rx, ry, col) { c.fillStyle = col; c.beginPath(); c.ellipse(x, y, rx, ry, 0, 0, TAU); c.fill(); }
+
+  // A leg with a knee: thigh and shin of length seg, knee bent toward facing f.
+  function leg(c, hip, foot, seg, f, w, col) {
+    const dx = foot[0] - hip[0], dy = foot[1] - hip[1];
+    const len = Math.hypot(dx, dy) || 0.0001;
+    const half = Math.min(len / 2, seg * 0.999);
+    let nx = -dy / len, ny = dx / len;
+    if (nx * f < 0) { nx = -nx; ny = -ny; }
+    const h = Math.sqrt(seg * seg - half * half);
+    const knee = [hip[0] + dx / len * half + nx * h, hip[1] + dy / len * half + ny * h];
+    limb(c, hip, knee, w, col); limb(c, knee, foot, w, col);
+  }
+  // The knee rule: standing (bend 0), the leg is exactly hip-to-floor long, so it's straight.
+  // Moving, the segments grow a little, and the knee comes forward mid-stride.
+  const kneeSeg = (L, bend) => L * (0.5 + 0.1 * bend);
+  // A walking leg: swing s (-1..1), the foot lifted while it swings forward.
+  function step(c, hip, by, s, lift, stride, L, bend, f, w, col) {
+    leg(c, hip, [hip[0] + s * stride, by - 1 - lift], kneeSeg(L, bend), f, w, col);
+  }
+
+  // ---- the ninja ----
+  function makeNinja(mode, speed) {
+    return { mode, vx: speed, f: 1, phase: 0, lean: 0, y: 0, vy: 0, t: 0, scarf: null, prev: null, dist: 0 };
+  }
+  function ninjaNeck(n, cx, by, top) {
+    if (n.mode === "cling") return [cx + n.f * 9, top + 11];
+    if (n.mode === "crawl") return [cx + n.f * 9, by - 11];
+    const p = [cx - n.f * 5, by - 39 + n.y];
+    if (Math.abs(n.vx) > 200 && n.y >= 0) {                 // the anime run: the neck goes with the pitched body
+      const hx = cx, hy = by - 15, a = n.lean, dx = p[0] - hx, dy = p[1] - hy;
+      return [hx + dx * Math.cos(a) - dy * Math.sin(a), hy + dx * Math.sin(a) + dy * Math.cos(a)];
+    }
+    return p;
+  }
+  function updateNinja(n, dt, cx, by, top) {
+    n.t += dt;
+    const crawling = n.mode === "crawl" || n.mode === "cling";
+    n.phase += Math.abs(n.vx) * dt * (crawling ? 0.12 : 0.075);
+    n.dist += n.vx * dt;
+    if (n.mode === "jump") {                     // hop in place: up, tuck, land, a beat, again
+      n.vy += 900 * dt; n.y += n.vy * dt;
+      if (n.y >= 0) { n.y = 0; n.vy = 0; if (n.t > 0.6) { n.vy = -240; n.t = 0; } }
+    }
+    const moving = Math.abs(n.vx) > 8 && n.mode !== "jump";
+    const leanTo = (crawling || !moving) ? 0 : n.f * (n.vx > 200 ? 0.62 : 0.06);   // running: the anime lean
+    n.lean += clamp(leanTo - n.lean, -dt * 1.5, dt * 1.5);
+    // the scarf: a little verlet chain blown back by the run
+    const nk = ninjaNeck(n, cx, by, top);
+    if (!n.scarf) { n.scarf = []; n.prev = []; for (let i = 0; i < 7; i++) { n.scarf.push([nk[0] - n.f * i * 5, nk[1]]); n.prev.push([nk[0] - n.f * i * 5, nk[1]]); } }
+    n.scarf[0] = nk;
+    const wind = -n.f * (0.15 + Math.abs(n.vx) * 0.0016);
+    for (let i = 1; i < 7; i++) {
+      const p = n.scarf[i], q = n.prev[i];
+      const vx = (p[0] - q[0]) * 0.92, vy = (p[1] - q[1]) * 0.92;
+      n.prev[i] = [p[0], p[1]];
+      n.scarf[i] = [p[0] + vx + wind, p[1] + vy + 0.12 + Math.sin(n.t * 7 + i) * 0.06];
+    }
+    for (let k = 0; k < 3; k++) for (let i = 1; i < 7; i++) {
+      const a = n.scarf[i - 1], b = n.scarf[i];
+      const dx = b[0] - a[0], dy = b[1] - a[1], d = Math.max(Math.hypot(dx, dy), 0.0001);
+      n.scarf[i] = [b[0] - dx * (d - 5) / d, b[1] - dy * (d - 5) / d];
+    }
+  }
+  function drawNinja(c, n, cx, by, top, vis, time) {
+    const g = Math.round(lerp(6, 215, vis)); const col = grey(g);
+    const f = n.f;
+    const crawling = n.mode === "crawl" || n.mode === "cling";
+    const sw = Math.sin(n.phase) * clamp(Math.abs(n.vx) / (crawling ? 50 : 120), 0, 1);
+    c.strokeStyle = col; c.lineWidth = 3; c.lineJoin = "round"; c.lineCap = "round";
+    c.beginPath(); n.scarf.forEach((p, i) => i ? c.lineTo(p[0], p[1]) : c.moveTo(p[0], p[1])); c.stroke();
+    if (crawling) {
+      c.save();
+      let b = by;
+      if (n.mode === "cling") { const h = 20; b = top + h; c.translate(0, 2 * top + h); c.scale(1, -1); }
+      limb(c, [cx - f * 7, b - 6], [cx - f * (13 - sw * 3), b - 1], 3.5, col);
+      limb(c, [cx - f * 3, b - 6], [cx - f * (6 + sw * 3), b - 1], 3.5, col);
+      limb(c, [cx + f * 7, b - 7], [cx + f * (11 + sw * 3), b - 1], 3.5, col);
+      ellipse(c, cx, b - 8, 12, 5.5, col);
+      circle(c, cx + f * 13, b - 10, 6.5, col);
+      c.restore();
+      const hy = n.mode === "cling" ? top + 10 : by - 10;
+      eyes(c, cx + f * 13, hy, f, time);
+      return;
+    }
+    const y = by + n.y;
+    const dash = Math.abs(n.vx) > 200 && n.y >= 0;          // the anime run: legs under him, the body pitched from the hip
+    const hip = [cx, y - 15];
+    c.save();
+    if (dash) {
+      const amp = 1, s = Math.sin(n.phase);
+      const up = Math.cos(n.phase) * f;
+      const stride = 12;
+      // knees drive high in front; the trailing foot kicks up behind
+      leg(c, hip, [cx + s * stride, y - 1 - Math.max(up, 0) * 8 - Math.max(-up, 0) * 3], kneeSeg(14, 1), f, 4, col);
+      leg(c, hip, [cx - s * stride, y - 1 - Math.max(-up, 0) * 8 - Math.max(up, 0) * 3], kneeSeg(14, 1), f, 4, col);
+      c.translate(hip[0], hip[1]); c.rotate(n.lean); c.translate(-hip[0], -hip[1]);
+      const wob = Math.sin(n.phase * 2) * 1.2;              // arms straight back, a little shake
+      limb(c, [cx, y - 28], [cx - f * 15, y - 24 + wob], 4, col);
+      limb(c, [cx, y - 27], [cx - f * 14, y - 20 - wob], 4, col);
+      rrect(c, cx - 6.5, y - 32, 13, 19, 5, col);
+      circle(c, cx + f * 1.5, y - 38, 7.5, col);
+      eyes(c, cx + f * 1.5, y - 38, f, time);
+      c.restore();
+      return;
+    }
+    c.translate(cx, y); c.rotate(n.lean); c.translate(-cx, -y);
+    if (n.y < 0) {                                       // in the air: knees up
+      leg(c, hip, [cx + f * 6, y - 4], kneeSeg(14, 1), f, 4, col);
+      leg(c, hip, [cx - f * 3, y - 2], kneeSeg(14, 1), f, 4, col);
+      limb(c, [cx, y - 28], [cx + f * 9, y - 36], 4, col);
+      limb(c, [cx, y - 28], [cx - f * 7, y - 34], 4, col);
+    } else {
+      const amp = clamp(Math.abs(n.vx) / 120, 0, 1);
+      const bend = clamp(Math.abs(n.vx) / 260, 0, 1);
+      const up = Math.cos(n.phase) * f * amp * (2 + 4 * bend);
+      const stride = 8 * (1 + 0.25 * bend);
+      step(c, hip, y, sw, Math.max(up, 0), stride, 14, bend, f, 4, col);
+      step(c, hip, y, -sw, Math.max(-up, 0), stride, 14, bend, f, 4, col);
+      limb(c, [cx, y - 28], [cx - sw * 7, y - 17], 4, col);
+      limb(c, [cx, y - 28], [cx + sw * 7, y - 17], 4, col);
+    }
+    rrect(c, cx - 6.5, y - 32, 13, 19, 5, col);
+    circle(c, cx + f * 1.5, y - 38, 7.5, col);
+    eyes(c, cx + f * 1.5, y - 38, f, time);
+    c.restore();
+  }
+  function eyes(c, hx, hy, f, time) {
+    if (time % 4.3 < 0.12) return;                       // blink
+    for (const [ox, oy, r] of [[f * 2.5, -1.5, 1.7], [f * 5.8, -1.8, 1.5]]) {
+      circle(c, hx + ox, hy + oy, r + 2.5, "rgba(255,255,255,0.25)");
+      circle(c, hx + ox, hy + oy, r, "#fff");
+    }
+  }
+
+  // ---- a guard ----
+  function makeGuard(mode, speed, f = 1) { return { mode, v: speed, f, phase: 0, dist: 0, aim: mode === "talk" ? 0.9 : 0.15, t: 0, gest: "none", gk: 0, gx: 0, nod: 0 }; }
+  function updateGuard(g, dt) {
+    g.t += dt;
+    g.phase += g.v * dt * 0.08; g.dist += g.v * dt;
+    if (g.mode === "search") { g.aim = 0.1 + Math.sin(g.t * 2.2) * 0.35; g.f = Math.floor(g.t / 1.3) % 2 ? -1 : 1; }
+  }
+  function torchPos(g, x, by) { return [x + g.f * 14, by - 32]; }
+  function torchDir(g) { return g.f > 0 ? g.aim : Math.PI - g.aim; }
+  function drawCone(c, g, x, by, lit) {
+    if (g.mode === "asleep") return;
+    const p = torchPos(g, x, by), d = torchDir(g), r = 150, s = 0.32;
+    const grd = c.createRadialGradient(p[0], p[1], 4, p[0], p[1], r);
+    grd.addColorStop(0, `rgba(255,255,255,${lit ? 0.35 : 0.5})`); grd.addColorStop(1, "rgba(255,255,255,0)");
+    c.fillStyle = grd; c.beginPath(); c.moveTo(p[0], p[1]); c.arc(p[0], p[1], r, d - s, d + s); c.closePath(); c.fill();
+  }
+  function drawGuard(c, g, x, by) {
+    const col = grey(0x12), f = g.f;
+    if (g.mode === "asleep") {
+      rrect(c, x - 24, by - 13, 34, 13, 5, col); circle(c, x + 17, by - 8, 8, col);
+      limb(c, [x - 22, by - 6], [x - 42, by - 3], 5, col);
+      c.fillStyle = col; c.fillRect(x + 30, by - 5, 18, 5); c.fillRect(x - 6, by - 6, 14, 6);
+      return;
+    }
+    const amp = clamp(g.v / 50, 0, 1);
+    const bend = clamp(g.v / 115, 0, 1);
+    const hip = [x, by - 20];
+    const s = Math.sin(g.phase) * amp;
+    const up = Math.cos(g.phase) * f * amp * (3 + 4 * bend);
+    const stride = 9 * (1 + 0.3 * clamp((g.v - 55) / 60, 0, 1));
+    step(c, hip, by, s, Math.max(up, 0), stride, 19, bend, f, 5, col);
+    step(c, hip, by, -s, Math.max(-up, 0), stride, 19, bend, f, 5, col);
+    // the free arm (the far side): hangs, or points / shrugs, blended in by gk (0..1)
+    const sh = [x - f * 2, by - 42];
+    let hand = [x - f * 3, by - 23], elbow = [x - f * 3, by - 32];
+    if (g.gk > 0) {
+      let e2, h2;
+      if (g.gest === "point") {                          // arm straight out toward gx, a touch above level
+        const d = Math.sign(g.gx - x) || -f;
+        e2 = [sh[0] + d * 9, sh[1] - 1]; h2 = [sh[0] + d * 19, sh[1] - 3];
+      } else {                                           // shrug: forearm up, palm out
+        e2 = [x - f * 8, by - 33]; h2 = [x - f * 12, by - 42];
+      }
+      elbow = [lerp(elbow[0], e2[0], g.gk), lerp(elbow[1], e2[1], g.gk)];
+      hand = [lerp(hand[0], h2[0], g.gk), lerp(hand[1], h2[1], g.gk)];
+    }
+    limb(c, sh, elbow, 4.5, col); limb(c, elbow, hand, 4.5, col);
+    rrect(c, x - 9, by - 46, 18, 28, 5, col);
+    const shrugUp = g.gest === "shrug" ? g.gk * 2 : 0;     // shoulders up, head down a little
+    const ny = g.nod - shrugUp * 0.5;
+    circle(c, x + f, by - 53 + ny, 8, col);
+    c.fillStyle = col; c.fillRect(x - 9 + f * 2, by - 62 + ny, 18, 5);
+    c.fillRect(f > 0 ? x + 6 : x - 16, by - 59 + ny, 10, 2.5);
+    const tp = torchPos(g, x, by);
+    limb(c, [x + f * 3, by - 41], tp, 4.5, col);
+    c.save(); c.translate(tp[0], tp[1]); c.rotate(torchDir(g)); c.fillRect(-10, -3.5, 12, 7); c.restore();
+  }
+
+  // ---- the stage: wall, floor, a lamp when lit, ticks that scroll with the treadmill ----
+  function stage(c, w, h, floorY, dist, duct) {
+    const lit = opt.light === "lit";
+    c.fillStyle = lit ? "#5a5a5c" : "#1e1e20"; c.fillRect(0, 0, w, h);
+    for (let x = 18; x < w; x += 70) { c.fillStyle = lit ? "#4c4c4e" : "#19191b"; c.fillRect(x, 0, 6, floorY); }
+    if (lit) {
+      const grd = c.createRadialGradient(w / 2, 0, 10, w / 2, 0, h * 1.25);
+      grd.addColorStop(0, "rgba(255,255,255,0.95)"); grd.addColorStop(1, "rgba(255,255,255,0.15)");
+      c.fillStyle = grd; c.beginPath(); c.moveTo(w / 2, 0); c.lineTo(w / 2 - h * 0.7, floorY); c.lineTo(w / 2 + h * 0.7, floorY); c.closePath(); c.fill();
+    }
+    c.fillStyle = "#08080a"; c.fillRect(0, floorY, w, h - floorY);
+    c.fillStyle = "#18181a";
+    const off = ((-dist % 40) + 40) % 40;
+    for (let x = off - 40; x < w; x += 40) c.fillRect(x, floorY + 4, 14, 2);
+    if (duct) {
+      c.fillStyle = "#0e0e10"; c.fillRect(0, duct, w, 12);
+      c.fillStyle = "#262628";
+      for (let x = off - 40; x < w; x += 40) c.fillRect(x, duct + 4, 2, 4);
+    }
+  }
+
+  // ---- speech bubbles ----
+  function bubbleFont() {
+    const s = opt.size;
+    if (opt.font === "caps") return { css: `bold ${s - 0.5}px Georgia, "Times New Roman", serif`, upper: true, spacing: "0.6px" };
+    if (opt.font === "italic") return { css: `italic ${s + 1}px Georgia, "Times New Roman", serif`, upper: false, spacing: "0px" };
+    return { css: `${s + 0.5}px Georgia, "Times New Roman", serif`, upper: false, spacing: "0.2px" };
+  }
+  function wrap(c, text, maxW) {
+    const words = text.split(" "), lines = []; let cur = "";
+    for (const w of words) {
+      const t = cur ? cur + " " + w : w;
+      if (c.measureText(t).width > maxW && cur) { lines.push(cur); cur = w; } else cur = t;
+    }
+    if (cur) lines.push(cur);
+    return lines;
+  }
+  // ---- cards ----
+  const SCALE = 2.5;
+  const cards = [];
+  function card(parent, title, note, w, h, draw) {
+    const el = document.createElement("div"); el.className = "card";
+    const cv = document.createElement("canvas"); cv.dataset.w = w; cv.dataset.h = h;
+    const cap = document.createElement("div"); cap.className = "cap"; cap.innerHTML = `${title} <i>${note}</i>`;
+    el.append(cv, cap); parent.append(el);
+    cards.push({ cv, w, h, draw });
+  }
+  function setup(cv, w, h) {
+    const dpr = window.devicePixelRatio || 1;
+    cv.width = Math.round(w * SCALE * dpr); cv.height = Math.round(h * SCALE * dpr);
+    const c = cv.getContext("2d"); c.setTransform(SCALE * dpr, 0, 0, SCALE * dpr, 0, 0);
+    return c;
+  }
+
+  const N = document.getElementById("ninja"), G = document.getElementById("guards");
+  const W = 120, H = 92, FY = 76;
+  const nCard = (title, note, mode, speed, vis = 0) => {
+    const n = makeNinja(mode, speed);
+    card(N, title, note, W, H, (c, dt, time) => {
+      const top = 26, duct = mode === "cling" ? top - 12 : null;
+      updateNinja(n, dt, W / 2, FY, top);
+      stage(c, W, H, FY, n.dist, duct);
+      const v = opt.light === "lit" && mode !== "cling" ? 0.55 : vis;
+      drawNinja(c, n, W / 2, FY, top, v, time);
+    });
+  };
+  nCard("Standing", "legs straight", "stand", 0);
+  nCard("Sneaking", "walk 140 px/s", "walk", 140);
+  nCard("Running", "260 px/s · the anime run", "run", 260);
+  nCard("Jumping", "knees tucked", "jump", 0);
+  nCard("Crawling", "70 px/s", "crawl", 70);
+  nCard("Clinging", "to a duct · 80 px/s", "cling", 80);
+
+  const gCard = (title, note, mode, speed) => {
+    const g = makeGuard(mode, speed);
+    card(G, title, note, W, H, (c, dt) => {
+      updateGuard(g, dt);
+      stage(c, W, H, FY, g.dist, null);
+      drawCone(c, g, W / 2, FY, opt.light === "lit");
+      drawGuard(c, g, W / 2, FY);
+    });
+  };
+  gCard("Standing", "legs straight", "stand", 0);
+  gCard("Patrolling", "walk 55 px/s", "walk", 55);
+  gCard("Investigating", "85 px/s", "walk", 85);
+  gCard("Chasing", "115 px/s", "run", 115);
+  gCard("Searching", "turns, sweeps the torch", "search", 0);
+  gCard("Asleep", "after a takedown", "asleep", 0);
+
+  // ---- speech: one script, four treatments ----
+  // [speaker, line, gesture]; ~words~ are the ones he half-hears (drawn faint).
+  const SCRIPT = [
+    [0, "what happened?", "point"],
+    [1, "someone ~got in and~ took the formula.", "none"],
+    [1, "it has a countermeasure... ~it~ sprays a chemical.", "none"],
+    [0, "and?", "shrug"],
+    [1, "the thief loses his memory. ~maybe for a while.~", "none"],
+    [1, "maybe for good.", "none"],
+    [0, "then he can't be far.", "pointOn"],
+  ];
+  const lineDur = l => 1.4 + 0.05 * l.replace(/~/g, "").length;
+  const GAP = 0.7;
+  function tokens(line) {                              // [{w, m}] with m = muffled
+    let m = false; const out = [];
+    for (let w of line.split(" ")) {
+      const open = w.startsWith("~"), close = w.endsWith("~");
+      if (open) m = true;
+      out.push({ w: w.replace(/~/g, ""), m });
+      if (close) m = false;
+    }
+    return out;
+  }
+  // lay tokens out in lines no wider than maxW; returns [{toks, w}]
+  function layout(c, toks, maxW) {
+    const sp = c.measureText(" ").width, lines = []; let cur = [], cw = 0;
+    for (const t of toks) {
+      const tw = c.measureText(t.w).width;
+      if (cur.length && cw + sp + tw > maxW) { lines.push({ toks: cur, w: cw }); cur = []; cw = 0; }
+      cw += (cur.length ? sp : 0) + tw; cur.push({ ...t, tw });
+    }
+    if (cur.length) lines.push({ toks: cur, w: cw });
+    return lines;
+  }
+  function drawLine(c, ln, cx, y, full, faint) {
+    const sp = c.measureText(" ").width;
+    let x = cx - ln.w / 2;
+    c.textAlign = "left";
+    for (const t of ln.toks) { c.fillStyle = t.m ? faint : full; c.fillText(t.w, x, y); x += t.tw + sp; }
+  }
+  const SERIF = 'Georgia, "Times New Roman", serif';
+
+  // A. the title card: Limbo's one line of text lives in the dark. Here it sits in the letterbox bar under the speaker.
+  // The words drift: each one rises into place a beat after the last and fades in; at the end they lift away together.
+  function sayCard(c, sc, toks, who, a, t) {
+    const g = sc.xs[who];
+    c.save();
+    c.font = `8px ${SERIF}`; c.letterSpacing = "2px"; c.textBaseline = "middle";
+    const up = toks.map(t => ({ ...t, w: t.w.toUpperCase() }));
+    const ln = layout(c, up, 400)[0];
+    const cx = clamp(g, ln.w / 2 + 12, sc.W - ln.w / 2 - 12);
+    const ss = (e0, e1, x) => { const k = clamp((x - e0) / (e1 - e0), 0, 1); return k * k * (3 - 2 * k); };
+    const out = ss(sc.dur + GAP * 0.6 - 0.45, sc.dur + GAP * 0.6, t);     // 0 -> 1 as the line leaves
+    const sp = c.measureText(" ").width;
+    let x = cx - ln.w / 2;
+    c.textAlign = "left";
+    ln.toks.forEach((tk, i) => {
+      const k = ss(i * 0.11, i * 0.11 + 0.5, t);                           // this word's arrival
+      c.globalAlpha = k * (1 - out);
+      c.fillStyle = tk.m ? "#3c3c3e" : "#9a9a9a";
+      c.fillText(tk.w, x, sc.H - sc.bar / 2 + (1 - k) * 5 - out * 4);
+      x += tk.tw + sp;
+    });
+    c.globalAlpha = a;
+    // a hairline up from the bar toward the speaker, so you know who
+    c.globalAlpha = a * 0.5; c.fillStyle = "#555"; c.fillRect(g - 0.5, sc.H - sc.bar - 6, 1, 4);
+    c.restore();
+  }
+  // B. a cut-out: the bubble is made of the same ink as the guards, so it reads as part of the silhouette.
+  function sayCutout(c, sc, toks, who, a) {
+    const hx = sc.xs[who] + sc.pair[who].f * 2, hy = sc.FY - 64;
+    c.save(); c.globalAlpha = a;
+    c.font = `bold 7.5px ${SERIF}`; c.letterSpacing = "1.2px"; c.textBaseline = "middle";
+    const up = toks.map(t => ({ ...t, w: t.w.toUpperCase() }));
+    const lines = layout(c, up, 130), lh = 11;
+    const bw = Math.max(...lines.map(l => l.w)) + 16, bh = lines.length * lh + 10, tail = 10;
+    const bx = clamp(hx - bw / 2 + (who ? -14 : 14), 4, sc.W - bw - 4), by = hy - tail - bh;
+    const tx = clamp(hx + (who ? -8 : 8), bx + 10, bx + bw - 10);
+    c.beginPath(); c.roundRect(bx, by, bw, bh, bh / 2);
+    c.moveTo(tx - 5, by + bh - 1); c.quadraticCurveTo(tx, by + bh + tail * 0.5, hx, hy - 1); c.quadraticCurveTo(tx + 2, by + bh + 2, tx + 5, by + bh - 1);
+    c.fillStyle = "#121214"; c.fill();
+    lines.forEach((l, i) => drawLine(c, l, bx + bw / 2, by + 5 + lh * i + lh / 2 + 0.5, "#a3a3a3", "#454547"));
+    c.restore();
+  }
+  // C. overheard: no bubble, words drift up near the head and fade, like the hints on the walls (his mind catching them).
+  function sayOverheard(c, sc, toks, who, a, t) {
+    const hx = sc.xs[who] + (who ? 14 : -14), hy = sc.FY - 72 - t * 3;
+    c.save(); c.globalAlpha = a;
+    c.font = `italic 9.5px ${SERIF}`; c.letterSpacing = "0.3px"; c.textBaseline = "middle";
+    c.shadowColor = "rgba(0,0,0,0.7)"; c.shadowBlur = 6;
+    const lines = layout(c, toks, 150);
+    lines.forEach((l, i) => drawLine(c, l, clamp(hx, l.w / 2 + 8, sc.W - l.w / 2 - 8), hy + i * 12 - (lines.length - 1) * 12, "rgba(205,205,205,0.85)", "rgba(205,205,205,0.25)"));
+    c.restore();
+  }
+  // D. the grey comic bubble (top controls: style, lettering, size), now with the faint words.
+  function sayBubble(c, sc, toks, who, a) {
+    const fnt = bubbleFont();
+    const hx = sc.xs[who] + sc.pair[who].f * 2, hy = sc.FY - 64;
+    c.save(); c.globalAlpha = a;
+    c.font = fnt.css; c.letterSpacing = fnt.spacing; c.textBaseline = "middle";
+    const tk = toks.map(t => ({ ...t, w: fnt.upper ? t.w.toUpperCase() : t.w }));
+    const lines = layout(c, tk, 150), lh = opt.size + 3;
+    const bw = Math.max(...lines.map(l => l.w)) + 18, bh = lines.length * lh + 12, tail = 12;
+    const bx = clamp(hx - bw / 2 + (who ? -18 : 18), 4, sc.W - bw - 4), by = hy - tail - bh;
+    const tx = clamp(hx + (who ? -10 : 10), bx + 12, bx + bw - 12);
+    const st = opt.bubble;
+    const fill = st === "ink" ? "#a7a7a7" : st === "paper" ? "#858585" : "rgba(14,14,15,0.92)";
+    const edge = st === "night" ? "#9a9a9a" : "#0c0c0c";
+    const inkc = st === "night" ? "#d8d8d8" : "#050505", faint = st === "night" ? "#5a5a5a" : "#5f5f5f";
+    const path = () => { c.beginPath(); c.roundRect(bx, by, bw, bh, 7); c.moveTo(tx - 6, by + bh - 1); c.lineTo(hx + (hx < tx ? 2 : -2), hy - 3); c.lineTo(tx + 5, by + bh - 1); c.closePath(); };
+    path(); c.strokeStyle = edge; c.lineWidth = st === "night" ? 2 : 3; c.lineJoin = "round"; c.stroke();
+    path(); c.fillStyle = fill; c.fill();
+    lines.forEach((l, i) => drawLine(c, l, bx + bw / 2, by + 6 + lh * i + lh / 2 + 0.5, inkc, faint));
+    c.restore();
+  }
+
+  // murmurs: a soft, muffled mumble per syllable, a different pitch for each guard (WebAudio, off by default)
+  function murmur(text, who) {
+    if (opt.murmur !== "on") return;
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === "suspended") actx.resume();
+    const base = who ? 118 : 150;
+    let t = actx.currentTime + 0.05;
+    for (const tok of tokens(text)) {
+      const syl = Math.max(1, Math.round(tok.w.replace(/[^a-z]/gi, "").length / 3));
+      for (let k = 0; k < syl; k++) {
+        const o = actx.createOscillator(), f = actx.createBiquadFilter(), g = actx.createGain();
+        o.type = "sawtooth"; o.frequency.value = base * (0.88 + Math.random() * 0.3);
+        o.frequency.linearRampToValueAtTime(o.frequency.value * 0.92, t + 0.11);
+        f.type = "lowpass"; f.frequency.value = tok.m ? 380 : 650; f.Q.value = 3;
+        const v = tok.m ? 0.02 : 0.045;
+        g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(v, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0005, t + 0.12);
+        o.connect(f); f.connect(g); g.connect(actx.destination);
+        o.start(t); o.stop(t + 0.14);
+        t += 0.1 + Math.random() * 0.03;
+      }
+      t += 0.06;
+    }
+  }
+
+  const SPEECH = document.getElementById("speech");
+  function speechScene(title, note, say, bar = 14) {
+    const el = document.createElement("div"); el.className = "card";
+    const cv = document.createElement("canvas");
+    const cap = document.createElement("div"); cap.className = "cap"; cap.innerHTML = `${title} <i>${note}</i>`;
+    el.append(cv, cap); SPEECH.append(el);
+    let hover = false;
+    el.addEventListener("mouseenter", () => hover = true); el.addEventListener("mouseleave", () => hover = false);
+    const sc = { W: 480, H: 190, FY: 160, bar, xs: [480 / 2 + 40, 480 / 2 + 136],
+      pair: [makeGuard("talk", 0, 1), makeGuard("talk", 0, -1)], hidden: makeNinja("crawl", 0), line: 0, t: 0, said: -1 };
+    cards.push({ cv, w: sc.W, h: sc.H, draw: (c, dt, time) => {
+      sc.t += dt;
+      const [who, text, gest] = SCRIPT[sc.line];
+      const dur = lineDur(text);
+      sc.dur = dur;
+      if (sc.said !== sc.line) { sc.said = sc.line; if (hover) murmur(text, who); }
+      if (sc.t > dur + GAP) { sc.line = (sc.line + 1) % SCRIPT.length; sc.t = 0; }
+      // gestures and the speaking nod
+      sc.pair.forEach((g, i) => {
+        const mine = i === who && gest !== "none";
+        if (mine) { g.gest = gest === "pointOn" ? "point" : gest; g.gx = gest === "point" ? 0 : sc.W; }
+        g.gk = clamp(g.gk + (mine && sc.t < dur ? dt * 5 : -dt * 3), 0, 1);
+        g.nod = i === who && sc.t < dur ? Math.max(0, Math.sin(sc.t * 11)) * 0.8 : 0;
+      });
+      stage(c, sc.W, sc.H, sc.FY, 0, null);
+      // the machine, the empty slot, the bench he's behind
+      c.fillStyle = "#0c0c0e"; c.fillRect(20, sc.FY - 70, 46, 70); c.fillStyle = "#151517"; c.fillRect(26, sc.FY - 62, 34, 40);
+      sc.pair.forEach((g, i) => drawCone(c, g, sc.xs[i], sc.FY, opt.light === "lit"));
+      updateNinja(sc.hidden, dt, 110, sc.FY, 0);
+      drawNinja(c, sc.hidden, 110, sc.FY, 0, 0, time);
+      c.fillStyle = "#0b0b0d"; c.fillRect(88, sc.FY - 22, 64, 22); c.fillRect(92, sc.FY - 26, 56, 4);
+      sc.pair.forEach((g, i) => drawGuard(c, g, sc.xs[i], sc.FY));
+      c.fillStyle = "#000"; c.fillRect(0, 0, sc.W, sc.bar); c.fillRect(0, sc.H - sc.bar, sc.W, sc.bar);   // letterbox
+      const a = clamp(sc.t / 0.25, 0, 1) * clamp((dur + GAP * 0.6 - sc.t) / 0.35, 0, 1);
+      if (a > 0) say(c, sc, tokens(text), who, a, sc.t);
+    } });
+  }
+  speechScene("A · The title card, drifting", "the line sits in the letterbox bar under whoever's speaking, small spaced caps; each word drifts up into place and fades in, and the line lifts away at the end.", sayCard, 24);
+  speechScene("B · Cut-out bubble", "the bubble is the same black ink as the guards, part of their silhouette; grey caps inside.", sayCutout);
+  speechScene("C · Overheard", "no bubble: soft italic words drift up by the speaker and fade, like the hints on the walls.", sayOverheard);
+  speechScene("D · Grey bubble", "the comic bubble from before (style, lettering and size above), with the faint words.", sayBubble);
+
+  // ---- run ----
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000) * opt.speed; last = now;
+    const time = now / 1000;
+    for (const k of cards) {
+      if (!k.c || k.dpr !== (window.devicePixelRatio || 1)) { k.c = setup(k.cv, k.w, k.h); k.dpr = window.devicePixelRatio || 1; }
+      k.draw(k.c, dt, time);
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
