@@ -14,6 +14,9 @@
   godot/audio/rattle.wav         a locked door's handle rattling: a few dull metal knocks
   godot/audio/siren.wav          the alarm (loops): a muffled two-tone wail, as if from the next room
   godot/audio/panel.wav          a stone through the alarm panel: a crack and a dying electric buzz
+  godot/audio/scrape.wav         a desk dragged a little way: legs juddering on the floor (Floor 5 on)
+  godot/audio/thud*.wav          a blow landing (Floor 6 on): thud, thud_small (one of several hits), thud_big (a special)
+  godot/audio/shout.wav          a watcher landing a punch: a gruff, muffled shout that carries
 
 Both versions of the game play these files (the HTML one from godot/audio/). Everything here is
 synthesised with numpy, so the music is original and easy to change: edit, run, replay.
@@ -281,6 +284,34 @@ def star_tink():                                         # a star biting into a 
     x += lowpass(rng.standard_normal(n), 3000) * np.exp(-tt / 0.008)
     return reverb(x, 0.4, 0.15)
 
+def desk_scrape():                                       # a desk dragged a little way: wooden legs juddering on the floor
+    n = int(0.42 * SR)
+    tt = np.arange(n) / SR
+    env = np.sin(np.pi * np.clip(tt / 0.36, 0, 1)) ** 1.5
+    judder = 0.6 + 0.4 * np.sign(np.sin(2 * np.pi * 23 * tt))          # stick-slip: the legs catch and let go
+    grit = lowpass(rng.standard_normal(n), 900) - 0.5 * lowpass(rng.standard_normal(n), 160)
+    groan = np.sin(2 * np.pi * (140 + 25 * tt) * tt) * 0.25            # a low creak in the wood
+    return reverb((grit + groan) * judder * env, 0.6, 0.18)
+
+def thud(f0=150, f1=52, dur=0.16, crack=0.5):            # a blow landing: a body-thump (a pitch drop) and a puff of cloth
+    n = int((dur + 0.15) * SR)
+    tt = np.arange(n) / SR
+    f = f1 + (f0 - f1) * np.exp(-tt / (dur * 0.35))
+    body = np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-tt / (dur * 0.45))
+    puff = lowpass(rng.standard_normal(n), 1100) * np.exp(-tt / 0.018) * crack
+    return reverb(body + puff, 0.35, 0.12)
+
+def shout():                                             # a watcher's punch lands: a gruff "hey!" through a wall
+    n = int(0.5 * SR)
+    tt = np.arange(n) / SR
+    f = 150 * (1 + 0.25 * np.exp(-tt / 0.05)) * (1 - 0.15 * tt)
+    ph = np.cumsum(f) / SR
+    voice = 2 * (ph % 1) - 1                                       # a sawtooth: the throat
+    x = lowpass(voice, 900) - 0.6 * lowpass(voice, 350)            # roughly an "eh" - mid formants
+    x += 0.35 * lowpass(rng.standard_normal(n), 2000) * np.exp(-tt / 0.03)   # the h
+    env = np.clip(tt / 0.03, 0, 1) * np.exp(-np.clip(tt - 0.18, 0, None) / 0.06)
+    return reverb(lowpass(x * env, 1600), 0.8, 0.25)
+
 if __name__ == '__main__':
     root = os.path.join(os.path.dirname(__file__), '..', 'godot', 'audio')
     base = reverb(0.55 * pad() + 0.22 * drone() + 0.30 * plucks(), 2.8, 0.4) + 0.32 * pulse()
@@ -297,3 +328,8 @@ if __name__ == '__main__':
     write(os.path.join(root, 'whoosh.wav'), star_whoosh(), 0.55)
     write(os.path.join(root, 'glass.wav'), glass_break(), 0.8)
     write(os.path.join(root, 'tink.wav'), star_tink(), 0.6)
+    write(os.path.join(root, 'scrape.wav'), desk_scrape(), 0.6)
+    write(os.path.join(root, 'thud.wav'), thud(), 0.75)
+    write(os.path.join(root, 'thud_small.wav'), thud(200, 85, 0.09, 0.35), 0.5)
+    write(os.path.join(root, 'thud_big.wav'), thud(120, 36, 0.28, 0.8), 0.9)
+    write(os.path.join(root, 'shout.wav'), shout(), 0.6)

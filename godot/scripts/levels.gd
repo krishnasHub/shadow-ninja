@@ -7,22 +7,29 @@ extends RefCounted
 ##   props:  [type, x, row]  - row is the tile row the prop stands on (15 = the main floor)
 ##   hints:  [x, y_px, text]  - faint words painted on the back wall
 ##   lights: lamp (ceiling unless y given), moon (through a skylight gap), sign, camera (sweeps)
-##   guards: x start, patrol from/to, walkable bounds min_x/max_x, row they stand on
+##   guards: x start, patrol from/to, walkable bounds min_x/max_x, row they stand on;
+##           kind "watcher": no torch, sees you in the dark only up close, can't be dropped on - you fight
+##           him (once "fight" is remembered) - and finds the guards you leave asleep (the alarm goes up)
 ##   exit:   the door's tile x; reaching it clears the floor (exit_row: the row it stands on, default 15)
 ##   height: rows (default 17). The floor is always the bottom 2 rows; taller floors scroll vertically.
 ##   doors:  [x, y, w, h] locked doors (solid);  switches: {x, row, door} - walk up to one and the
 ##           ninja pulls it, which opens doors[door]. He reaches it from TUNE.lever_reach px either side,
 ##           so keep a lever within that of any wall (no spot to stand next to it out of reach).
 ##           Stairs are just 1-tile steps: walking climbs them.
-##   panels: [x, row] alarm panels on the wall. A camera that spots you raises the alarm; a stone
-##           through a panel kills it (floors with a camera should have one).
+##   panels: [x, row] alarm panels on the wall. A camera that spots you raises the alarm; a star
+##           through a panel kills it. Only on floors after the stars come back (before that there's
+##           nothing to throw, and an alarm just means: get out, or sit out the lockdown).
 ##   hints:  an optional 4th string is the controller version.
-##   remember: what clearing this floor brings back - {abilities: [...], scarf: 0..1, colors: [...], lines: [2 lines]}.
-##           scarf: how far up the scarf the dark red has climbed (seen only in shadow). The plan: 0.25 after
+##   remember: what clearing this floor brings back - {abilities: [...], scarf: 0..1, colors: [...], say: [lines]}.
+##           say: what he says in the recall that opens the next floor - only when there are abilities
+##           (first person; ~words~ are faint, half-remembered). An ability in main.gd's GIFTS (the stars)
+##           also flashes its icon in. With no abilities, the first two lines show on the end screen.
+##           scarf: how far up the scarf the dark red has climbed (seen only in shadow). Never named in any
+##           text - not in say lines, hints or screens: players should just notice it (user's call). The plan: 0.25 after
 ##           Floor 3 (the tip), 0.45, 0.65, 0.85, then 1.0 (all of it, a full dark red) with colors: ["mark"],
-##           the Evil Co mark on his chest, in grey. A memory with scarf or colors shows its end-screen line in red.
+##           the Evil Co mark on his chest, in grey.
 ##           A floor's abilities are everything remembered on the floors before it ("cling", "takedown",
-##           "stars").
+##           "stars", "push", "fight").
 ##   intro:  the opening scene (Floor 1): {hide: seconds before the guards come, talk: [[guard, line], ...]}.
 ##           Guards with intro_to wait off to the side, run in to that x, talk, then walk to their rounds.
 
@@ -31,7 +38,7 @@ const LEVELS := [
 		"name": "FLOOR 1", "subtitle": "the lab",
 		"width": 80,
 		# the vial machine against the left wall, a bench right beside it to hide behind; then the basics:
-		# lamps and cover, two guards (the ones from the opening), a stone lure, pipes to crawl under, crates
+		# lamps and cover, two guards (the ones from the opening), pipes to crawl under, crates
 		"solids": [[52, 2, 4, 12], [59, 13, 2, 2], [62, 11, 2, 4]],
 		"holes": [],
 		"ducts": [],
@@ -42,8 +49,6 @@ const LEVELS := [
 				"stick  run (loud)      hold LT  sneak (silent)      A  jump"],
 			[14.0, 220, "light fills the meter.  ↓ behind furniture hides you."],
 			[28.0, 190, "a guard sees what his torch sees. stay out of the beam."],
-			[35.0, 255, "CTRL: throw mode. aim with the mouse, click to throw. the clack pulls guards to it.",
-				"hold RT, aim with the right stick, let go to throw. the clack pulls guards to it."],
 			[50.0, 260, "↓  crawl - under the pipes"],
 			[58.0, 200, "up and over."],
 			[70.0, 190, "the way down. keep going."],
@@ -76,9 +81,10 @@ const LEVELS := [
 				[0, "then he can't be far.", "ahead"],
 			],
 		},
-		"remember": {"abilities": ["cling", "takedown"], "lines": [
-			"you remember...  the ceiling holds you.  and a guard sleeps if you land on him.",
-			"jump into a duct to cling.   land on a guard from behind to put him to sleep."]},
+		"remember": {"abilities": ["cling", "takedown"], "say": [
+			"wait...  my hands know this.",
+			"the ceiling holds me.  ~it always did.~",
+			"and a guard sleeps  ~if I land on him.~"]},
 		"spawn": [3, 15], "exit": 77,
 	},
 	{
@@ -94,13 +100,12 @@ const LEVELS := [
 			[2.5, 170, "floor 2. the offices. your body remembers more than you do."],
 			[17.5, 300, "jump into the duct to cling.  ← → shimmy,  ↓ drop."],
 			[24.0, 170, "↓  crawl - the dark is under the walkway"],
-			[33.0, 260, "CTRL: throw mode. aim with the mouse, click to throw. the clack pulls guards to it.",
-				"hold RT, aim with the right stick, let go to throw. the clack pulls guards to it."],
+			[33.0, 260, "running is loud. let a guard hear you - then be somewhere else."],
 			[43.0, 170, "moonlight is weaker. it is still light."],
 			[38.5, 215, "guards: hide before the torch finds you. if he sees you duck, he knows where."],
 			[56.0, 255, "jump on a guard from behind - or drop from a duct - to put him to sleep."],
 			[64.0, 170, "some lights blink. count."],
-			[75.0, 200, "a camera. it can't be put to sleep - but a stone through its alarm panel kills the alarm."],
+			[75.0, 200, "a camera. if it sees you, the alarm goes up. be gone before it ends."],
 			[85.0, 170, "↓  through the vent"],
 		],
 		"lights": [
@@ -115,10 +120,9 @@ const LEVELS := [
 			{"x": 50, "from": 45, "to": 58, "min_x": 38, "max_x": 74, "row": 15},
 			{"x": 70, "from": 63, "to": 72, "min_x": 38, "max_x": 74, "row": 15},
 		],
-		"panels": [[84.5, 12]],                     # on the raised floor, a throw from behind the plant at 80
-		"remember": {"lines": [
-			"a corridor like this one...  you have walked it before.",
-			"you weren't lost in this tower. you were sent."]},
+		"remember": {"say": [
+			"this corridor...  I've walked it before.",
+			"I wasn't lost in this tower.  ~I was sent.~"]},
 		"spawn": [3, 15], "exit": 96,
 	},
 	{
@@ -168,10 +172,9 @@ const LEVELS := [
 			{"x": 75, "from": 64, "to": 90, "min_x": 61, "max_x": 95, "row": 24},
 			{"x": 60, "from": 44, "to": 88, "min_x": 40, "max_x": 95, "row": 12},      # upstairs, in the server room
 		],
-		"panels": [[83.5, 12]],                     # upstairs, in reach from behind the rack at 78
-		"remember": {"scarf": 0.25, "abilities": ["stars"], "lines": [
-			"your scarf.  red.  it was always red.",
-			"and a weight in your hand.  steel.  four points."]},
+		"remember": {"scarf": 0.25, "abilities": ["stars"], "say": [
+			"and a weight in my sleeve...  steel.  four points.",
+			"it's coming back."]},
 		"spawn": [3, 24], "exit": 95, "exit_row": 24,
 	},
 	{
@@ -190,8 +193,8 @@ const LEVELS := [
 			["desk", 108, 15], ["plant", 113, 15]],
 		"hints": [
 			[2.5, 170, "floor 4 - security. tighter, and watched."],
-			[7.5, 205, "Q  stone or star.  a star flies straight - through a lamp, or a camera's eye.",
-				"X  stone or star.  a star flies straight - through a lamp, or a camera's eye."],
+			[7.5, 205, "CTRL  a star flies straight - through a lamp, a camera's eye, an alarm panel.",
+				"hold RT  a star flies straight - through a lamp, a camera's eye, an alarm panel."],
 			[7.5, 240, "glass is loud. whoever hears it comes to look."],
 			[19.5, 210, "cubicles: desk to desk, low and quiet."],
 			[46.5, 170, "up on the catwalk, or down beneath it?"],
@@ -215,7 +218,97 @@ const LEVELS := [
 			{"x": 64, "from": 54, "to": 73, "min_x": 52, "max_x": 105, "row": 15},
 			{"x": 102, "from": 97, "to": 108, "min_x": 52, "max_x": 115, "row": 15},
 		],
-		"panels": [[88.5, 15]],                     # a stone from behind the cooler at 81 reaches it
+		"panels": [[88.5, 15]],                     # a star from behind the cooler at 81 reaches it
+		"remember": {"scarf": 0.45, "abilities": ["push"], "say": [
+			"my hands on the edge of a desk...  ~dragging it through the dark.~",
+			"cover is only cover where you put it."]},
 		"spawn": [3, 15], "exit": 116,
+	},
+	{
+		"name": "FLOOR 5", "subtitle": "the open plan",
+		# moving desks, made to matter: cameras can't be put to sleep, and there's one star for four of them.
+		# 1: a camera over an empty bay - nothing sees you at the start, but to pass it, bring the desk
+		#    (push, duck, push). Running it fills the meter; blind it with the star and you might just make it.
+		# 2: a wall too high to jump - push the desk against it and stand on it (and a camera on you while you do).
+		# 3: a hall under two cameras with a guard below - two desks, push one, then the other.
+		"width": 96,
+		"stars": 1,
+		"solids": [[52, 11, 2, 4]],                 # the wall: 4 tiles - a jump makes 3.5, a jump off a desk 4.4
+		"holes": [],
+		"ducts": [],
+		"props": [["desk", 5, 15], ["plant", 30, 15],
+			["desk", 38, 15],
+			["desk", 57, 15], ["desk", 74, 15]],
+		"hints": [
+			[2.5, 170, "floor 5 - the open plan. nowhere to hide - unless you bring it."],
+			[4.5, 210, "E  hold by a desk to grip it. move to push or pull.", "X  hold by a desk to grip it. move to push or pull."],
+			[4.5, 245, "it scrapes. SHIFT drags it slow and quiet.", "it scrapes. hold LT to drag it slow and quiet."],
+			[12.0, 280, "↓  let go - and you're behind it."],
+			[16.0, 210, "behind it, hold E too: it moves with you, hidden.", "behind it, hold X too: it moves with you, hidden."],
+			[16.0, 245, "a camera sees a desk move. be still under the lens."],
+			[32.0, 190, "one star. four cameras."],
+			[45.0, 230, "too high to jump. a desk is a step."],
+			[56.0, 190, "a long way under the lenses. there's another desk further on."],
+			[86.0, 190, "almost out."],
+		],
+		"lights": [
+			{"kind": "camera", "x": 22.5, "spread": 0.14, "radius": 520, "sweep": [0.55, 5.4], "danger": 1.5},
+			{"kind": "camera", "x": 44.5, "spread": 0.14, "radius": 560, "sweep": [0.6, 4.0], "danger": 1.5},
+			{"kind": "camera", "x": 66.5, "spread": 0.14, "radius": 580, "sweep": [0.7, 5.0], "danger": 1.5},
+			{"kind": "camera", "x": 83.5, "spread": 0.14, "radius": 580, "sweep": [0.7, 4.4], "danger": 1.5},
+			{"kind": "sign", "x": 93},
+		],
+		"guards": [
+			{"x": 75, "from": 60, "to": 88, "min_x": 56, "max_x": 90, "row": 15},
+		],
+		"remember": {"scarf": 0.65, "abilities": ["fight"], "say": [
+			"knuckles...  ~a man going down in the dark,~  and me still standing.",
+			"up close, in the dark - they should be afraid of me."]},
+		"spawn": [3, 15], "exit": 92,
+	},
+	{
+		"name": "FLOOR 6", "subtitle": "the watch",
+		# fighting: the watchers carry no torch - in the dark they see you only up close, they can't be dropped
+		# on, and they find the guards you leave asleep. 1: one watcher alone in the dark, to learn on.
+		# 2: a torch guard under a duct - the old way still works. 3: a watcher walking near a torch guard:
+		# put the guard to sleep and the watcher finds him. 4: a camera, then a last watcher by the exit.
+		"width": 130,
+		"solids": [],
+		"holes": [],
+		"ducts": [[42, 11, 12, 1]],
+		"props": [["desk", 8, 15], ["plant", 33, 15],
+			["desk", 47, 15], ["cooler", 60, 15],
+			["desk", 67, 15], ["plant", 80, 15], ["desk", 86, 15],
+			["desk", 98, 15], ["cooler", 110, 15], ["plant", 121, 15]],
+		"hints": [
+			[2.5, 170, "floor 6 - the watch. some of them carry no light."],
+			[7.0, 210, "no torch: in the dark he sees you only up close. and he won't let you drop on him."],
+			[7.0, 245, "by him:  LEFT CLICK / E  strike.   RIGHT CLICK / Q  block.", "by him:  X  strike.   Y  block."],
+			[15.0, 280, "three quick strikes: something special.", "three quick X: something special."],
+			[24.0, 190, "when he winds up - the ticks over his head - block."],
+			[24.0, 225, "jump hops you back. jump toward him and you're over him."],
+			[30.0, 260, "fight in the dark. in the light, you're seen anyway."],
+			[38.5, 190, "the ones with torches: the old way still works."],
+			[63.0, 190, "a watcher finds the ones you leave sleeping. and then everyone knows."],
+			[94.0, 190, "almost out."],
+		],
+		"lights": [
+			{"kind": "lamp", "x": 21.5, "spread": 0.4, "radius": 500, "intensity": 0.85},
+			{"kind": "lamp", "x": 45.5, "spread": 0.45, "radius": 520},
+			{"kind": "lamp", "x": 57.5, "spread": 0.45, "radius": 520},
+			{"kind": "lamp", "x": 76.5, "spread": 0.45, "radius": 480, "flicker": [3.2, 0.55]},
+			{"kind": "camera", "x": 104.5, "spread": 0.14, "radius": 520, "sweep": [0.65, 5.0], "danger": 1.5},
+			{"kind": "lamp", "x": 116.5, "spread": 0.4, "radius": 500, "intensity": 0.8},
+			{"kind": "sign", "x": 127},
+		],
+		"guards": [
+			{"x": 18, "from": 12, "to": 30, "min_x": 5, "max_x": 37, "row": 15, "kind": "watcher"},
+			{"x": 50, "from": 40, "to": 60, "min_x": 37, "max_x": 63, "row": 15},
+			{"x": 70, "from": 65, "to": 80, "min_x": 63, "max_x": 93, "row": 15},
+			{"x": 86, "from": 72, "to": 90, "min_x": 63, "max_x": 93, "row": 15, "kind": "watcher"},
+			{"x": 115, "from": 108, "to": 123, "min_x": 95, "max_x": 125, "row": 15, "kind": "watcher"},
+		],
+		"panels": [[100.5, 15]],
+		"spawn": [3, 15], "exit": 126,
 	},
 ]

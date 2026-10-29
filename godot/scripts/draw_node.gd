@@ -6,6 +6,7 @@ var m
 var kind := ""
 
 const T := 32
+const Fight := preload("res://scripts/fight.gd")
 
 func _draw() -> void:
 	match kind:
@@ -286,7 +287,7 @@ func _prop(p: Dictionary) -> void:
 #  ACTORS - guards and the ninja (lit by the lights)
 # =====================================================================
 func _actors() -> void:
-	for pn in m.panels:                             # alarm panels: a box on the wall; cracked open once a stone goes through
+	for pn in m.panels:                             # alarm panels: a box on the wall; cracked open once a star goes through
 		var c := Vector2(pn.x * T, pn.row * T - 48)
 		draw_rect(Rect2(c.x - 8, c.y - 10, 16, 20), grey(0x1c))
 		draw_rect(Rect2(c.x - 5, c.y - 3, 10, 9), grey(0x12))
@@ -321,6 +322,9 @@ func _star(p: Vector2, ang: float, r: float, c: Color) -> void:
 	draw_colored_polygon(pts, c)
 
 func _guard(g) -> void:
+	if g.kind == "watcher":
+		_watcher(g)
+		return
 	var c := grey(0x12)
 	var f: float = g.facing
 	var x: float = g.x
@@ -355,6 +359,46 @@ func _guard(g) -> void:
 	draw_set_transform(L.pos, L.dir)
 	draw_rect(Rect2(-10, -3.5, 12, 7), c)                   # torch
 	draw_set_transform_matrix(Transform2D.IDENTITY)
+
+# The watcher: a guard without the cap or the torch - a bare head, an earpiece, both hands free (fists up
+# in a fight). His colour is his health: near black, fading to a dull grey as he's worn down.
+func _watcher(g) -> void:
+	var c := grey(int(lerpf(0x58, 0x12, clampf(g.hp, 0.0, 1.0))))
+	var f: float = g.facing
+	var x: float = g.x
+	var by: float = g.y
+	if g.state == "fight" or g.state == "asleep":
+		var p: Dictionary = g.fpose if g.state == "fight" and not g.fpose.is_empty() else Fight.pose(Fight.GP, "out")
+		var fall: float = g.fall if g.state == "fight" else 1.0
+		if fall > 0.0:                              # over backwards from his feet, flat on his back
+			draw_set_transform_matrix(Transform2D(-f * fall * PI / 2, Vector2(x, by - fall * 9)) * Transform2D(0.0, Vector2(-x, -by)))
+		var R := Fight.rig(x, by, f, p, Fight.GB)
+		_rig(R, Fight.GB, c)
+		draw_polyline(PackedVector2Array([R.ear, R.ear.lerp(R.collar, 0.5) + Vector2(-R.fe * 3, 0), R.collar]), c, 1.0, true)
+		draw_set_transform_matrix(Transform2D.IDENTITY)
+		return
+	var amp := clampf(g.cur_v / 50.0, 0.0, 1.0)            # his rounds: the guard's walk
+	var bend := clampf(g.cur_v / 115.0, 0.0, 1.0)
+	var hip := Vector2(x, by - 20)
+	var up: float = cos(g.phase) * f * amp * (3.0 + 4.0 * bend)
+	var stride := 9.0 * (1.0 + 0.3 * clampf((g.cur_v - 55.0) / 60.0, 0.0, 1.0))
+	var sw: float = sin(g.phase) * amp
+	_step(hip, by, sw, maxf(up, 0.0), stride, 19, bend, f, 5, c)
+	_step(hip, by, -sw, maxf(-up, 0.0), stride, 19, bend, f, 5, c)
+	_joint(Vector2(x - f * 2, by - 42), Vector2(x - f * 2 - sw * 7, by - 23), 10.0, Vector2(-f * 0.3, 1), 4.5, c)   # far arm
+	_rrect(x - 9, by - 46, 18, 28, 5, c)
+	draw_circle(Vector2(x + f, by - 53), 8, c)                                   # bare head
+	draw_polyline(PackedVector2Array([Vector2(x - f * 2, by - 53), Vector2(x - f * 7, by - 50), Vector2(x - f * 4, by - 46)]), c, 1.0, true)   # earpiece
+	_joint(Vector2(x + f * 3, by - 41), Vector2(x + f * 3 + sw * 7, by - 23), 10.0, Vector2(f * 0.3, 1), 4.5, c)    # near arm
+
+# A fighter from fight.gd's rig: legs (knees toward his facing), the far arm, the torso, the head, the near arm.
+func _rig(R: Dictionary, B: Dictionary, c: Color) -> void:
+	_joint(R.hip, R.fB, B.leg, Vector2(R.fe, 0), B.legW, c)
+	_joint(R.hip, R.fA, B.leg, Vector2(R.fe, 0), B.legW, c)
+	_joint(R.sh, R.hB, B.arm, Vector2(0, 1), B.armW, c)          # elbows hang below
+	_limb(R.ta, R.tb, B.tw, c)
+	draw_circle(R.head, B.hr, c)
+	_joint(R.sh, R.hA, B.arm, Vector2(0, 1), B.armW, c)
 
 # The talk: his free arm (the far one, behind the torso). Hangs at his side; while he speaks it
 # points (at gest_x), shrugs, or moves with the words ("beat"), blended in by gest_k.
@@ -411,6 +455,8 @@ static func body_tr(mm) -> Transform2D:
 	var by: float = P.y + P.h
 	if mm.dashing():
 		return lean_tr(cx, by - 15, P.lean)
+	if mm.gripping():                               # into or back from a desk: the full lean, from the feet
+		return lean_tr(cx, by, P.lean)
 	return lean_tr(cx, by, clampf(P.lean, -0.2, 0.2))
 
 func _ninja() -> void:
@@ -423,6 +469,12 @@ func _ninja() -> void:
 	_scarf(P, col)
 	var cx: float = P.x + P.w / 2
 	var by: float = P.y + P.h
+	if m.fight != null and not m.npose.is_empty():        # squared up: the fight's poses (fight.gd)
+		_rig(Fight.rig(cx, by, f, m.npose, Fight.NB), Fight.NB, col)
+		return
+	if m.gripping_low():
+		_low_pose(P, cx, by, f, col)
+		return
 	if P.crawling or P.clinging:
 		if P.clinging:                              # crawl pose, upside down
 			draw_set_transform_matrix(Transform2D(Vector2(1, 0), Vector2(0, -1), Vector2(0, 2 * P.y + P.h)))
@@ -434,6 +486,9 @@ func _ninja() -> void:
 		draw_set_transform_matrix(Transform2D.IDENTITY)
 		return
 	var hip := Vector2(cx, by - 15)
+	if m.gripping():
+		_grip_pose(P, cx, by, f, col)
+		return
 	if m.dashing():                                 # the anime run: legs under him, body pitched from the hip, arms streaming back
 		var s := sin(P.walk_phase)
 		var u := cos(P.walk_phase) * f
@@ -474,6 +529,51 @@ func _ninja() -> void:
 	draw_circle(Vector2(cx + f * 1.5, by - 38), 7.5, col)
 	draw_set_transform_matrix(Transform2D.IDENTITY)
 
+# Moving a desk (prototyped in tools/characters.html): he faces it, hands on its end. Pushing he leans in
+# with his feet braced behind; pulling he leans back and steps backwards. The hands stay on the desk.
+func _grip_pose(P, cx: float, by: float, f: float, col: Color) -> void:
+	var feet := Vector2(cx, by)
+	var moving: bool = absf(P.vx) > 8.0
+	var pulling: bool = moving and signf(P.vx) != f
+	var s: float = sin(P.walk_phase) if moving else 0.0
+	var up: float = cos(P.walk_phase) * signf(P.vx) if moving else 0.0
+	var hip: Vector2 = feet + (Vector2(cx, by - 15) - feet).rotated(P.lean * 0.4)
+	var base: float = cx - f * (-2.0 if pulling else 5.0)
+	if moving:
+		_leg(hip, Vector2(base + s * 7, by - 1 - maxf(up, 0.0) * 3), 14, 0.7, f, 4, col)
+		_leg(hip, Vector2(base - s * 7, by - 1 - maxf(-up, 0.0) * 3), 14, 0.7, f, 4, col)
+	else:                                           # braced: back foot out, front knee soft
+		_leg(hip, Vector2(cx + f * 3, by - 1), 14, 0.3, f, 4, col)
+		_leg(hip, Vector2(cx - f * 6, by - 1), 14, 0.3, f, 4, col)
+	var edge: float = m.grip_end()
+	_limb(feet + (Vector2(cx, by - 28) - feet).rotated(P.lean), Vector2(edge, by - 27), 4, col)           # top hand on the corner
+	_limb(feet + (Vector2(cx - f, by - 27) - feet).rotated(P.lean), Vector2(edge + f * 0.5, by - 21), 4, col)   # the other lower on the end
+	draw_set_transform_matrix(body_tr(m))
+	_rrect(cx - 6.5, by - 32, 13, 19, 5, col)
+	_mark(cx + f * 2, by - 25, col, P.vis)
+	draw_circle(Vector2(cx + f * 1.5, by - 38), 7.5, col)
+	draw_set_transform_matrix(Transform2D.IDENTITY)
+
+# Gripping a desk low (↓ + E, prototyped in tools/characters.html): crouched under its top, back knee
+# down, both hands up on the desktop. Moving it he shuffles - the knees trade a little and he bobs.
+func _low_pose(P, cx: float, by: float, f: float, col: Color) -> void:
+	var s: float = sin(P.walk_phase) if absf(P.vx) > 1.0 else 0.0
+	var b: float = m.low_bob()
+	var hip := Vector2(cx - f * 3, by - 9 + b)
+	var knee := Vector2(cx + f * (1 + s * 2), by - 2)
+	_limb(hip, knee, 3.5, col)                      # the back leg: knee down, shin along the floor
+	_limb(knee, Vector2(cx - f * (10 - s * 2), by - 1.5), 3.5, col)
+	var knee2 := Vector2(cx + f * (6 - s * 2), by - 11 + b)
+	_limb(hip, knee2, 3.5, col)                     # the front leg: up, foot planted
+	_limb(knee2, Vector2(cx + f * (5 - s * 2), by - 1), 3.5, col)
+	_limb(hip, Vector2(cx + f * 4, by - 17 + b), 10, col)                     # the back, hunched
+	var d: Dictionary = m.props[P.grip]             # hands up on the desktop (on it, near its end too)
+	var x0: float = d.x * T + 3
+	var x1: float = d.x * T + m.PROP_W.desk - 3
+	_limb(Vector2(cx + f * 4, by - 18 + b), Vector2(clampf(cx + f * 11, x0, x1), by - 24), 4, col)
+	_limb(Vector2(cx + f * 3, by - 17 + b), Vector2(clampf(cx + f * 17, x0, x1), by - 24), 4, col)
+	draw_circle(Vector2(cx + f * 9, by - 19 + b), 6.5, col)
+
 # The Evil Co mark (the last memory): a small diamond over his heart, a shade of grey off his body, lit or not.
 func _mark(x: float, y: float, col: Color, vis: float) -> void:
 	if not m.evil_mark:
@@ -483,7 +583,7 @@ func _mark(x: float, y: float, col: Color, vis: float) -> void:
 	draw_circle(Vector2(x, y), 0.8, col)
 
 # =====================================================================
-#  OVERLAY - drawn after lighting (bulbs, exit sign, hints, eyes, noise, stones, marks)
+#  OVERLAY - drawn after lighting (bulbs, exit sign, hints, eyes, noise, stars, marks)
 # =====================================================================
 func _overlay() -> void:
 	for L in m.lights:                              # bulb glow
@@ -560,7 +660,8 @@ func _overlay() -> void:
 			var p: Dictionary = m.props[P.cover]
 			_text(m.font_regular, Vector2(p.x * T + m.PROP_W[p.type] / 2, p.y - 66), "↓", 13, Color(1, 1, 1, 0.45), true)
 		_eyes()
-	_noise_and_stones()
+		_fight_fx()
+	_noise_and_stars()
 	_guard_marks()
 	if m.debug:
 		_debug()
@@ -573,8 +674,16 @@ func _eyes() -> void:
 	var cx: float = P.x + P.w / 2
 	var by: float = P.y + P.h
 	var h: Vector2
-	if P.clinging:
+	if m.fight != null and not m.npose.is_empty():
+		var R := Fight.rig(cx, by, f, m.npose, Fight.NB)
+		if R.sx < 0.0 and m.npose.face < 0.5:           # back turned in a spin: no eyes
+			return
+		h = R.head
+		f = R.fe
+	elif P.clinging:
 		h = Vector2(cx + f * 13, P.y + 10)
+	elif m.gripping_low():
+		h = Vector2(cx + f * 9, by - 19 + m.low_bob())
 	elif P.crawling:
 		h = Vector2(cx + f * 13, by - 10)
 	else:
@@ -585,7 +694,40 @@ func _eyes() -> void:
 		draw_circle(h + e[0], e[1], Color.WHITE)
 	draw_set_transform_matrix(Transform2D.IDENTITY)
 
-func _noise_and_stones() -> void:
+# A fight: the watcher's tell (three white ticks over his head), speed lines where his hands and feet
+# just were, and a white burst where a blow lands.
+func _fight_fx() -> void:
+	var g = m.fight
+	if g != null:
+		var k: float = m.tell_k()
+		if k > 0.0:
+			var o := Vector2(g.x + g.facing, g.y - 66)
+			var col := Color(1, 1, 1, (0.6 + 0.4 * sin(m.time * 38.0)) * k)
+			for a in [-0.55, 0.0, 0.55]:
+				var d := Vector2(sin(a), -cos(a))
+				draw_line(o + d * 7.0, o + d * 15.0, col, 2.0, true)
+		var P = m.P
+		var cx: float = P.x + P.w / 2
+		var by: float = P.y + P.h
+		var ext := func(p: Dictionary) -> Array:
+			var R := Fight.rig(cx, by, P.facing, p, Fight.NB)
+			return [R.fA, R.fB, R.hA, R.hB]
+		var prev: Array = ext.call(m.npose_at(m.nt))
+		for j in range(1, 7):
+			var cur: Array = ext.call(m.npose_at(m.nt - j * 0.014))
+			for i in 4:
+				if (prev[i] as Vector2).distance_to(cur[i]) > 2.2:
+					draw_line(prev[i], cur[i], Color(0.82, 0.82, 0.82, 0.32 * (1.0 - j / 7.0)), 2.2, true)
+			prev = cur
+	for e in m.fx:
+		var k: float = (m.time - e.t) / 0.25
+		if k >= 0.0 and k < 1.0:
+			var r: float = (3.0 + k * 9.0) * e.size
+			for i in 6:
+				var d := Vector2.from_angle(i * TAU / 6.0 + 0.3)
+				draw_line(e.p + d * r * 0.4, e.p + d * r, Color(1, 1, 1, 0.9 * (1.0 - k)), 1.2, true)
+
+func _noise_and_stars() -> void:
 	for n in m.noises:                              # a bubble that spreads to the noise's reach, cut off by walls
 		var k: float = n.t / 0.6
 		var rr: float = maxf(1.0, n.r * minf(1.0, k * 1.6))
@@ -597,8 +739,6 @@ func _noise_and_stones() -> void:
 			var outline: PackedVector2Array = part.duplicate()
 			outline.append(part[0])
 			draw_polyline(outline, Color(1, 1, 1, 0.3 * (1 - k)), 1.5, true)
-	for s in m.stones:
-		draw_circle(Vector2(s.x, s.y), m.STONE.r, grey(0xb4))
 	for st in m.stars:                              # in flight: a spinning glint
 		if st.state != "stuck":
 			_star(Vector2(st.x, st.y), st.ang, 5.0, grey(0xc8))
@@ -631,33 +771,14 @@ func _debug() -> void:
 	_text(m.font_regular, Vector2(m.cam.x + 28, m.cam.y + 522), "fps %d  exposure %.2f  meter %.2f" % [m.fps, m.exposure, m.meter], 11, Color(1, 1, 1, 0.7))
 
 # =====================================================================
-#  AIM - the stone's arc and the cursor (on top of everything)
+#  AIM - the star's line and the cursor (on top of everything)
 # =====================================================================
 func _aim() -> void:
 	if m.state != "play" or not m.aiming:          # only in throw mode (Ctrl)
 		return
-	if m.weapon == "star":
-		_aim_star()
-		return
-	var a: Dictionary = m.aim_throw()
-	var can: bool = m.stone_count > 0
-	if can:
-		var path: Dictionary = m.predict_path(a)
-		for p in path.pts:
-			draw_circle(p, 1.6, Color(1, 1, 1, 0.55))
-		draw_arc(path.end, 6, 0, TAU, 24, Color(1, 1, 1, 0.7), 1.5, true)
-	var t: Vector2 = a.tgt
-	var ok: bool = a.in_range and can
-	var col := Color(1, 1, 1, 0.9 if ok else 0.45)
-	draw_arc(t, 8, 0, TAU, 28, col, 1.5, true)
-	if ok:
-		draw_circle(t, 1.8, col)
-	else:
-		draw_line(t + Vector2(-6, -6), t + Vector2(6, 6), col, 1.5, true)
-		draw_line(t + Vector2(6, -6), t + Vector2(-6, 6), col, 1.5, true)
-		_text(m.font_italic, t + Vector2(0, 24), "too far" if can else "no stones", 11, col, true)
+	_aim_star()
 
-# A star's aim: a straight dotted line to where it goes; a ring on the light it would put out.
+# A star's aim: a straight dotted line to where it goes; a ring on the light or panel it would put out.
 func _aim_star() -> void:
 	var a: Dictionary = m.star_aim()
 	var can: bool = m.star_count > 0
@@ -672,6 +793,8 @@ func _aim_star() -> void:
 		if tr.light != null:
 			var L = tr.light
 			draw_arc(L.pos + (Vector2(0, 4) if L.kind == "lamp" else Vector2.ZERO), 12, 0, TAU, 28, Color(1, 1, 1, 0.9), 1.5, true)
+		elif tr.panel != null:
+			draw_arc(Vector2(tr.panel.x * m.T, tr.panel.row * m.T - 48), 12, 0, TAU, 28, Color(1, 1, 1, 0.9), 1.5, true)
 		elif tr.wall:
 			draw_line(end + Vector2(-4, -4), end + Vector2(4, 4), Color(1, 1, 1, 0.6), 1.5, true)
 			draw_line(end + Vector2(4, -4), end + Vector2(-4, 4), Color(1, 1, 1, 0.6), 1.5, true)

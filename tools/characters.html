@@ -68,6 +68,10 @@
     <label><input type="radio" name="murmur" value="off" checked><span>Off</span></label>
     <label><input type="radio" name="murmur" value="on"><span>On (hover a scene)</span></label>
   </fieldset>
+  <fieldset><legend>Thuds</legend>
+    <label><input type="radio" name="thud" value="off" checked><span>Off</span></label>
+    <label><input type="radio" name="thud" value="on"><span>On (hover a fight)</span></label>
+  </fieldset>
   <fieldset><legend>Speed</legend>
     <label><input type="radio" name="speed" value="1" checked><span>1×</span></label>
     <label><input type="radio" name="speed" value="0.3"><span>Slow</span></label>
@@ -90,16 +94,27 @@ One colour, one thing: the scarf, and only in shadow. Floor by floor the colour 
 <h2>The guards</h2>
 <div class="grid" id="guards"></div>
 
+<h2>Moving a desk · Floor 5</h2>
+<p class="lede">Hold E (controller X) at a desk's end and he grips it; move to push or pull. He faces the desk the whole time, hands on its end. Pushing, he leans into it and digs in; pulling, he leans back and steps backwards. Shift moves it slowly and quietly; otherwise the legs scrape. Let go of E and he lets go; ↓ and he tucks in behind it. Ducked behind it, ↓ + E grips it low: crouched behind the desk, both hands up on its top, he shuffles it along, hidden (30 px/s, silent; a camera sees a desk move).</p>
+<div class="grid" id="desk"></div>
+
+<h2>Fighting · Floor 6</h2>
+<p class="lede">He fights like a ninja: low, quick, stepping in - MMA strikes and jiu-jitsu. The watcher is a brawler: no torch, big and square, fists up. Fight mode: X / left click strikes, Y / right click blocks. <b>One press</b> is a strike at random (jab, cross, body kick, leg kick, push kick), each with its own reaction. <b>Three or more quick presses</b> is a special, one of eight at random so a fight stays fresh (spinning back kick, flying knee, scissor takedown, superman punch, beatdown, spinning sweep, backflip kick, vault and back kick). Jump hops back (a short hop: a fight keeps it short); jump toward him and he goes over: hands on his shoulders, a flip, and the watcher spins round to face him. When he winds up (the white ticks over his head), block in time and you counter: parry, palm. Too late and he lands it: the meter jumps and he shouts. There's no health bar: he fades from near black to a dull grey as he's worn down. Dazed, the next press finishes it: clinch, knee, sweep, one more on the floor. A fight in the light gets you caught anyway.</p>
+<div class="grid" id="fight"></div>
+<div class="grid" id="fightspecial" style="margin-top: 12px"></div>
+<div class="grid" id="fightguard" style="margin-top: 12px"></div>
+<div class="wide" id="fightwide"></div>
+
 <footer>Game units: a tile is 32 px; the ninja is 18 × 44, a guard about 62 tall. Drawn here at the game's size, scaled up 2.5×. Nothing here changes the game.</footer>
 
 <script>
 (() => {
   const TAU = Math.PI * 2;
-  const opt = { bubble: "ink", font: "caps", size: 9, light: "dark", speed: 1, murmur: "off" };
+  const opt = { bubble: "ink", font: "caps", size: 9, light: "dark", speed: 1, murmur: "off", thud: "off" };
   let actx = null;
   document.querySelectorAll(".controls input").forEach(i => i.addEventListener("change", () => {
     opt[i.name] = (i.name === "size" || i.name === "speed") ? +i.value : i.value;
-    if (i.name === "murmur" && i.value === "on" && !actx) { actx = new (window.AudioContext || window.webkitAudioContext)(); }
+    if ((i.name === "murmur" || i.name === "thud") && i.value === "on" && !actx) { actx = new (window.AudioContext || window.webkitAudioContext)(); }
   }));
   const grey = v => `rgb(${v},${v},${v})`;
   const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
@@ -140,6 +155,9 @@ One colour, one thing: the scarf, and only in shadow. Floor by floor the colour 
   function ninjaNeck(n, cx, by, top) {
     if (n.mode === "cling") return [cx + n.f * 9, top + 11];
     if (n.mode === "crawl") return [cx + n.f * 9, by - 11];
+    if (n.mode === "fight") return n.neckAt;
+    if (n.mode === "low") return [cx + n.f * 5, by - 18 + lowBob(n)];
+    if (n.mode === "grip") return rot([cx - n.f * 5, by - 39], [cx, by], n.lean);   // the neck goes with the lean
     const p = [cx - n.f * 5, by - 39 + n.y];
     if (Math.abs(n.vx) > 200 && n.y >= 0) {                 // the anime run: the neck goes with the pitched body
       const hx = cx, hy = by - 15, a = n.lean, dx = p[0] - hx, dy = p[1] - hy;
@@ -149,7 +167,7 @@ One colour, one thing: the scarf, and only in shadow. Floor by floor the colour 
   }
   function updateNinja(n, dt, cx, by, top) {
     n.t += dt;
-    const crawling = n.mode === "crawl" || n.mode === "cling";
+    const crawling = n.mode === "crawl" || n.mode === "cling" || n.mode === "low";
     n.phase += Math.abs(n.vx) * dt * (crawling ? 0.12 : 0.075);
     n.dist += n.vx * dt;
     if (n.mode === "jump") {                     // hop in place: up, tuck, land, a beat, again
@@ -157,7 +175,8 @@ One colour, one thing: the scarf, and only in shadow. Floor by floor the colour 
       if (n.y >= 0) { n.y = 0; n.vy = 0; if (n.t > 0.6) { n.vy = -240; n.t = 0; } }
     }
     const moving = Math.abs(n.vx) > 8 && n.mode !== "jump";
-    const leanTo = (crawling || !moving) ? 0 : n.f * (n.vx > 200 ? 0.62 : 0.06);   // running: the anime lean
+    let leanTo = (crawling || !moving) ? 0 : n.f * (n.vx > 200 ? 0.62 : 0.06);   // running: the anime lean
+    if (n.mode === "grip") leanTo = gripLean(n);
     n.lean += clamp(leanTo - n.lean, -dt * 1.5, dt * 1.5);
     // the scarf: a little verlet chain blown back by the run
     const nk = ninjaNeck(n, cx, by, top);
@@ -224,6 +243,9 @@ One colour, one thing: the scarf, and only in shadow. Floor by floor the colour 
       eyes(c, cx + f * 13, hy, f, time);
       return;
     }
+    if (n.mode === "grip") { gripPose(c, n, cx, by, col, arm, mark, time); return; }
+    if (n.mode === "low") { lowPose(c, n, cx, by, col, arm, time); return; }
+    if (n.mode === "fight") { fightNinja(c, cx, by, f, n.pose, col, time, n.bob); return; }
     const y = by + n.y;
     const dash = Math.abs(n.vx) > 200 && n.y >= 0;          // the anime run: legs under him, the body pitched from the hip
     const hip = [cx, y - 15];
@@ -268,6 +290,253 @@ One colour, one thing: the scarf, and only in shadow. Floor by floor the colour 
     eyes(c, cx + f * 1.5, y - 38, f, time);
     c.restore();
   }
+  // ---- moving a desk ----
+  // He faces the desk (f) with his hands on its near end, DESK_GAP px in front of his middle.
+  // Pushing (moving toward f) he leans in; pulling (moving away) he leans back; still, a slight lean in.
+  const DESK_GAP = 10;
+  const rot = (p, o, a) => {
+    const dx = p[0] - o[0], dy = p[1] - o[1];
+    return [o[0] + dx * Math.cos(a) - dy * Math.sin(a), o[1] + dx * Math.sin(a) + dy * Math.cos(a)];
+  };
+  function gripLean(n) {
+    const toward = Math.sign(n.vx) * n.f;                // 1 pushing, -1 pulling, 0 still
+    if (Math.abs(n.vx) < 8) return n.f * 0.1;
+    return n.f * (toward > 0 ? 0.3 : -0.16);
+  }
+  function gripPose(c, n, cx, by, col, arm, mark, time) {
+    const f = n.f;
+    const moving = Math.abs(n.vx) > 8;
+    const pulling = moving && Math.sign(n.vx) * f < 0;
+    const s = Math.sin(n.phase) * (moving ? 1 : 0);
+    const up = Math.cos(n.phase) * Math.sign(n.vx) * (moving ? 1 : 0);
+    // feet: braced behind him pushing, ahead of him pulling (he leans away from them)
+    const base = cx - f * (pulling ? -2 : 5);
+    const hip = rot([cx, by - 15], [cx, by], n.lean * 0.4);
+    if (moving) {
+      leg(c, hip, [base + s * 7, by - 1 - Math.max(up, 0) * 3], kneeSeg(14, 0.7), f, 4, col);
+      leg(c, hip, [base - s * 7, by - 1 - Math.max(-up, 0) * 3], kneeSeg(14, 0.7), f, 4, col);
+    } else {                                             // braced: back foot out, front knee soft
+      leg(c, hip, [cx + f * 3, by - 1], kneeSeg(14, 0.3), f, 4, col);
+      leg(c, hip, [cx - f * 6, by - 1], kneeSeg(14, 0.3), f, 4, col);
+    }
+    // the hands stay on the desk's end; the arms run from the leaning shoulders
+    const sh = rot([cx, by - 28], [cx, by], n.lean);
+    const edge = cx + f * DESK_GAP;
+    arm(sh, [edge, by - 27]);                            // top hand on the corner
+    arm(rot([cx - f * 1, by - 27], [cx, by], n.lean), [edge + f * 0.5, by - 21]);   // the other lower on the end
+    c.save();
+    c.translate(cx, by); c.rotate(n.lean); c.translate(-cx, -by);
+    rrect(c, cx - 6.5, by - 32, 13, 19, 5, col);
+    mark(cx + f * 2, by - 25);
+    circle(c, cx + f * 1.5, by - 38, 7.5, col);
+    c.restore();
+    const head = rot([cx + f * 1.5, by - 38], [cx, by], n.lean);
+    eyes(c, head[0], head[1], f, time);
+  }
+  // Gripping it low (↓ + E behind a desk): crouched under its top, back knee down, both hands up on the
+  // desktop. Moving it, he shuffles: the knees trade places a little and he bobs. Still, he holds on.
+  const lowBob = n => Math.abs(n.vx) > 1 ? -Math.abs(Math.sin(n.phase)) * 1.2 : 0;
+  function lowPose(c, n, cx, by, col, arm, time) {
+    const f = n.f;
+    const moving = Math.abs(n.vx) > 1;
+    const s = moving ? Math.sin(n.phase) : 0;
+    const b = lowBob(n);
+    const hip = [cx - f * 3, by - 9 + b];
+    limb(c, hip, [cx + f * (1 + s * 2), by - 2], 3.5, col);              // the back leg: knee down, shin along the floor
+    limb(c, [cx + f * (1 + s * 2), by - 2], [cx - f * (10 - s * 2), by - 1.5], 3.5, col);
+    limb(c, hip, [cx + f * (6 - s * 2), by - 11 + b], 3.5, col);         // the front leg: up, foot planted
+    limb(c, [cx + f * (6 - s * 2), by - 11 + b], [cx + f * (5 - s * 2), by - 1], 3.5, col);
+    limb(c, hip, [cx + f * 4, by - 17 + b], 10, col);                    // the back, hunched
+    arm([cx + f * 4, by - 18 + b], [cx + f * 11, by - 24]);              // hands up on the desktop
+    arm([cx + f * 3, by - 17 + b], [cx + f * 17, by - 24]);
+    circle(c, cx + f * 9, by - 19 + b, 6.5, col);
+    eyes(c, cx + f * 9, by - 19 + b, f, time);
+  }
+  // ---- fighting (Floor 6): poses as keyframes, eased between ----
+  // A pose: hip, front foot fA, back foot fB, near hand hA, far hand hB - offsets from where he stands,
+  // x toward his facing - and tilt (the torso, + leans toward his facing). The whole body moves with
+  // dx (a step in), lift (off the floor), rot (the whole body turned about the hip, + pitches forward)
+  // and spin (0 facing, 1 back turned: drawn squeezed through the turn). Knees and elbows find themselves.
+  const POSE0 = { dx: 0, lift: 0, rot: 0, spin: 0, tilt: 0, face: 0 };   // face 1: turned round to face him (eyes stay)
+  const poses = o => { for (const k in o) o[k] = Object.assign({}, POSE0, o[k]); return o; };
+  const NP = poses({                                      // the ninja: low, quick, on the balls of his feet
+    stance:   { hip: [-1, -14], fA: [6, -1], fB: [-8, -1], hA: [9, -27], hB: [4, -23], tilt: 0.12 },
+    jab:      { dx: 5, hip: [1, -14], fA: [8, -1], fB: [-7, -1], hA: [18, -28], hB: [4, -25], tilt: 0.2 },
+    cross:    { dx: 6, rot: 0.05, hip: [2, -14], fA: [8, -1], fB: [-4, -2], hA: [7, -26], hB: [18, -28], tilt: 0.32 },
+    rhChamber:{ dx: 3, hip: [0, -15], fA: [2, -1], fB: [7, -12], hA: [8, -30], hB: [-5, -22], tilt: -0.15 },
+    rhKick:   { dx: 9, hip: [0, -16], fA: [-1, -1], fB: [15, -28], hA: [6, -31], hB: [-12, -21], tilt: -0.5 },
+    rhBack:   { dx: 5, hip: [0, -15], fA: [1, -1], fB: [5, -9], hA: [8, -29], hB: [-3, -22], tilt: -0.1 },
+    lkKick:   { dx: 8, hip: [0, -14], fA: [0, -1], fB: [17, -8], hA: [8, -30], hB: [-9, -22], tilt: -0.3 },
+    tpChamber:{ dx: 2, hip: [-2, -15], fA: [7, -12], fB: [-6, -1], hA: [8, -29], hB: [2, -25], tilt: -0.15 },
+    tpKick:   { dx: 7, hip: [-2, -15], fA: [15, -23], fB: [-5, -1], hA: [6, -30], hB: [-4, -25], tilt: -0.42 },
+    sbLoad:   { dx: 3, spin: 0.4, hip: [0, -14], fA: [4, -1], fB: [-5, -1], hA: [5, -28], hB: [2, -25], tilt: 0.15 },
+    sbKick:   { dx: 10, spin: 1, hip: [0, -16], fA: [1, -1], fB: [-17, -24], hA: [5, -27], hB: [9, -21], tilt: 0.45 },
+    fkStep:   { dx: 6, hip: [0, -12], fA: [7, -1], fB: [-6, -1], hA: [10, -27], hB: [6, -24], tilt: 0.2 },
+    fkAir:    { dx: 13, lift: 15, hip: [0, -15], fA: [2, -14], fB: [-11, -6], hA: [14, -36], hB: [12, -31], tilt: 0.1 },
+    fkLand:   { dx: 10, hip: [0, -12], fA: [6, -1], fB: [-6, -1], hA: [9, -27], hB: [4, -23], tilt: 0.2 },
+    ksLoad:   { dx: 7, hip: [0, -11], fA: [6, -1], fB: [-6, -1], hA: [8, -25], hB: [3, -22], tilt: 0.25 },
+    ksFly:    { dx: 14, lift: 12, rot: -1.5, hip: [0, -14], fA: [9, 1], fB: [-8, 1], hA: [-10, -20], hB: [-14, -16] },
+    ksDown:   { dx: 13, lift: -7, rot: -1.5, hip: [0, -14], fA: [7, 0], fB: [-7, 2], hA: [-10, -20], hB: [-14, -17] },
+    ksUp:     { dx: 12, hip: [0, -11], fA: [5, -1], fB: [-6, -1], hA: [8, -25], hB: [3, -22], tilt: 0.2 },
+    smChamber:{ dx: 2, hip: [0, -15], fA: [3, -1], fB: [6, -11], hA: [8, -28], hB: [3, -25], tilt: 0 },
+    smFly:    { dx: 12, lift: 6, hip: [1, -15], fA: [4, -5], fB: [-14, -10], hA: [3, -26], hB: [19, -30], tilt: 0.35 },
+    smLand:   { dx: 10, hip: [1, -13], fA: [8, -1], fB: [-5, -1], hA: [6, -27], hB: [14, -27], tilt: 0.25 },
+    swDrop:   { dx: 4, spin: 0.4, hip: [0, -7], fA: [4, -1], fB: [-6, -1], hA: [6, -1], hB: [2, -2], tilt: 0.6 },
+    swSweep:  { dx: 6, spin: 1, hip: [0, -7], fA: [2, -1], fB: [-19, -2], hA: [-2, -1], hB: [3, -1], tilt: 0.7 },
+    swRise:   { dx: 4, hip: [0, -11], fA: [5, -1], fB: [-6, -1], hA: [8, -25], hB: [3, -22], tilt: 0.2 },
+    flCrouch: { dx: 7, hip: [0, -10], fA: [5, -1], fB: [-6, -1], hA: [6, -22], hB: [1, -19], tilt: 0.1 },
+    flKick:   { dx: 10, lift: 14, rot: -2.4, hip: [0, -15], fA: [2, 3], fB: [-4, -2], hA: [-6, -20], hB: [-9, -16] },
+    flOver:   { dx: 6, lift: 18, rot: -4.0, hip: [0, -15], fA: [4, -7], fB: [-1, -6], hA: [3, -22], hB: [-2, -20] },
+    flLand:   { dx: 2, rot: -2 * Math.PI, hip: [0, -10], fA: [5, -1], fB: [-6, -1], hA: [6, -22], hB: [1, -19], tilt: 0.15 },
+    vtCrouch: { dx: 8, hip: [0, -10], fA: [6, -1], fB: [-6, -1], hA: [8, -22], hB: [3, -19], tilt: 0.3 },
+    vtPlant:  { dx: 18, lift: 34, rot: 1.6, hip: [0, -14], fA: [2, -1], fB: [-3, -1], hA: [4, -27], hB: [2, -26] },
+    vtOver:   { dx: 33, lift: 52, rot: Math.PI, hip: [0, -14], fA: [1, -2], fB: [-2, -1], hA: [1, -25], hB: [-1, -25] },
+    vtDown:   { dx: 46, lift: 24, rot: 4.4, spin: 0.6, hip: [0, -14], fA: [4, -4], fB: [-2, -3], hA: [6, -24], hB: [2, -22] },
+    vtLand:   { face: 1, dx: 54, rot: 2 * Math.PI, spin: 1, hip: [0, -11], fA: [5, -1], fB: [-6, -1], hA: [8, -25], hB: [3, -22], tilt: 0.2 },
+    vtKick:   { face: 1, dx: 50, spin: 1, hip: [-2, -15], fA: [15, -23], fB: [-5, -1], hA: [6, -30], hB: [-4, -25], tilt: -0.42 },
+    vtSet:    { face: 1, dx: 52, spin: 1, hip: [-1, -14], fA: [6, -1], fB: [-8, -1], hA: [9, -27], hB: [4, -23], tilt: 0.12 },
+    overSet:  { face: 1, dx: 64, spin: 1, hip: [-1, -14], fA: [6, -1], fB: [-8, -1], hA: [9, -27], hB: [4, -23], tilt: 0.12 },
+    hopCrouch:{ hip: [-1, -11], fA: [6, -1], fB: [-7, -1], hA: [9, -25], hB: [4, -22], tilt: 0.15 },
+    hopAir:   { dx: -10, lift: 9, hip: [-1, -14], fA: [4, -5], fB: [-6, -4], hA: [9, -28], hB: [4, -24], tilt: -0.05 },
+    hopLand:  { dx: -20, hip: [-1, -12], fA: [6, -1], fB: [-7, -1], hA: [9, -27], hB: [4, -23], tilt: 0.12 },
+    hit:      { dx: -3, hip: [-4, -14], fA: [3, -1], fB: [-9, -1], hA: [3, -22], hB: [-3, -19], tilt: -0.38 },
+    block:    { hip: [-2, -13], fA: [5, -1], fB: [-8, -1], hA: [8, -33], hB: [9, -28], tilt: -0.05 },
+    parry:    { dx: 2, hip: [0, -13], fA: [6, -1], fB: [-8, -1], hA: [15, -36], hB: [7, -25], tilt: 0.05 },
+    palm:     { dx: 7, hip: [3, -13], fA: [10, -1], fB: [-5, -1], hA: [9, -33], hB: [19, -28], tilt: 0.3 },
+    fnGrab:   { dx: 9, hip: [1, -14], fA: [8, -1], fB: [-5, -1], hA: [17, -34], hB: [15, -29], tilt: 0.25 },
+    fnKnee:   { dx: 10, hip: [1, -15], fA: [0, -1], fB: [5, -13], hA: [14, -30], hB: [12, -26], tilt: 0.3 },
+    fnSweep:  { dx: 11, rot: 0.05, hip: [3, -12], fA: [17, -3], fB: [0, -1], hA: [16, -33], hB: [13, -27], tilt: 0.3 },
+    fnUp:     { dx: 22, hip: [0, -9], fA: [7, -1], fB: [-7, -1], hA: [8, -31], hB: [2, -18], tilt: 0.2 },
+    fnDown:   { dx: 22, hip: [0, -8], fA: [7, -1], fB: [-7, -1], hA: [18, -6], hB: [2, -16], tilt: 0.55 },
+    rise:     { dx: 20, hip: [0, -15], fA: [5, -1], fB: [-5, -1], hA: [4, -18], hB: [-2, -17], tilt: 0.02 },
+  });
+  const GP = poses({                                      // the watcher: a brawler - big, square, fists up
+    stance:  { hip: [0, -19], fA: [8, -1], fB: [-9, -1], hA: [13, -41], hB: [8, -36], tilt: 0.06 },
+    windup:  { rot: -0.05, hip: [-3, -19], fA: [7, -1], fB: [-10, -1], hA: [10, -40], hB: [-13, -43], tilt: -0.2 },
+    punch:   { dx: 4, hip: [3, -19], fA: [11, -1], fB: [-8, -1], hA: [6, -36], hB: [24, -41], tilt: 0.25 },
+    stumble: { dx: 3, hip: [1, -18], fA: [10, -1], fB: [-6, -1], hA: [10, -27], hB: [-6, -25], tilt: 0.3 },
+    hitHead: { dx: -2, hip: [-3, -19], fA: [6, -1], fB: [-10, -1], hA: [5, -36], hB: [-2, -33], tilt: -0.32 },
+    hitHead2:{ dx: -3, rot: -0.03, hip: [-3, -19], fA: [6, -1], fB: [-10, -1], hA: [2, -34], hB: [-4, -31], tilt: -0.22 },
+    lookUp:  { hip: [-1, -19], fA: [7, -1], fB: [-8, -1], hA: [10, -44], hB: [6, -40], tilt: -0.25 },
+    shoved:  { dx: 12, hip: [3, -18], fA: [12, -1], fB: [-4, -1], hA: [16, -30], hB: [10, -28], tilt: 0.45 },
+    turned:  { spin: 1, hip: [0, -19], fA: [8, -1], fB: [-9, -1], hA: [13, -41], hB: [8, -36], tilt: 0.06 },
+    fold:    { dx: -1, hip: [-2, -18], fA: [7, -1], fB: [-8, -1], hA: [6, -26], hB: [3, -24], tilt: 0.55 },
+    buckle:  { rot: 0.05, hip: [-1, -15], fA: [6, -1], fB: [-9, -1], hA: [10, -34], hB: [4, -30], tilt: 0.15 },
+    flung:   { dx: -10, hip: [-5, -19], fA: [2, -1], fB: [-12, -1], hA: [-4, -46], hB: [-10, -40], tilt: -0.5 },
+    flung2:  { dx: -20, hip: [-5, -19], fA: [2, -1], fB: [-12, -1], hA: [-6, -47], hB: [-12, -41], tilt: -0.55 },
+    dazed:   { hip: [-2, -18], fA: [6, -1], fB: [-8, -1], hA: [6, -25], hB: [-4, -24], tilt: -0.1 },
+    out:     { hip: [-1, -19], fA: [6, -1], fB: [-6, -1], hA: [-10, -38], hB: [-14, -32] },
+  });
+  // Body plans: limb lengths and widths, the shoulder, the torso (a capsule from ta to tb), the head.
+  const NB = { leg: 9.5, legW: 4, arm: 7, armW: 4, sh: [0, -13], ta: [0, -3.5], tb: [0, -10.5], tw: 13, head: [1.5, -23], hr: 7.5, neck: [-5, -24] };
+  const GB = { leg: 10.5, legW: 5, arm: 10, armW: 4.5, sh: [-2, -22], ta: [0, -6], tb: [0, -16], tw: 18, head: [1, -33], hr: 8 };
+  function spinScale(s) {                                 // the turn, as a squeeze: never quite flat
+    const k = Math.cos(Math.PI * s);
+    return Math.abs(k) >= 0.3 ? k : (((s % 2) + 2) % 2 < 0.5 || ((s % 2) + 2) % 2 > 1.5 ? 0.3 : -0.3);
+  }
+  // The pose's points on screen, for a fighter standing at x, facing f.
+  function rig(x, by, f, p, B) {
+    const sx = spinScale(p.spin);
+    const hip = [p.hip[0] + p.dx, p.hip[1] - p.lift];
+    const cr = Math.cos(p.rot), sr = Math.sin(p.rot);
+    const map = q => {
+      const lx = q[0] - hip[0], ly = q[1] - hip[1];
+      return [x + f * (hip[0] + (lx * cr - ly * sr) * sx), by + hip[1] + lx * sr + ly * cr];
+    };
+    const L = q => [q[0] + p.dx, q[1] - p.lift];                      // a hand or foot, moved with him
+    const ct = Math.cos(p.tilt), st = Math.sin(p.tilt);
+    const T = q => [hip[0] + q[0] * ct - q[1] * st, hip[1] + q[0] * st + q[1] * ct];   // a body point, tilted
+    return { sx, fe: f * Math.sign(sx), hip: map(hip), fA: map(L(p.fA)), fB: map(L(p.fB)), hA: map(L(p.hA)), hB: map(L(p.hB)),
+      sh: map(T(B.sh)), ta: map(T(B.ta)), tb: map(T(B.tb)), head: map(T(B.head)), neck: B.neck ? map(T(B.neck)) : null,
+      ear: map(T([-3, -31])), collar: map(T([-5, -24])) };
+  }
+  function arm2(c, sh, hand, seg, w, col) {               // an arm with an elbow: it hangs below the line
+    const dx = hand[0] - sh[0], dy = hand[1] - sh[1], len = Math.hypot(dx, dy) || 0.0001;
+    const half = Math.min(len / 2, seg * 0.999);
+    let nx = -dy / len, ny = dx / len;
+    if (ny < 0) { nx = -nx; ny = -ny; }
+    const h = Math.sqrt(seg * seg - half * half);
+    const el = [sh[0] + dx / len * half + nx * h, sh[1] + dy / len * half + ny * h];
+    limb(c, sh, el, w, col); limb(c, el, hand, w, col);
+  }
+  function drawRig(c, R, B, col) {
+    leg(c, R.hip, R.fB, B.leg, R.fe, B.legW, col);
+    leg(c, R.hip, R.fA, B.leg, R.fe, B.legW, col);
+    arm2(c, R.sh, R.hB, B.arm, B.armW, col);               // the far arm, behind the body
+    limb(c, R.ta, R.tb, B.tw, col);
+    circle(c, R.head[0], R.head[1], B.hr, col);
+    arm2(c, R.sh, R.hA, B.arm, B.armW, col);               // the near arm, over it
+  }
+  const ninjaFightNeck = (x, by, f, p) => rig(x, by, f, p, NB).neck;
+  function fightNinja(c, x, by, f, p, col, time) {
+    const R = rig(x, by, f, p, NB);
+    drawRig(c, R, NB, col);
+    if (R.sx > 0 || p.face > 0.5) eyes(c, R.head[0], R.head[1], R.fe, time);   // back turned in a spin: no eyes
+  }
+  // The watcher: a guard without the cap or the torch - bare head, an earpiece, both fists up.
+  // fall (0..1): he goes over backwards from his feet and ends flat on his back.
+  // hp (1..0): his health, shown as his colour - near black, fading to a dull grey as he's worn down.
+  const guardGrey = hp => grey(Math.round(lerp(0x58, 0x12, clamp(hp, 0, 1))));
+  function fightGuard(c, x, by, f, p, fall = 0, wob = 0, hp = 1) {
+    const col = guardGrey(hp);
+    c.save();
+    if (fall > 0) { c.translate(x, by - fall * 9); c.rotate(-f * fall * Math.PI / 2); c.translate(-x, -by); }
+    const R = rig(x, by, f, Object.assign({}, p, { tilt: p.tilt + wob }), GB);
+    drawRig(c, R, GB, col);
+    c.strokeStyle = col; c.lineWidth = 1; c.beginPath();  // the earpiece: a wire from his ear to his collar
+    c.moveTo(R.ear[0], R.ear[1]); c.quadraticCurveTo(R.ear[0] - R.fe * 5, R.ear[1] + 4, R.collar[0], R.collar[1]); c.stroke();
+    c.restore();
+  }
+  function tellMarks(c, x, y, k, time) {                  // his wind-up: three ticks over his head, flickering
+    if (k <= 0) return;
+    c.strokeStyle = `rgba(255,255,255,${(0.6 + 0.4 * Math.sin(time * 38)) * k})`; c.lineWidth = 1.5;
+    for (const ang of [-0.55, 0, 0.55]) {
+      const dx = Math.sin(ang), dy = -Math.cos(ang);
+      c.beginPath(); c.moveTo(x + dx * 5, y + dy * 5); c.lineTo(x + dx * 10, y + dy * 10); c.stroke();
+    }
+  }
+  function spark(c, x, y, k, size = 1) {                  // a blow landing: a quick white burst
+    if (k <= 0 || k >= 1) return;
+    const r = (3 + k * 9) * size;
+    c.strokeStyle = `rgba(255,255,255,${0.9 * (1 - k)})`; c.lineWidth = 1.2;
+    for (let i = 0; i < 6; i++) {
+      const a = i * TAU / 6 + 0.3;
+      c.beginPath(); c.moveTo(x + Math.cos(a) * r * 0.4, y + Math.sin(a) * r * 0.4); c.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r); c.stroke();
+    }
+  }
+  // keys: [[time, pose name, ease], ...]; the ease is how it gets there: "snap" (a strike: fast out,
+  // settling in) or smooth. The whole-body turn (rot) takes the short way round.
+  function poseAt(keys, set, t) {
+    let i = 0;
+    while (i < keys.length - 1 && keys[i + 1][0] <= t) i++;
+    const A = keys[i], B = keys[Math.min(i + 1, keys.length - 1)];
+    let u = B[0] > A[0] ? clamp((t - A[0]) / (B[0] - A[0]), 0, 1) : 0;
+    u = B[2] === "snap" ? 1 - (1 - u) ** 3 : u * u * (3 - 2 * u);
+    const pa = set[A[1]], pb = set[B[1]], o = {};
+    for (const k in pa) {
+      if (Array.isArray(pa[k])) o[k] = [lerp(pa[k][0], pb[k][0], u), lerp(pa[k][1], pb[k][1], u)];
+      else if (k === "rot") { let d = pb.rot - pa.rot; d -= TAU * Math.round(d / TAU); o.rot = pa.rot + d * u; }
+      else o[k] = lerp(pa[k], pb[k], u);
+    }
+    o.name = u < 0.5 ? A[1] : B[1];
+    return o;
+  }
+  function numAt(keys, t) {                               // keys: [[time, value], ...], eased between
+    if (!keys || !keys.length) return 0;
+    let i = 0;
+    while (i < keys.length - 1 && keys[i + 1][0] <= t) i++;
+    const A = keys[i], B = keys[Math.min(i + 1, keys.length - 1)];
+    const u = B[0] > A[0] ? clamp((t - A[0]) / (B[0] - A[0]), 0, 1) : 0;
+    return lerp(A[1], B[1], u * u * (3 - 2 * u));
+  }
+
+  // a desk, as in draw_node.gd (_prop "desk"): x is its left end
+  function drawDesk(c, x, y, col = grey(0x15)) {
+    c.fillStyle = col;
+    c.fillRect(x, y - 28, 70, 6); c.fillRect(x + 4, y - 22, 4, 22); c.fillRect(x + 62, y - 22, 4, 22);
+    c.fillRect(x + 40, y - 22, 22, 16); c.fillRect(x + 14, y - 46, 24, 16); c.fillRect(x + 24, y - 30, 4, 2);
+  }
+
   function eyes(c, hx, hy, f, time) {
     if (time % 4.3 < 0.12) return;                       // blink
     for (const [ox, oy, r] of [[f * 2.5, -1.5, 1.7], [f * 5.8, -1.8, 1.5]]) {
@@ -379,6 +648,7 @@ One colour, one thing: the scarf, and only in shadow. Floor by floor the colour 
     const cap = document.createElement("div"); cap.className = "cap"; cap.innerHTML = `${title} <i>${note}</i>`;
     el.append(cv, cap); parent.append(el);
     cards.push({ cv, w, h, draw });
+    return el;
   }
   function setup(cv, w, h) {
     const dpr = window.devicePixelRatio || 1;
@@ -454,6 +724,231 @@ One colour, one thing: the scarf, and only in shadow. Floor by floor the colour 
   gCard("Chasing", "115 px/s", "run", 115);
   gCard("Searching", "turns, sweeps the torch", "search", 0);
   gCard("Asleep", "after a takedown", "asleep", 0);
+
+  // ---- moving a desk: the ninja and the desk move together; the floor slides by ----
+  const D = document.getElementById("desk");
+  const DW = 150;
+  const dCard = (title, note, speed, f, vis = 0) => {
+    const n = makeNinja("grip", speed); n.f = f;
+    const cx = f > 0 ? 34 : DW - 34;
+    card(D, title, note, DW, H, (c, dt, time) => {
+      updateNinja(n, dt, cx, FY, 26);
+      stage(c, DW, H, FY, n.dist, null);
+      const v = opt.light === "lit" ? 0.55 : vis;
+      const edge = cx + f * DESK_GAP;
+      drawDesk(c, f > 0 ? edge : edge - 70, FY);
+      drawNinja(c, n, cx, FY, 26, v, time);
+      if (Math.abs(speed) > 40) {                        // the scrape: a small ring at the desk's feet, now and then
+        const k = (n.t % 0.45) / 0.45;
+        c.strokeStyle = `rgba(255,255,255,${0.35 * (1 - k)})`; c.lineWidth = 1;
+        c.beginPath(); c.arc(edge + f * 35, FY, 6 + k * 26, Math.PI, TAU); c.stroke();
+      }
+    });
+  };
+  dCard("Gripping", "hold E · hands on the end", 0, 1);
+  dCard("Pushing", "70 px/s · it scrapes", 70, 1);
+  dCard("Pulling", "70 px/s · backing up", -70, 1);
+  dCard("Pushing, quietly", "hold Shift · 35 px/s, silent", 35, 1);
+  dCard("Pulling, quietly", "the other way round", 35, -1);
+  const lowCard = (title, note, speed, f) => {             // behind the desk, its middle over him
+    const n = makeNinja("low", speed); n.f = f;
+    const cx = DW / 2;
+    card(D, title, note, DW, H, (c, dt, time) => {
+      updateNinja(n, dt, cx, FY, 26);
+      stage(c, DW, H, FY, n.dist, null);
+      drawDesk(c, cx - 35, FY);
+      drawNinja(c, n, cx, FY, 26, opt.light === "lit" ? 0.55 : 0, time);
+    });
+  };
+  lowCard("Holding it low", "↓ + E · hidden, hands on top", 0, 1);
+  lowCard("Moving it, hidden", "↓ + E · 30 px/s, silent", 30, 1);
+  lowCard("Moving it back", "the other way", -30, -1);
+
+  // ---- fighting: each move a short loop; the exchange strings them together ----
+  // A beat: { len, n: ninja keys, g: watcher keys, fall: his fall (0..1), tell: [from, to],
+  //   sparks: [[t, "g" | "n", dx, dy, size]] (dx from him / the ninja, dy from the floor; size 2 shakes it),
+  //   wob: true while he's dazed }
+  const F = document.getElementById("fight"), FS = document.getElementById("fightspecial"), FG = document.getElementById("fightguard"), FW2 = document.getElementById("fightwide");
+  const FH = 112, FFY = 96;
+  const FT = new URLSearchParams(location.search).get("ft");   // ?ft=4.4 holds the fight cards at that moment (for screenshots)
+  const BEATS = {
+    squared: { len: 1.0, n: [[0, "stance"]], g: [[0, "stance"]] },
+    // one press: one of these, at random
+    jab: { len: 1.0,
+      n: [[0, "stance"], [0.05, "stance"], [0.11, "jab", "snap"], [0.2, "jab"], [0.38, "stance"]],
+      g: [[0, "stance"], [0.11, "stance"], [0.15, "hitHead", "snap"], [0.3, "hitHead"], [0.6, "stance"]],
+      sparks: [[0.12, "g", -9, -42, 1]] },
+    cross: { len: 1.0,
+      n: [[0, "stance"], [0.06, "stance"], [0.13, "cross", "snap"], [0.22, "cross"], [0.4, "stance"]],
+      g: [[0, "stance"], [0.13, "stance"], [0.17, "hitHead", "snap"], [0.34, "hitHead"], [0.65, "stance"]],
+      sparks: [[0.14, "g", -9, -40, 1]] },
+    body: { len: 1.2,
+      n: [[0, "stance"], [0.05, "stance"], [0.14, "rhChamber"], [0.22, "rhKick", "snap"], [0.32, "rhKick"], [0.42, "rhBack"], [0.6, "stance"]],
+      g: [[0, "stance"], [0.22, "stance"], [0.27, "fold", "snap"], [0.55, "fold"], [0.9, "stance"]],
+      sparks: [[0.23, "g", -9, -28, 1.2]] },
+    leg: { len: 1.1,
+      n: [[0, "stance"], [0.05, "stance"], [0.12, "rhChamber"], [0.2, "lkKick", "snap"], [0.28, "lkKick"], [0.38, "rhBack"], [0.55, "stance"]],
+      g: [[0, "stance"], [0.2, "stance"], [0.25, "buckle", "snap"], [0.5, "buckle"], [0.85, "stance"]],
+      sparks: [[0.21, "g", -7, -9, 1]] },
+    teep: { len: 1.3,
+      n: [[0, "stance"], [0.06, "stance"], [0.16, "tpChamber"], [0.24, "tpKick", "snap"], [0.34, "tpKick"], [0.5, "stance"]],
+      g: [[0, "stance"], [0.24, "stance"], [0.3, "flung", "snap"], [0.55, "flung"], [1.05, "stance"]],
+      sparks: [[0.25, "g", -9, -24, 1.2]] },
+    // three quick presses: a special
+    spin: { len: 1.8,
+      n: [[0, "stance"], [0.1, "stance"], [0.22, "sbLoad"], [0.32, "sbKick", "snap"], [0.44, "sbKick"], [0.62, "stance"]],
+      g: [[0, "stance"], [0.32, "stance"], [0.38, "flung2", "snap"], [0.8, "flung2"], [1.5, "stance"]],
+      sparks: [[0.33, "g", -9, -26, 2]] },
+    knee: { len: 1.9,
+      n: [[0, "stance"], [0.1, "stance"], [0.2, "fkStep"], [0.33, "fkAir", "snap"], [0.45, "fkAir"], [0.62, "fkLand"], [0.85, "stance"]],
+      g: [[0, "stance"], [0.33, "stance"], [0.38, "hitHead", "snap"], [0.46, "flung2"], [0.9, "flung2"], [1.6, "stance"]],
+      sparks: [[0.35, "g", -9, -40, 2]] },
+    scissor: { len: 2.6,
+      n: [[0, "stance"], [0.1, "stance"], [0.22, "ksLoad"], [0.38, "ksFly", "snap"], [0.58, "ksDown"], [0.9, "ksDown"], [1.15, "ksUp"], [1.6, "stance"]],
+      g: [[0, "stance"], [0.4, "stance"], [0.48, "stumble"], [0.75, "out"]],
+      fall: [[0, 0], [0.45, 0], [0.72, 1]],
+      sparks: [[0.73, "g", 30, -3, 2]] },
+    superman: { len: 1.7,
+      n: [[0, "stance"], [0.08, "stance"], [0.2, "smChamber"], [0.32, "smFly", "snap"], [0.42, "smFly"], [0.55, "smLand"], [0.8, "stance"]],
+      g: [[0, "stance"], [0.32, "stance"], [0.36, "hitHead", "snap"], [0.44, "flung"], [0.8, "flung"], [1.4, "stance"]],
+      sparks: [[0.33, "g", -9, -42, 1.6]] },
+    flurry: { len: 1.8,
+      n: [[0, "stance"], [0.06, "jab", "snap"], [0.12, "cross", "snap"], [0.18, "jab", "snap"], [0.24, "cross", "snap"], [0.3, "jab", "snap"], [0.38, "palm", "snap"], [0.5, "palm"], [0.75, "stance"]],
+      g: [[0, "stance"], [0.07, "hitHead", "snap"], [0.13, "hitHead2", "snap"], [0.19, "hitHead", "snap"], [0.25, "hitHead2", "snap"], [0.31, "hitHead", "snap"], [0.4, "flung2", "snap"], [0.8, "flung2"], [1.5, "stance"]],
+      sparks: [[0.07, "g", -9, -42, 0.7], [0.13, "g", -9, -38, 0.7], [0.19, "g", -9, -43, 0.7], [0.25, "g", -9, -39, 0.7], [0.31, "g", -9, -42, 0.7], [0.39, "g", -9, -36, 1.6]] },
+    sweep: { len: 2.4,
+      n: [[0, "stance"], [0.08, "stance"], [0.2, "swDrop"], [0.32, "swSweep", "snap"], [0.45, "swSweep"], [0.7, "swRise"], [1.0, "stance"]],
+      g: [[0, "stance"], [0.32, "stance"], [0.38, "hitHead"], [0.6, "out"]],
+      fall: [[0, 0], [0.33, 0], [0.62, 1]],
+      sparks: [[0.33, "g", -6, -4, 1], [0.63, "g", 30, -3, 1.8]] },
+    flash: { len: 1.9,
+      n: [[0, "stance"], [0.08, "stance"], [0.2, "flCrouch"], [0.32, "flKick", "snap"], [0.44, "flOver"], [0.6, "flLand"], [0.85, "stance"]],
+      g: [[0, "stance"], [0.31, "stance"], [0.35, "hitHead", "snap"], [0.45, "flung2"], [0.9, "flung2"], [1.6, "stance"]],
+      sparks: [[0.33, "g", -10, -44, 1.8]] },
+    vault: { len: 2.6,
+      n: [[0, "stance"], [0.08, "stance"], [0.2, "vtCrouch"], [0.36, "vtPlant"], [0.5, "vtOver"], [0.62, "vtDown"], [0.74, "vtLand"], [0.86, "vtLand"], [0.96, "vtKick", "snap"], [1.08, "vtKick"], [1.25, "vtSet"]],
+      g: [[0, "stance"], [0.3, "stance"], [0.42, "lookUp"], [0.75, "lookUp"], [0.96, "lookUp"], [1.0, "shoved", "snap"], [1.35, "shoved"], [1.9, "stumble"], [2.4, "stance"]],
+      sparks: [[0.97, "g", 10, -30, 1.8]] },
+    // moving: jump (or jump + away) hops back - short, in a fight; jump + toward him goes over him
+    hop: { len: 1.5,
+      n: [[0, "stance"], [0.1, "hopCrouch"], [0.22, "hopAir", "snap"], [0.36, "hopLand"], [0.7, "hopLand"], [1.1, "stance"]],
+      g: [[0, "stance"]] },
+    over: { len: 2.4,
+      n: [[0, "stance"], [0.08, "stance"], [0.2, "vtCrouch"], [0.36, "vtPlant"], [0.5, "vtOver"], [0.62, "vtDown"], [0.74, "vtLand"], [1.0, "overSet"]],
+      g: [[0, "stance"], [0.3, "stance"], [0.42, "lookUp"], [0.8, "lookUp"], [0.92, "turned", "snap"]] },
+    // his attack: the tell, then the haymaker
+    late: { len: 2.2,
+      n: [[0, "stance"], [1.03, "stance"], [1.09, "hit", "snap"], [1.4, "hit"], [1.8, "stance"]],
+      g: [[0, "stance"], [0.3, "windup"], [0.95, "windup"], [1.04, "punch", "snap"], [1.25, "punch"], [1.6, "stance"]],
+      tell: [0.3, 0.95], sparks: [[1.06, "n", 4, -38, 1.3]] },
+    counter: { len: 2.2,
+      n: [[0, "stance"], [0.45, "stance"], [0.52, "block", "snap"], [0.98, "block"], [1.04, "parry", "snap"], [1.1, "parry"], [1.15, "palm", "snap"], [1.3, "palm"], [1.6, "stance"]],
+      g: [[0, "stance"], [0.3, "windup"], [0.95, "windup"], [1.03, "punch", "snap"], [1.08, "stumble"], [1.14, "stumble"], [1.18, "flung", "snap"], [1.5, "flung"], [2.0, "stance"]],
+      tell: [0.3, 1.0], sparks: [[1.05, "n", 14, -37, 0.8], [1.16, "g", -9, -36, 1.3]] },
+    // dazed: the next press is the finisher - clinch, a knee, the sweep, one more on the floor
+    finish: { len: 3.4,
+      n: [[0, "stance"], [0.3, "stance"], [0.42, "fnGrab"], [0.6, "fnGrab"], [0.68, "fnKnee", "snap"], [0.8, "fnKnee"], [0.92, "fnGrab"], [1.04, "fnSweep", "snap"], [1.3, "fnSweep"], [1.6, "fnUp"], [1.72, "fnDown", "snap"], [1.95, "fnDown"], [2.5, "rise"]],
+      g: [[0, "dazed"], [0.62, "dazed"], [0.7, "fold", "snap"], [0.95, "fold"], [1.05, "hitHead"], [1.3, "out"]],
+      fall: [[0, 0], [1.04, 0], [1.42, 1]], wob: [[0, 0.62]], hp0: 0,
+      sparks: [[0.7, "g", -9, -30, 1], [1.43, "g", 30, -3, 1.5], [1.73, "g", 17, -5, 1.2]] },
+  };
+  // His health: each blow that lands on him takes some - a strike 0.2, a special 0.4, one of a flurry 0.04.
+  const dmg = size => size >= 1.5 ? 0.4 : size < 1 ? 0.04 : 0.2;
+  function hpAt(b, t) {
+    let hp = b.hp0 === undefined ? 1 : b.hp0;
+    for (const sp of b.sparks || []) if (sp[1] === "g") hp -= dmg(sp[4] || 1) * clamp((t - sp[0]) / 0.15, 0, 1);
+    return clamp(hp, 0, 1);
+  }
+  // The beats, in order, into one: times shifted along.
+  function chain(names) {
+    const out = { len: 0, n: [], g: [], fall: [], tell: [], sparks: [], wob: [] };
+    for (const name of names) {
+      const b = BEATS[name], o = out.len;
+      for (const k of ["n", "g", "fall"]) for (const e of (b[k] || [])) out[k].push([e[0] + o, ...e.slice(1)]);
+      if (!b.fall) out.fall.push([o, 0]);
+      if (b.tell) out.tell.push([b.tell[0] + o, b.tell[1] + o]);
+      for (const sp of (b.sparks || [])) out.sparks.push([sp[0] + o, ...sp.slice(1)]);
+      for (const w of (b.wob || [])) out.wob.push([w[0] + o, w[1] + o]);
+      out.len += b.len;
+    }
+    return out;
+  }
+  const fightCard = (parent, title, note, b, w = 170) => {
+    const n = makeNinja("fight", 0);
+    const nx = w / 2 - 30, by = FFY;
+    let t = 0;
+    const tells = b.tell && b.tell.length ? (Array.isArray(b.tell[0]) ? b.tell : [b.tell]) : [];
+    const wrap = u => ((u % b.len) + b.len) % b.len;
+    const ninjaAt = u => { const p = poseAt(b.n, NP, wrap(u)); return p; };
+    let hover = false;
+    const el = card(parent, title, note, w, FH, (c, dt, time) => {
+      const was = t;
+      t = FT !== null ? wrap(+FT) : wrap(t + dt);
+      if (hover && FT === null)                          // the thuds: each blow as it lands
+        for (const sp of b.sparks || []) if (t >= was ? sp[0] > was && sp[0] <= t : sp[0] > was || sp[0] <= t) thud(sp[4] || 1);
+      const pn = ninjaAt(t), pg = poseAt(b.g, GP, t);
+      if (pn.name === "stance" || pn.name === "block") pn.lift += Math.sin(time * 7) * 0.7;   // light on his feet
+      const gx = nx + 33, fall = numAt(b.fall, t);
+      n.pose = pn;
+      n.neckAt = ninjaFightNeck(nx, by, 1, pn);
+      updateNinja(n, dt, nx, by, 26);
+      // a heavy blow shakes the frame for a moment
+      let shake = 0;
+      for (const sp of b.sparks || []) { const k = (t - sp[0]) / 0.16; if ((sp[4] || 1) >= 1.5 && k > 0 && k < 1) shake = Math.sin(t * 160) * 1.6 * (1 - k); }
+      c.save(); c.translate(shake, 0);
+      stage(c, w, FH, by, 0, null);
+      const wob = (b.wob || []).some(r => t >= r[0] && t < r[1]) ? Math.sin(time * 3.1) * 0.09 : 0;
+      fightGuard(c, gx, by, -1, pg, fall, wob, hpAt(b, t));
+      // speed lines: where his hands and feet were a moment ago, if they moved fast
+      const ext = u => { const R = rig(nx, by, 1, ninjaAt(u), NB); return [R.fA, R.fB, R.hA, R.hB]; };
+      let prev = ext(t);
+      for (let k = 1; k <= 6; k++) {
+        const cur = ext(t - k * 0.014);
+        for (let i = 0; i < 4; i++) {
+          if (Math.hypot(prev[i][0] - cur[i][0], prev[i][1] - cur[i][1]) > 2.2) {
+            c.strokeStyle = `rgba(210,210,210,${0.32 * (1 - k / 7)})`; c.lineWidth = 2.2;
+            c.beginPath(); c.moveTo(prev[i][0], prev[i][1]); c.lineTo(cur[i][0], cur[i][1]); c.stroke();
+          }
+        }
+        prev = cur;
+      }
+      drawNinja(c, n, nx, by, 26, opt.light === "lit" ? 0.55 : 0, time);
+      for (const r of tells) {
+        const k = t < r[0] ? 0 : t < r[1] ? Math.min(1, (t - r[0]) / 0.08) : 0;
+        tellMarks(c, gx + 1, by - 64, k, time);
+      }
+      for (const sp of b.sparks || []) spark(c, (sp[1] === "g" ? gx : nx) + sp[2], by + sp[3], (t - sp[0]) / 0.25, sp[4] || 1);
+      c.restore();
+    });
+    el.addEventListener("mouseenter", () => hover = true); el.addEventListener("mouseleave", () => hover = false);
+  };
+  fightCard(F, "Jab", "one press · at random", BEATS.jab);
+  fightCard(F, "Cross", "one press · the rear hand", BEATS.cross);
+  fightCard(F, "Body kick", "one press · he folds", BEATS.body);
+  fightCard(F, "Leg kick", "one press · his knee buckles", BEATS.leg);
+  fightCard(F, "Push kick", "one press · knocks him back", BEATS.teep);
+  fightCard(FS, "Spinning back kick", "3+ quick presses", BEATS.spin);
+  fightCard(FS, "Flying knee", "3+ quick presses", BEATS.knee);
+  fightCard(FS, "Scissor takedown", "3+ quick presses · he goes down", BEATS.scissor);
+  fightCard(FS, "Superman punch", "3+ quick presses · a fake knee, then he flies in", BEATS.superman);
+  fightCard(FS, "Beatdown", "3+ quick presses · a flurry, a palm to finish", BEATS.flurry);
+  fightCard(FS, "Spinning sweep", "3+ quick presses · he goes down", BEATS.sweep);
+  fightCard(FS, "Backflip kick", "3+ quick presses · up through his chin", BEATS.flash);
+  fightCard(FS, "Vault and back kick", "3+ quick presses · over his head, behind him", BEATS.vault);
+  fightCard(FG, "Jump back", "jump (or jump + away) · a short hop: a fight keeps it short", BEATS.hop);
+  fightCard(FG, "Over him", "jump + toward him · hands on his shoulders, a flip; he spins round", BEATS.over);
+  {
+    const levels = [1, 0.66, 0.33, 0];
+    card(FG, "His health", "no bar: he fades - full, two thirds, one third, dazed", 240, FH, (c, dt, time) => {
+      stage(c, 240, FH, FFY, 0, null);
+      levels.forEach((hp, i) => fightGuard(c, 36 + i * 56, FFY, -1, hp > 0 ? GP.stance : GP.dazed, 0, hp > 0 ? 0 : Math.sin(time * 3.1) * 0.09, hp));
+    });
+  }
+  fightCard(FG, "His tell, too late", "the meter jumps, he shouts", BEATS.late);
+  fightCard(FG, "Block, in time", "Y / right click on the tell · parry, palm", BEATS.counter);
+  fightCard(FG, "The finisher", "dazed · clinch, knee, sweep, one more", BEATS.finish);
+  fightCard(FW2, "The exchange", "jab, leg kick, a hop back, his tell and the counter, a backflip kick - he fades as he's worn down - the finisher",
+    chain(["squared", "jab", "leg", "hop", "counter", "flash", "finish"]), 240);
 
   // ---- speech: one script, four treatments ----
   // [speaker, line, gesture]; ~words~ are the ones he half-hears (drawn faint).
@@ -569,6 +1064,27 @@ One colour, one thing: the scarf, and only in shadow. Floor by floor the colour 
     path(); c.fillStyle = fill; c.fill();
     lines.forEach((l, i) => drawLine(c, l, bx + bw / 2, by + 6 + lh * i + lh / 2 + 0.5, inkc, faint));
     c.restore();
+  }
+
+  // a blow landing: a low thud - a pitch drop and a puff of noise. size < 1 (one of several hits in a
+  // flurry, or a parry) is a smaller, higher, shorter thud; a special (1.5+) is a deep one.
+  function thud(size = 1) {
+    if (opt.thud !== "on") return;
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === "suspended") actx.resume();
+    const t = actx.currentTime + 0.01;
+    const small = size < 1, big = size >= 1.5;
+    const f0 = small ? 190 : big ? 120 : 150, f1 = small ? 80 : big ? 38 : 52;
+    const len = small ? 0.09 : big ? 0.26 : 0.16, vol = small ? 0.22 : big ? 0.55 : 0.38;
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = "sine"; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + len);
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + 0.004); g.gain.exponentialRampToValueAtTime(0.0005, t + len);
+    o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + len + 0.02);
+    const n = Math.floor(actx.sampleRate * 0.05), buf = actx.createBuffer(1, n, actx.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n) ** 2;
+    const src = actx.createBufferSource(), lp = actx.createBiquadFilter(), ng = actx.createGain();
+    src.buffer = buf; lp.type = "lowpass"; lp.frequency.value = small ? 1400 : 900; ng.gain.value = vol * 0.5;
+    src.connect(lp); lp.connect(ng); ng.connect(actx.destination); src.start(t);
   }
 
   // murmurs: a soft, muffled mumble per syllable, a different pitch for each guard (WebAudio, off by default)

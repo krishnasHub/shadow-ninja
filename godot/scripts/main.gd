@@ -9,6 +9,7 @@ const DrawNode := preload("res://scripts/draw_node.gd")
 const Hud := preload("res://scripts/hud.gd")
 const PostShader := preload("res://shaders/post.gdshader")
 const Levels := preload("res://scripts/levels.gd")
+const Fight := preload("res://scripts/fight.gd")
 
 const VIEW_W := 960.0
 const VIEW_H := 540.0
@@ -34,6 +35,11 @@ const TUNE := {
 	"land_noise_v": 600.0,                      # landings faster than this are loud (drops of up to 3 tiles are quiet)
 	"flip_time": 0.65,                          # pulling a lever: the ninja stops, reaches, pulls
 	"lever_reach": 48.0,                        # a lever this close (px, either side) is pulled; he steps over to it first
+	# moving a desk (remembered after Floor 4): hold E / X at its end, move to push or pull. Shift: slow and silent
+	"push": 70.0, "push_quiet": 35.0, "push_low": 30.0, "ramp_push": 0.5,
+	"desk_gap": 10.0,                           # his middle stands this far off the desk's end, hands on it
+	"desk_reach": 22.0,                         # grip a desk from this close to its end (or anywhere along it)
+	"scrape_every": 0.45,                       # seconds between scrapes while it moves
 }
 const METER_SUSPICIOUS := 0.35
 const METER_ALERT := 0.65
@@ -50,14 +56,21 @@ const GUARD := {
 # Lock-on: a camera that sees you stops sweeping and follows you (at this rate, within its arc
 # plus slack) until you hide, a wall cuts the line, or you leave its reach. Then it eases back.
 const CAM_LOCK := {"track": 0.8, "slack": 0.3, "ease_back": 1.5}
-# The alarm: a camera that spots you starts the countdown. Leave the floor or put a stone through
-# the alarm panel in time, or it's a lockdown: every guard on alert, hunting where you were seen.
+# The alarm: a camera that spots you starts the countdown. Leave the floor or put a star through
+# the alarm panel in time (once you remember the stars), or it's a lockdown: every guard on alert, hunting where you were seen.
 const ALARM := {"countdown": 30.0, "lockdown": 30.0, "regroup": 5.0}
-const NOISE := {"run": 150.0, "land": 120.0, "stone": 280.0, "thud": 140.0, "lever": 230.0, "rattle": 90.0,
-	"glass": 300.0, "tink": 80.0}
-const STONE := {"max": 3, "max_speed": 700.0, "gravity": 1400.0, "r": 3.0}
-# Throwing stars (remembered after Floor 3): straight and fast; one through a lamp or a camera's lens
-# puts it out for good. Not picked up again.
+const NOISE := {"run": 150.0, "land": 120.0, "panel": 280.0, "thud": 140.0, "lever": 230.0, "rattle": 90.0,
+	"glass": 300.0, "tink": 80.0, "scrape": 110.0, "shout": 320.0}
+# Fighting (remembered after Floor 5) - only the watchers: no torch, they see you in the dark up close
+# (sight px in front; in any light, lit_sight), can't be dropped on, and find the guards you leave asleep.
+# He squares up when he's on you (engage px); or strike when you're by one (reach px). One press: a strike;
+# quick presses (3 inside `quick` s): a special. His wind-up: block in it and you counter; miss it and he
+# lands it - the meter jumps (`hit`) and he shouts. Worn down (each blow takes some), he's dazed: the next
+# press finishes it. Moves and poses: fight.gd.
+const FIGHT := {"engage": 46.0, "reach": 62.0, "sight": 64.0, "lit_sight": 300.0, "find": 70.0,
+	"hit": 0.35, "quick": 0.55, "attack": [1.3, 2.4], "step": 90.0, "leave": 170.0}
+# Throwing stars (remembered after Floor 3; there's nothing to throw before that): straight and fast;
+# one through a lamp, a camera's lens or an alarm panel puts it out for good. Not picked up again.
 const STAR := {"max": 3, "speed": 950.0, "range": 700.0, "gravity": 1400.0}
 
 const STOPS_LAMP := [[0.0, 1.0], [0.5, 0.85], [0.8, 0.5], [1.0, 0.0]]
@@ -90,6 +103,11 @@ class Player:
 	var was_hidden := false
 	var flip_sw := -1         # pulling this switch (index), -1 = not
 	var flip_t := 0.0
+	var grip := -1           # the desk (index into props) he's gripping, -1 = none
+	var grip_on := false     # hands on it (false while he steps over to its end)
+	var grip_low := false    # gripping it ducked behind it (↓ + E): it moves, he stays hidden
+	var scrape_t := 0.0
+	var tuck_to := -1.0      # letting go with ↓: he slides in behind the desk, to this x
 
 class Lt:
 	var kind := "lamp"
@@ -151,15 +169,14 @@ class Guard:
 	var lockdown := false    # hunting in a lockdown
 	var sleep_t := 0.0
 	var torch: Lt
-
-class Stone:
-	var x := 0.0
-	var y := 0.0
-	var vx := 0.0
-	var vy := 0.0
-	var resting := false
-	var clacked := false
-	var taken := false
+	var kind := "guard"      # or "watcher": no torch, and you fight him
+	var hp := 1.0            # a watcher's health: he fades to a dull grey as it goes; 0 = dazed
+	var ko := false          # put down in a fight
+	var gm := ""             # in a fight: the move his body is playing (fight.gd), and how far in
+	var gt := 0.0
+	var fall := 0.0          # in a fight: 0 standing .. 1 flat on his back
+	var fpose: Dictionary = {}
+	var next_attack := 0.0
 
 class Star:
 	var x := 0.0
@@ -218,9 +235,23 @@ var talk_i := 0
 var talk_t := 0.0
 const TALK_GAP := 0.7          # s after a line before the next: it lifts away in the last part of this
 var bars := 0.0                 # letterbox, 0..1
+# The recall: a floor that follows a memory with an ability in it (cling, the stars...) opens on it. The bars come in, the camera closes in on him,
+# and he says what's coming back ("in" -> "say"); a new tool flashes in at the top and drops into the
+# HUD ("gift", only for one with an icon - the stars); then the camera pulls back and the bars go ("out").
+# Skippable, and skipped on a retry.
+var recall := ""                # "" | "in" | "say" | "gift" | "out"
+var recall_t := 0.0
+var recall_i := 0               # the line he's on
+var recall_mem: Dictionary = {} # the memory he's recalling (the floor before's `remember`)
+var recall_seen := -1           # the floor whose recall played this run: a retry starts after it
+var recall_on := true           # dev tools turn it off, so tests start a floor in play
+var zoom := 1.0                 # camera zoom: 1 in play, RECALL.zoom in the recall
+const RECALL := {"zoom": 1.9, "in": 1.3, "gift": 2.6, "fly": 1.7}   # gift: the flash, then it flies to the HUD from "fly"
+# What a remembered ability shows in the recall's flash (only the ones with a HUD icon).
+const GIFTS := {"stars": {"name": "THROWING STARS", "keys": "CTRL  to throw", "pad": "hold RT  to throw"}}
 var notice := ""                # a line that fades in mid-screen, e.g. "a door unlocks below."
 var pad := false                # the last input came from a controller: prompts name its buttons
-var pad_aim := Vector2.ZERO     # controller throw mode: where the stone goes, relative to the ninja
+var pad_aim := Vector2.ZERO     # controller throw mode: where the star goes, relative to the ninja
 var pad_rt := false             # right trigger held (throw mode lasts while it is)
 var pad_stick := Vector2i.ZERO  # menus: the left stick's direction (one step per push)
 var howto_seen := false         # the how-to-play card shows once, before the first New Game
@@ -243,11 +274,9 @@ var lights: Array = []          # static lights (lamps, moon, sign)
 var torch_pool: Array = []      # one torch light per guard, reused across runs
 var guards: Array = []
 var noises: Array = []
-var stones: Array = []
-var stone_count := 0
 var stars: Array[Star] = []
 var star_count := 0
-var weapon := "stone"           # what throw mode throws: "stone" or "star" (Q / X switches)
+var star_max := 0               # stars this floor (STAR.max unless the floor says otherwise)
 var P := Player.new()
 var scarf_pos := PackedVector2Array()
 var scarf_prev := PackedVector2Array()
@@ -299,6 +328,20 @@ var sfx_panel: AudioStreamPlayer
 var sfx_whoosh: AudioStreamPlayer
 var sfx_glass: AudioStreamPlayer
 var sfx_tink: AudioStreamPlayer
+var sfx_scrape: AudioStreamPlayer
+var sfx_thud: AudioStreamPlayer
+var sfx_thud_small: AudioStreamPlayer
+var sfx_thud_big: AudioStreamPlayer
+var sfx_shout: AudioStreamPlayer
+var fight: Guard = null         # the watcher he's fighting
+var nm := ""                    # the move he's playing in it ("" = squared up), and how far in
+var nt := 0.0
+var npose: Dictionary = {}      # his pose this frame
+var presses: Array = []         # when strike was pressed: three quick ones are a special
+var last_move := ""
+var fx: Array = []              # blows landing: {p, t, size} - a white burst
+var shake_t := -99.0
+var stage_node: Node2D          # the static world layer: redrawn when a desk moves
 var rattle_t := -99.0           # when a locked door was last tried
 var heart_t := 0.0              # time since the last heartbeat
 var last_beat := -99.0          # when it last beat (the screen's red-edge pulse follows it)
@@ -331,6 +374,7 @@ func _ready() -> void:
 	load_level(0)
 	start_run()
 	state = "title"
+	recall_on = not (_capture.has("capture") or _capture.has("selftest")) or _capture.get("selftest", "") == "recall"
 	if _capture.has("capture"):
 		_capture_setup(_capture.get("setup", "title"))
 	if _capture.has("selftest"):
@@ -354,6 +398,12 @@ func _ready() -> void:
 			_selftest_intro()
 		elif _capture.selftest == "music":
 			_selftest_music()
+		elif _capture.selftest == "recall":
+			_selftest_recall()
+		elif _capture.selftest == "push":
+			_selftest_push()
+		elif _capture.selftest == "fight":
+			_selftest_fight()
 		else:
 			_selftest()
 		get_tree().quit()
@@ -384,6 +434,13 @@ func _setup_music() -> void:
 	sfx_whoosh = _sfx_player("whoosh")
 	sfx_glass = _sfx_player("glass")
 	sfx_tink = _sfx_player("tink")
+	sfx_scrape = _sfx_player("scrape")
+	sfx_thud = _sfx_player("thud")
+	sfx_thud_small = _sfx_player("thud_small")
+	sfx_thud_big = _sfx_player("thud_big")
+	sfx_shout = _sfx_player("shout")
+	for sp in [sfx_thud, sfx_thud_small, sfx_thud_big]:
+		sp.max_polyphony = 4                 # a flurry's thuds overlap
 	sfx_siren = _sfx_player("siren", true)
 	sfx_siren.volume_db = -9.0
 	sfx_riser.volume_db = -80.0
@@ -483,7 +540,8 @@ func build_layers() -> void:
 		add_child(px)
 		static_nodes.append(_add_draw(spec[0], px, spec[2]))
 	# main layer
-	static_nodes.append(_add_draw("stage", self, 0))
+	stage_node = _add_draw("stage", self, 0)
+	static_nodes.append(stage_node)
 	draw_nodes.append(_add_draw("actors_back", self, -1))     # the ninja while hidden: furniture draws over him
 	draw_nodes.append(_add_draw("actors", self, 1))
 	# foreground silhouettes sweep past faster than the world
@@ -595,7 +653,7 @@ func update_hints(dt: float) -> void:
 		var x0: float = h[0] * T
 		var dx := maxf(0.0, maxf(x0 - mid, mid - (x0 + w)))
 		var up: float = P.y + P.h - h[1]
-		var near: bool = dx < HINT_NEAR.x and up >= 0.0 and up < HINT_NEAR.y and intro != "talk"
+		var near: bool = dx < HINT_NEAR.x and up >= 0.0 and up < HINT_NEAR.y and not cutscene()
 		hint_a[i] = move_toward(hint_a[i], 1.0 if near else 0.0, dt * (HINT_NEAR["in"] if near else HINT_NEAR.out))
 
 # The opening scene. See `intro` above.
@@ -603,7 +661,7 @@ func intro_guards() -> Array:
 	return guards.filter(func(g): return g.intro_to >= 0.0)
 
 func update_intro(dt: float) -> void:
-	bars = move_toward(bars, 1.0 if intro == "talk" else 0.0, dt * 1.6)
+	bars = move_toward(bars, 1.0 if intro == "talk" or recall in ["in", "say", "gift"] else 0.0, dt * 1.6)
 	if intro == "":
 		return
 	intro_t += dt
@@ -696,6 +754,59 @@ func end_talk(skip := false) -> void:
 		elif g.state == "intro_talk":
 			g.state = "intro_exit"
 
+# No control and nobody looks: the opening's talk, or a recall.
+func cutscene() -> bool:
+	return intro == "talk" or recall != ""
+
+# The recall. See `recall` above.
+func start_recall(mem: Dictionary) -> void:
+	recall = "in"
+	recall_t = 0.0
+	recall_i = 0
+	recall_mem = mem
+	recall_seen = level_idx
+	level_t = 99.0                          # the floor's name waits for it
+	aiming = false
+
+func recall_gift() -> Dictionary:           # the new tool he gets back, if it has an icon to flash
+	for a in recall_mem.get("abilities", []):
+		if GIFTS.has(a):
+			return GIFTS[a]
+	return {}
+
+func update_recall(dt: float) -> void:
+	if recall == "":
+		return
+	recall_t += dt
+	var k := 1.0 - exp(-dt * 2.6)
+	zoom = lerpf(zoom, 1.0 if recall == "out" else RECALL.zoom, k)
+	match recall:
+		"in":
+			if recall_t >= RECALL["in"]:
+				recall = "say"
+				recall_t = 0.0
+		"say":
+			if recall_t > line_dur([0, recall_mem.say[recall_i]]) + TALK_GAP:
+				next_recall_line()
+		"gift":
+			if recall_t >= RECALL.gift:
+				end_recall()
+		"out":
+			if absf(zoom - 1.0) < 0.01 and bars <= 0.0:
+				zoom = 1.0
+				recall = ""
+				level_t = 0.0                   # now the floor's name
+
+func next_recall_line() -> void:
+	recall_i += 1
+	recall_t = 0.0
+	if recall_i >= recall_mem.say.size():
+		recall = "gift" if not recall_gift().is_empty() else "out"
+
+func end_recall() -> void:                  # skip, or done: pull back out
+	recall = "out"
+	recall_t = 0.0
+
 # A guard leaves the floor for good (the opening's two, once they've gone).
 func drop_guard(g: Guard) -> void:
 	g.torch.level = 0.0
@@ -725,7 +836,7 @@ func raise_alarm(x: float) -> void:
 	alarm = "alarm"
 	alarm_left = ALARM.countdown
 	alarm_raised = true
-	notice = "the alarm is up. get out - or kill the panel."
+	notice = "the alarm is up. get out." if panels.is_empty() or not can.has("stars") else "the alarm is up. get out - or kill the panel."
 	notice_t = 0.0
 
 func update_alarm(dt: float) -> void:
@@ -756,12 +867,11 @@ func update_alarm(dt: float) -> void:
 					g.lockdown = false
 					g.alert = g.found_body
 
-func break_panel(pn: Dictionary, s: Stone) -> void:
+func break_panel(pn: Dictionary) -> void:
 	pn.broken = true
 	pn.broken_t = time
-	s.vx *= -0.3
 	sfx_panel.play()
-	make_noise(s.x, s.y, NOISE.stone)
+	make_noise(pn.x * T, pn.row * T - 48, NOISE.panel)
 	if alarm == "alarm":
 		alarm = ""
 		notice = "alarm off."
@@ -1120,6 +1230,10 @@ func start_run(idx := -1) -> void:
 	alarm_raised = false
 	run_t = 0.0
 	new_best = false
+	props = []                              # a retry: the desks are back where they were
+	for p in level.props:
+		props.append({"type": p[0], "x": float(p[1]), "y": float(p[2] * T)})
+	stage_node.queue_redraw()
 	P = Player.new()
 	P.x = spawn.x
 	P.y = spawn.y
@@ -1132,9 +1246,11 @@ func start_run(idx := -1) -> void:
 		torch_pool[i].level = 0.0
 		torch_pool[i].guard = null
 	noises.clear()
-	stones.clear()
 	stars.clear()
-	stone_count = STONE.max
+	fight = null
+	nm = ""
+	presses.clear()
+	fx.clear()
 	meter = 0.0
 	exposure = 0.0
 	calm = 0.0
@@ -1158,8 +1274,8 @@ func start_run(idx := -1) -> void:
 		if "mark" in mem.get("colors", []):
 			evil_mark = true
 	scarf_red = scarf_reach > 0.0
-	star_count = STAR.max if can.has("stars") else 0
-	weapon = "stone"
+	star_max = level.get("stars", STAR.max) if can.has("stars") else 0
+	star_count = star_max
 	intro = ""
 	bars = 0.0
 	alarm_quiet = false
@@ -1176,10 +1292,17 @@ func start_run(idx := -1) -> void:
 			if g.intro_to >= 0.0:
 				g.state = "intro"
 				g.facing = -1
+	recall = ""
+	zoom = 1.0
+	var prev: Dictionary = Levels.LEVELS[level_idx - 1].get("remember", {}) if level_idx > 0 else {}
+	if recall_on and not prev.get("abilities", []).is_empty() and recall_seen != level_idx:   # only for something he can do
+		start_recall(prev)
 
 var test_keys = null    # self-test: a Dictionary of held keys replaces the keyboard
 
 func held(k: String) -> bool:
+	if recall != "":                        # in the recall he just stands there
+		return false
 	if test_keys != null:
 		return test_keys.has(k)
 	match k:
@@ -1191,6 +1314,7 @@ func held(k: String) -> bool:
 			or joy_btn(JOY_BUTTON_A)
 		"down": return Input.is_physical_key_pressed(KEY_DOWN) or Input.is_physical_key_pressed(KEY_S) \
 			or joy_btn(JOY_BUTTON_B) or joy_btn(JOY_BUTTON_DPAD_DOWN) or joy_axis(JOY_AXIS_LEFT_Y) > 0.7
+		"grip": return Input.is_physical_key_pressed(KEY_E) or joy_btn(JOY_BUTTON_X)
 		"walk": return Input.is_physical_key_pressed(KEY_SHIFT) \
 			or joy_axis(JOY_AXIS_TRIGGER_LEFT) > 0.4 or joy_btn(JOY_BUTTON_LEFT_SHOULDER)
 	return false
@@ -1217,7 +1341,7 @@ func toggle_music() -> void:
 
 # A controller button, pressed. In menus the buttons stand in for keys; in play they're the controls.
 func pad_button(b: int) -> void:
-	if b == JOY_BUTTON_Y:
+	if b == JOY_BUTTON_Y and in_menu():         # music: Y in a menu (in play, Y blocks in a fight)
 		toggle_music()
 		return
 	if in_menu():
@@ -1233,7 +1357,19 @@ func pad_button(b: int) -> void:
 		elif b == JOY_BUTTON_START or b == JOY_BUTTON_B:
 			end_talk(true)
 		return
+	if recall != "" and state == "play" and b != JOY_BUTTON_BACK:
+		if b == JOY_BUTTON_A and recall == "say":
+			next_recall_line()
+		elif (b == JOY_BUTTON_START or b == JOY_BUTTON_B) and recall != "out":
+			end_recall()
+		return
 	match b:
+		JOY_BUTTON_X:
+			if fight_ready():
+				fight_strike()
+		JOY_BUTTON_Y:
+			if fight != null:
+				fight_block()
 		JOY_BUTTON_A:
 			if state == "play":
 				jump_queued = true
@@ -1246,8 +1382,6 @@ func pad_button(b: int) -> void:
 					open_menu("title")
 		JOY_BUTTON_B:
 			aiming = false                  # cancels a throw
-		JOY_BUTTON_X:
-			switch_weapon()
 		JOY_BUTTON_BACK:
 			start_run()
 		JOY_BUTTON_START:
@@ -1255,14 +1389,13 @@ func pad_button(b: int) -> void:
 
 # Hold RT (or RB) to aim with the right stick; let go to throw.
 func pad_throw(down: bool) -> void:
-	if state != "play":
+	if state != "play" or recall != "":
 		return
-	if down and not aiming and has_ammo():
+	if down and not aiming and can_throw():
 		aiming = true
-		pick_loaded()
 		pad_aim = Vector2(P.facing * 5 * T, -T)
 	elif not down and aiming:
-		throw_now()
+		throw_star()
 		aiming = false
 
 func _unhandled_input(e: InputEvent) -> void:
@@ -1310,16 +1443,24 @@ func _unhandled_input(e: InputEvent) -> void:
 			elif code in [KEY_ESCAPE, KEY_P]:
 				end_talk(true)
 			return
+		if recall != "" and state == "play" and code != KEY_R:
+			if code in [KEY_SPACE, KEY_ENTER, KEY_KP_ENTER, KEY_W, KEY_UP] and recall == "say":
+				next_recall_line()
+			elif code in [KEY_ESCAPE, KEY_P] and recall != "out":
+				end_recall()
+			return
 		match code:
 			KEY_SPACE, KEY_W, KEY_UP:
 				jump_queued = true
+			KEY_E, KEY_F:                   # a fight: strike (E is the grip otherwise)
+				if fight_ready():
+					fight_strike()
+			KEY_Q:
+				if fight != null:
+					fight_block()
 			KEY_CTRL:                       # throw mode on/off
 				if state == "play":
-					aiming = not aiming and has_ammo()
-					if aiming:
-						pick_loaded()
-			KEY_Q, KEY_TAB:                 # stone or star
-				switch_weapon()
+					aiming = not aiming and can_throw()
 			KEY_R:
 				start_run()
 			KEY_ESCAPE, KEY_P:
@@ -1346,6 +1487,10 @@ func _unhandled_input(e: InputEvent) -> void:
 			var l := level_item_at(get_viewport().get_mouse_position())
 			if l >= 0:
 				level_sel = l
+	elif e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_RIGHT:
+		pad = false
+		if fight != null and state == "play":
+			fight_block()
 	elif e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT:
 		pad = false
 		if in_menu():
@@ -1359,6 +1504,7 @@ func _unhandled_input(e: InputEvent) -> void:
 				var l := level_item_at(get_viewport().get_mouse_position())
 				if l >= 0:
 					intro_seen = false
+					recall_seen = -1
 					start_run(l)
 			elif menu_page != "":
 				menu_page = ""
@@ -1366,9 +1512,11 @@ func _unhandled_input(e: InputEvent) -> void:
 				var i := menu_item_at(get_viewport().get_mouse_position())
 				if i >= 0:
 					menu_activate(i)
-		elif aiming:                        # outside throw mode the mouse does nothing
-			throw_now()
+		elif aiming:                        # throw mode: a click throws
+			throw_star()
 			aiming = false                  # one throw per Ctrl
+		elif state == "play" and fight_ready():   # otherwise, by a watcher: strike
+			fight_strike()
 
 # =====================================================================
 #  MENUS - title (New Game / About / Controls / Quit) and pause (Resume + the same).
@@ -1412,6 +1560,7 @@ func menu_activate(i: int) -> void:
 			state = "play"
 		"New Game":
 			intro_seen = false
+			recall_seen = -1
 			if howto_seen:
 				start_run(0)
 			else:
@@ -1451,6 +1600,7 @@ func menu_key(code: int) -> void:
 	if menu_page == "howto":                # any key or button: play
 		menu_page = ""
 		intro_seen = false
+		recall_seen = -1
 		start_run(0)
 		return
 	if menu_page == "quit":                 # Are you sure?  ← → choose, Enter picks, Y / N shortcuts
@@ -1473,6 +1623,7 @@ func menu_key(code: int) -> void:
 				level_sel = (level_sel + 1) % n
 			KEY_ENTER, KEY_KP_ENTER, KEY_SPACE:
 				intro_seen = false
+				recall_seen = -1
 				start_run(level_sel)
 			KEY_ESCAPE, KEY_BACKSPACE:
 				menu_page = ""
@@ -1578,6 +1729,10 @@ func update_cling(dt: float, dir: int) -> bool:
 	return true                         # silent: shimmying makes no noise
 
 func update_player(dt: float) -> void:
+	if fight != null:                        # squared up: update_fight has him
+		P.vx = 0.0
+		P.running = false
+		return
 	var dir := (1 if held("right") else 0) - (1 if held("left") else 0)
 	if aiming:                              # throw mode: hold still and face the cursor (ducking still works)
 		dir = 0
@@ -1594,6 +1749,8 @@ func update_player(dt: float) -> void:
 	if P.flip_sw >= 0:
 		update_flip(dt)
 		return
+	if P.grip >= 0 and update_grip(dt, dir):
+		return
 	var want_crawl := held("down")
 	if want_crawl and P.on_ground and not P.crawling:
 		P.y += TUNE.stand_h - TUNE.crawl_h
@@ -1603,6 +1760,12 @@ func update_player(dt: float) -> void:
 		P.y -= TUNE.stand_h - TUNE.crawl_h
 		P.h = TUNE.stand_h
 		P.crawling = false
+	if P.tuck_to >= 0.0:                    # let go of a desk with ↓: slide in behind it
+		if P.crawling and absf(P.x - P.tuck_to) > 0.5 and not rect_hits(move_toward(P.x, P.tuck_to, 220.0 * dt), P.y, P.w, P.h):
+			P.x = move_toward(P.x, P.tuck_to, 220.0 * dt)
+			dir = 0
+		else:
+			P.tuck_to = -1.0
 	P.running = not held("walk") and not P.crawling       # running is the default; Shift sneaks
 	if dir != 0:
 		P.facing = dir
@@ -1642,8 +1805,14 @@ func update_player(dt: float) -> void:
 	var was_on_ground := P.on_ground
 	var impact_v := P.vy
 	P.on_ground = false
+	var feet_was := P.y + P.h
 	P.y += P.vy * dt
-	if rect_hits(P.x, P.y, P.w, P.h):
+	var desk_top := on_desk(feet_was) if P.vy >= 0.0 else -1.0
+	if desk_top >= 0.0:                     # landed on (or still standing on) a desk
+		P.y = desk_top - P.h
+		P.on_ground = true
+		P.vy = 0.0
+	elif rect_hits(P.x, P.y, P.w, P.h):
 		if P.vy > 0:
 			P.y = floorf((P.y + P.h - 0.001) / T) * T - P.h
 			P.on_ground = true
@@ -1668,6 +1837,14 @@ func update_player(dt: float) -> void:
 				P.cover = i
 				break
 	P.hidden = P.cover >= 0 and P.crawling
+	# ducked behind a desk, hold E / X as well and he grips it low: it moves with him, and he stays hidden
+	if can.has("push") and held("grip") and P.hidden and props[P.cover].type == "desk" and P.tuck_to < 0.0 and not aiming:
+		P.grip = P.cover
+		P.grip_on = true
+		P.grip_low = true
+		P.vx = 0.0
+		P.move_t = 0.0
+		return
 	# walk up to a lever and the ninja pulls it himself
 	if P.on_ground and not P.crawling:
 		for i in switches.size():
@@ -1678,6 +1855,22 @@ func update_player(dt: float) -> void:
 				P.vx = 0.0
 				P.lean = 0.0
 				break
+	# hold E / X by a desk and he grips it (once remembered)
+	if can.has("push") and held("grip") and P.on_ground and not P.crawling and not aiming and P.flip_sw < 0:
+		var d := desk_near()
+		if d >= 0:
+			# the nearer end, unless there's no room to stand there (a desk against a wall): then the other
+			var x0: float = props[d].x * T
+			var near_side := 1 if mid < x0 + PROP_W.desk / 2 else -1
+			for side in [near_side, -near_side]:
+				var stand: float = (x0 if side > 0 else x0 + PROP_W.desk) - side * TUNE.desk_gap - P.w / 2
+				if not rect_hits(stand, P.y, P.w, P.h):
+					P.grip = d
+					P.grip_on = false
+					P.facing = side                 # he faces the desk
+					P.vx = 0.0
+					P.move_t = 0.0
+					return
 
 	var moving := absf(P.vx) > 8
 	var prev_phase := P.walk_phase
@@ -1689,6 +1882,165 @@ func update_player(dt: float) -> void:
 	var lean_to := 0.0 if (P.crawling or not moving) else P.facing * (0.62 if dashing() else 0.06)
 	P.lean = move_toward(P.lean, lean_to, dt * 2.5)
 
+# =====================================================================
+#  MOVING A DESK - grip its end (E / X), then push or pull. The light rules don't change: gripping,
+#  he's standing, so a light on him fills the meter. ↓ lets go and tucks him in behind it.
+#  Ducked behind it, ↓ + E grips it low: slow and silent, and no light finds him - but a camera
+#  that sees a desk move raises the alarm (see update_cameras). Held still under the lens, it's furniture.
+# =====================================================================
+func desk_near() -> int:                    # the desk he's standing over, else one within reach of its end
+	var mid := P.x + P.w / 2
+	for reach in [0.0, TUNE.desk_reach]:
+		for i in props.size():
+			var p: Dictionary = props[i]
+			if p.type == "desk" and absf(p.y - (P.y + P.h)) < 2 \
+					and mid > p.x * T - reach and mid < p.x * T + PROP_W.desk + reach:
+				return i
+	return -1
+
+# Once he remembers furniture moves, he uses it: a desk's top is a step to stand on (one way: walk
+# through it, land on it from above). Returns the top's y if his feet crossed it this frame, else -1.
+const DESK_TOP := 28.0
+func on_desk(feet_was: float) -> float:
+	if not can.has("push"):
+		return -1.0
+	for p in props:
+		var top: float = p.y - DESK_TOP
+		if p.type == "desk" and feet_was <= top + 0.5 and P.y + P.h >= top \
+				and P.x + P.w > p.x * T + 4 and P.x < p.x * T + PROP_W.desk - 4:
+			return top
+	return -1.0
+
+# Where the desk would be after moving dx: not into a wall, not off an edge, not into other furniture.
+func desk_can_move(i: int, dx: float) -> bool:
+	var d: Dictionary = props[i]
+	var x0: float = d.x * T + dx
+	var w: float = PROP_W.desk
+	if rect_hits(x0, d.y - 28, w, 27) or not solid_px(x0 + 2, d.y + 1) or not solid_px(x0 + w - 2, d.y + 1):
+		return false
+	for j in props.size():
+		var o: Dictionary = props[j]
+		if j != i and PROP_W.has(o.type) and absf(o.y - d.y) < 2 and x0 < o.x * T + PROP_W[o.type] and x0 + w > o.x * T:
+			return false
+	return true
+
+# The end of the desk his hands are on (he faces the desk: it's on his facing side).
+func grip_end() -> float:
+	var d: Dictionary = props[P.grip]
+	return d.x * T if P.facing > 0 else d.x * T + PROP_W.desk
+
+func release_grip() -> void:
+	P.grip = -1
+	P.grip_on = false
+	P.grip_low = false
+	P.move_t = 0.0
+
+func update_grip(dt: float, dir: int) -> bool:
+	if P.grip_low:
+		return update_grip_low(dt, dir)
+	var d: Dictionary = props[P.grip]
+	var side := P.facing
+	var mid := P.x + P.w / 2
+	if held("down"):                        # let go and tuck in behind it
+		P.tuck_to = grip_end() + side * 16 - P.w / 2
+		release_grip()
+		return false
+	if not held("grip") or not P.on_ground or aiming:
+		release_grip()
+		return false
+	jump_queued = false
+	P.running = false
+	P.cover = -1
+	P.hidden = false
+	if not P.grip_on:                       # step over to its end first
+		var to := grip_end() - side * TUNE.desk_gap
+		if absf(to - mid) > 0.5:
+			var step := move_toward(mid, to, TUNE.walk * dt) - mid
+			if rect_hits(P.x + step, P.y, P.w, P.h):
+				release_grip()
+				return false
+			P.x += step
+			P.vx = step / dt                # so the legs walk
+			P.walk_phase += absf(P.vx) * dt * 0.075
+			return true
+		P.grip_on = true
+		P.vx = 0.0
+		P.scrape_t = TUNE.scrape_every * 0.6   # the first scrape comes soon after it starts moving
+	var quiet := held("walk")
+	var max_v: float = TUNE.push_quiet if quiet else TUNE.push
+	P.move_t = P.move_t + dt if dir != 0 and (P.vx == 0 or signf(P.vx) == dir) else 0.0
+	var v: float = dir * max_v * ramp(P.move_t, TUNE.ramp_push) if dir != 0 else 0.0
+	var dx := v * dt
+	if dx != 0.0 and (not desk_can_move(P.grip, dx) or rect_hits(P.x + dx, P.y, P.w, P.h)):
+		dx = 0.0
+		v = 0.0
+	P.x += dx
+	d.x += dx / T
+	P.vx = v
+	if dx != 0.0:
+		stage_node.queue_redraw()
+	P.walk_phase += absf(P.vx) * dt * 0.1
+	if absf(P.vx) > 20.0 and not quiet:     # the legs scrape: guards nearby hear it
+		P.scrape_t += dt
+		if P.scrape_t >= TUNE.scrape_every:
+			P.scrape_t = 0.0
+			make_noise(d.x * T + PROP_W.desk / 2, d.y, NOISE.scrape)
+			sfx_scrape.play()
+	# leaning into it pushing, back from it pulling, a little in holding still
+	var lean_to: float = side * 0.1
+	if absf(P.vx) > 8.0:
+		lean_to = side * (0.3 if signf(P.vx) == side else -0.16)
+	P.lean = move_toward(P.lean, lean_to, dt * 2.5)
+	return true
+
+# Gripping it low, from behind: he crawls with it, hidden. Let go of E (or ↓) and he lets go.
+func update_grip_low(dt: float, dir: int) -> bool:
+	if not held("grip") or not held("down") or aiming:
+		release_grip()
+		return false
+	var d: Dictionary = props[P.grip]
+	jump_queued = false
+	P.running = false
+	if dir != 0:
+		P.facing = dir
+	P.move_t = P.move_t + dt if dir != 0 and (P.vx == 0 or signf(P.vx) == dir) else 0.0
+	var v: float = dir * TUNE.push_low * ramp(P.move_t, TUNE.ramp_push) if dir != 0 else 0.0
+	var dx := v * dt
+	if dx != 0.0 and (not desk_can_move(P.grip, dx) or rect_hits(P.x + dx, P.y, P.w, P.h)):
+		dx = 0.0
+		v = 0.0
+	P.x += dx
+	d.x += dx / T
+	P.vx = v
+	if dx != 0.0:
+		stage_node.queue_redraw()
+	var under: float = d.x * T + PROP_W.desk / 2 - P.w / 2      # he settles in under its middle
+	if absf(P.x - under) > 0.5 and not rect_hits(move_toward(P.x, under, 60.0 * dt), P.y, P.w, P.h):
+		P.walk_phase += 60.0 * dt * 0.12
+		P.x = move_toward(P.x, under, 60.0 * dt)
+	P.walk_phase += absf(P.vx) * dt * 0.12
+	P.lean = move_toward(P.lean, 0.0, dt * 2.5)
+	P.cover = P.grip
+	P.hidden = true
+	return true
+
+func gripping() -> bool:                     # standing at its end, hands on it
+	return P.grip >= 0 and P.grip_on and not P.grip_low
+
+func gripping_low() -> bool:                 # ducked behind it, hands up on its top
+	return P.grip >= 0 and P.grip_low
+
+func low_bob() -> float:                     # gripping low and moving it, he bobs with the shuffle
+	return -absf(sin(P.walk_phase)) * 1.2 if absf(P.vx) > 1.0 else 0.0
+
+func pushing_low() -> bool:                  # moving it from behind, hidden
+	return P.grip >= 0 and P.grip_low and absf(P.vx) > 1.0
+
+func desk_points() -> Array:                 # where a camera looks for a moving desk: its top, end to end
+	var d: Dictionary = props[P.grip]
+	var x0: float = d.x * T
+	return [Vector2(x0 + 6, d.y - 14), Vector2(x0 + PROP_W.desk / 2, d.y - 14), Vector2(x0 + PROP_W.desk - 6, d.y - 14)]
+
 # The anime run: flat out on the ground - legs under him, the body pitched forward from the hip.
 func dashing() -> bool:
 	return P.on_ground and P.running and absf(P.vx) > 200.0 and not P.crawling and not P.clinging
@@ -1697,14 +2049,20 @@ func dashing() -> bool:
 func neck() -> Vector2:
 	var cx := P.x + P.w / 2
 	var by := P.y + P.h
+	if fight != null and not npose.is_empty():
+		return Fight.rig(cx, by, P.facing, npose, Fight.NB).neck
 	if P.clinging:
 		return Vector2(cx + P.facing * 9, P.y + 11)
+	if gripping_low():
+		return Vector2(cx + P.facing * 5, by - 18 + low_bob())
 	if P.crawling:
 		return Vector2(cx + P.facing * 9, by - 11)
 	var n := Vector2(cx - P.facing * 5, by - 39)
 	if dashing():                            # the neck goes with the pitched body
 		var hip := Vector2(cx, by - 15)
 		n = hip + (n - hip).rotated(P.lean)
+	elif gripping():                         # leaning into (or back from) a desk, from the feet
+		n = Vector2(cx, by) + (n - Vector2(cx, by)).rotated(P.lean)
 	return n
 
 func reset_scarf() -> void:
@@ -1782,8 +2140,9 @@ func update_cameras(dt: float) -> void:
 			L.seeing = false
 			continue
 		if L.locked:
-			var a: float = (torso - L.pos).angle()
-			var keep: bool = not P.hidden and L.pos.distance_to(torso) < L.radius and not blocked(L.pos, torso) \
+			var target: Vector2 = desk_points()[1] if P.hidden and pushing_low() else torso
+			var a: float = (target - L.pos).angle()
+			var keep: bool = (not P.hidden or pushing_low()) and L.pos.distance_to(target) < L.radius and not blocked(L.pos, target) \
 				and absf(wrapf(a - L.base_dir, -PI, PI)) <= L.sweep_amp + CAM_LOCK.slack
 			if keep:
 				L.dir += clampf(wrapf(a - L.dir, -PI, PI), -CAM_LOCK.track * dt, CAM_LOCK.track * dt)
@@ -1793,6 +2152,9 @@ func update_cameras(dt: float) -> void:
 		var s := 0.0
 		if not P.hidden:
 			for p in sample_points():
+				s += light_at(L, p)
+		elif pushing_low():                    # hidden, but a desk on the move: the camera sees that
+			for p in desk_points():
 				s += light_at(L, p)
 		L.seeing = s > 0.05
 		if L.seeing and L.sweep_amp > 0.0:
@@ -1812,7 +2174,7 @@ func update_cameras(dt: float) -> void:
 				hear(best, px)
 
 # =====================================================================
-#  NOISE + STONES - noise is a circle; any awake guard inside it (with a clear line) goes to look
+#  NOISE + STARS - noise is a circle; any awake guard inside it (with a clear line) goes to look
 # =====================================================================
 func make_noise(x: float, y: float, r: float) -> void:
 	y -= 6                                   # lift off the floor so the floor doesn't swallow it
@@ -1832,8 +2194,8 @@ func hear(g: Guard, x: float) -> void:
 	g.state = "investigate"
 	g.invest_x = x
 
-# Aim at the mouse. Pick the throw that lands on it; if that needs more than max_speed it's
-# out of range, and you throw as hard as you can toward it (the arc shows where that lands).
+# Aim at the mouse (or, in controller throw mode, the right stick). The star leaves his hand on
+# whichever side the target is.
 func aim_target() -> Vector2:
 	if pad and aiming:
 		return Vector2(P.x + P.w / 2, P.y + P.h / 2) + pad_aim
@@ -1845,48 +2207,11 @@ func aim_throw() -> Dictionary:
 	var tgt := aim_target()
 	var side := 1 if tgt.x >= P.x + P.w / 2 else -1
 	var o := Vector2(P.x + P.w / 2 + side * 8, P.y + (8.0 if P.crawling else (12.0 if P.clinging else 14.0)))
-	var dv := tgt - o
-	var t := clampf(dv.length() / 450.0, 0.25, 0.8)
-	var v := Vector2(dv.x / t, dv.y / t - 0.5 * STONE.gravity * t)
-	var in_range := v.length() <= STONE.max_speed
-	if not in_range:
-		v = v.normalized() * STONE.max_speed
-	return {"side": side, "o": o, "v": v, "in_range": in_range, "tgt": tgt}
+	return {"side": side, "o": o, "tgt": tgt}
 
-func throw_stone() -> void:
-	if state != "play" or stone_count <= 0:
-		return
-	var a := aim_throw()
-	stone_count -= 1
-	P.facing = a.side
-	var s := Stone.new()
-	s.x = a.o.x
-	s.y = a.o.y
-	s.vx = a.v.x
-	s.vy = a.v.y
-	stones.append(s)
-
-func has_ammo() -> bool:
-	return stone_count > 0 or star_count > 0
-
-func ammo() -> int:
-	return star_count if weapon == "star" else stone_count
-
-# Stone or star. Only once the stars are remembered.
-func switch_weapon() -> void:
-	if state != "play" or not can.has("stars"):
-		return
-	weapon = "star" if weapon == "stone" else "stone"
-
-func pick_loaded() -> void:                  # into throw mode with an empty hand: take the other one
-	if ammo() == 0:
-		weapon = "star" if weapon == "stone" else "stone"
-
-func throw_now() -> void:
-	if weapon == "star":
-		throw_star()
-	else:
-		throw_stone()
+# Throw mode needs something to throw: nothing until the stars come back, nothing once they're gone.
+func can_throw() -> bool:
+	return can.has("stars") and star_count > 0
 
 func breakable(L: Lt) -> bool:
 	return (L.kind == "lamp" or L.kind == "camera") and not L.broken
@@ -1896,22 +2221,32 @@ func star_hits(L: Lt, p: Vector2) -> bool:
 	var c: Vector2 = L.pos + (Vector2(0, 4) if L.kind == "lamp" else Vector2.ZERO)
 	return p.distance_to(c) < (12.0 if L.kind == "lamp" else 13.0)
 
-# Where a star thrown along dir from o goes: the light it would put out, or where it bites into a wall,
-# or where it's spent. Used for the aim line and checked again in flight.
+# Where a star thrown along dir from o goes: the light it would put out, the alarm panel it would kill,
+# or where it bites into a wall, or where it's spent. Used for the aim line and checked again in flight.
 func star_trace(o: Vector2, dir: Vector2, max_d: float) -> Dictionary:
 	var d := 0.0
 	while d < max_d:
 		var p := o + dir * d
 		if solid_px(p.x, p.y):
-			return {"end": p - dir * 4.0, "light": null, "wall": true}
+			return {"end": p - dir * 4.0, "light": null, "panel": null, "wall": true}
 		for L in lights:
 			if breakable(L) and star_hits(L, p):
-				return {"end": p, "light": L, "wall": false}
+				return {"end": p, "light": L, "panel": null, "wall": false}
+		var pn = panel_at(p)
+		if pn != null:
+			return {"end": p, "light": null, "panel": pn, "wall": false}
 		d += 4.0
-	return {"end": o + dir * max_d, "light": null, "wall": false}
+	return {"end": o + dir * max_d, "light": null, "panel": null, "wall": false}
+
+# A live alarm panel at p (it sits on the wall at chest height), or null.
+func panel_at(p: Vector2):
+	for pn in panels:
+		if not pn.broken and absf(p.x - pn.x * T) < 9 and absf(p.y - (pn.row * T - 48)) < 11:
+			return pn
+	return null
 
 func star_aim() -> Dictionary:
-	var a := aim_throw()                    # same hand, same side as a stone
+	var a := aim_throw()
 	var dir: Vector2 = (a.tgt - a.o).normalized()
 	if dir == Vector2.ZERO:
 		dir = Vector2(P.facing, 0)
@@ -1975,10 +2310,14 @@ func update_stars(dt: float) -> void:
 					for L in lights:
 						if breakable(L) and star_hits(L, p):
 							hit = L
+					var pn = panel_at(p)
 					st.x = p.x
 					st.y = p.y
-					if hit != null:
-						break_light(hit)
+					if hit != null or pn != null:
+						if hit != null:
+							break_light(hit)
+						else:
+							break_panel(pn)            # a star through the alarm panel kills it
 						st.state = "fall"              # through the glass, and down
 						st.vx *= 0.15
 						st.vy = -80.0
@@ -2000,66 +2339,7 @@ func update_stars(dt: float) -> void:
 					st.x = nx
 					st.y = ny
 
-# One physics step for a flying stone (used by the real stone AND the aim preview). True on impact.
-func stone_step(s: Stone, dt: float) -> bool:
-	var hit := false
-	s.vy += STONE.gravity * dt
-	s.x += s.vx * dt
-	if solid_px(s.x, s.y):
-		s.x -= s.vx * dt
-		s.vx *= -0.35
-		hit = true
-	s.y += s.vy * dt
-	if solid_px(s.x, s.y):
-		s.y -= s.vy * dt
-		hit = true
-		if s.vy > 0:
-			if s.vy < 160:
-				s.resting = true
-				s.vx = 0.0
-				s.vy = 0.0
-				s.y = (floorf(s.y / T) + 1) * T - STONE.r
-			else:
-				s.vy *= -0.3
-				s.vx *= 0.6
-		else:
-			s.vy = 0.0
-	return hit
-
-func predict_path(a: Dictionary) -> Dictionary:
-	var s := Stone.new()
-	s.x = a.o.x
-	s.y = a.o.y
-	s.vx = a.v.x
-	s.vy = a.v.y
-	var pts := PackedVector2Array()
-	for i in 120:
-		if stone_step(s, 1.0 / 60.0):
-			break
-		if i % 2 == 1:
-			pts.append(Vector2(s.x, s.y))
-	return {"pts": pts, "end": Vector2(s.x, s.y)}
-
-func clack(s: Stone) -> void:
-	if not s.clacked:
-		s.clacked = true
-		make_noise(s.x, s.y, NOISE.stone)
-
-func update_stones(dt: float) -> void:
-	var px := P.x + P.w / 2
-	var feet := P.y + P.h
-	for s in stones:
-		if s.resting:
-			if stone_count < STONE.max and absf(s.x - px) < 14 and absf(s.y - feet) < 12:
-				s.taken = true
-				stone_count += 1
-			continue
-		if stone_step(s, dt):
-			clack(s)
-		for pn in panels:                    # a stone through an alarm panel kills it
-			if not pn.broken and absf(s.x - pn.x * T) < 9 and absf(s.y - (pn.row * T - 48)) < 11:
-				break_panel(pn, s)
-	stones = stones.filter(func(s): return not s.taken)
+func update_noises(dt: float) -> void:
 	for n in noises:
 		n.t += dt
 	noises = noises.filter(func(n): return n.t < 0.6)
@@ -2089,6 +2369,9 @@ func make_guard(d: Dictionary, idx: int) -> Guard:
 	g.torch.dir = g.aim
 	g.torch.node.position = g.torch.pos
 	g.torch.node.rotation = g.torch.dir
+	g.kind = d.get("kind", "guard")
+	if g.kind == "watcher":
+		g.torch.level = 0.0                  # no torch: he sees with his eyes
 	return g
 
 # Lock-on: in a chase he keeps you in sight while you're in his torch's reach with a clear line
@@ -2101,6 +2384,8 @@ func guard_tracks(g: Guard) -> bool:
 	return eye.distance_to(torso) < GUARD.torch_radius and not blocked(eye, torso)
 
 func guard_sees(g: Guard) -> bool:
+	if g.kind == "watcher":
+		return watcher_sees(g)
 	if g.state == "asleep" or g.state == "intro_exit" or (P.hidden and g.knows_hide != P.cover):
 		return false
 	var s := 0.0
@@ -2109,6 +2394,10 @@ func guard_sees(g: Guard) -> bool:
 	return s > 0.05
 
 func update_guard(g: Guard, dt: float) -> void:
+	if g.state == "fight":                           # update_fight has him
+		return
+	if g.state == "asleep" and g.ko:
+		return
 	if g.state == "asleep":
 		if time - g.sleep_t < GUARD.wake_after:
 			return
@@ -2133,6 +2422,11 @@ func update_guard(g: Guard, dt: float) -> void:
 		if g.behind_since < 0 or time - g.behind_since > GUARD.reaction:
 			g.last_seen = px
 	var seeing := time - g.track_t < 0.1 and g.state == "chase"
+	# a watcher on you, up close: he squares up
+	if g.kind == "watcher" and seeing and fight == null and can.has("fight") and P.on_ground and not P.clinging \
+			and absf(px - g.x) < FIGHT.engage and absf(g.y - (P.y + P.h)) < 8:
+		start_fight(g)
+		return
 	# a sleeping colleague in his torch puts him on alert
 	if not seeing:
 		for o in guards:
@@ -2140,6 +2434,20 @@ func update_guard(g: Guard, dt: float) -> void:
 				o.found = true
 				g.alert = true
 				g.found_body = true
+				hear(g, o.x)
+			elif g.kind == "watcher" and o.state == "asleep" and not o.found and absf(o.y - g.y) < 8 \
+					and absf(o.x - g.x) < FIGHT.find and signf(o.x - g.x) == g.facing:
+				o.found = true                       # a watcher finds him: wakes him, and the alarm goes up
+				g.alert = true
+				g.found_body = true
+				raise_alarm(o.x)
+				if not o.ko:
+					o.state = "search"
+					o.alert = true
+					o.hunting_you = false
+					o.search_start = time
+					o.search_facing = o.facing
+					o.torch.level = o.torch.intensity
 				hear(g, o.x)
 	var boost: float = GUARD.alert_speed if g.alert else 1.0
 	var target = null
@@ -2157,8 +2465,8 @@ func update_guard(g: Guard, dt: float) -> void:
 		var chasing := g.state == "chase"
 		speed = (GUARD.chase if chasing else GUARD.investigate) * boost
 		target = clampf(g.last_seen if chasing else g.invest_x, g.min_x, g.max_x)
-		if seeing and absf(px - g.x) < 30:
-			target = null                                 # standing over you
+		if seeing and absf(px - g.x) < (70.0 if g.kind == "watcher" and fight != null else 30.0):
+			target = null                                 # standing over you (a watcher waits his turn)
 		elif not seeing and absf(target - g.x) < 6:
 			g.state = "search"
 			g.hunting_you = chasing
@@ -2221,8 +2529,8 @@ func update_guards(dt: float) -> void:
 	# takedown: come down on a guard who can't see you
 	if not P.on_ground and P.vy > 0 and can.has("takedown"):
 		for g in guards:
-			if g.state == "asleep" or time - g.seen_t < 0.15:
-				continue
+			if g.state == "asleep" or g.kind == "watcher" or time - g.seen_t < 0.15:
+				continue                                      # (a watcher looks up: no dropping on him)
 			if P.x < g.x + 11 and P.x + P.w > g.x - 11 and P.y < g.y and P.y + P.h > g.y - 62:
 				takedown(g)
 	for g in guards:
@@ -2237,6 +2545,228 @@ func takedown(g: Guard) -> void:
 	g.moving = false
 	P.vy = -320.0                                         # spring off him
 	make_noise(g.x, g.y - 10, NOISE.thud)                 # the thud can bring the other guard
+
+# =====================================================================
+#  FIGHTING - the watchers (Floor 6 on). Two tracks play fight.gd's moves: his (nm, nt) and the watcher's
+#  (g.gm, g.gt). A strike sets both - he strikes, the watcher reels. His wind-up sets both too; a block in
+#  it turns both into the counter. A hop back is his alone: the watcher's punch lands on air.
+# =====================================================================
+# No torch: in the dark he sees you up close in front of him; in any light, further. Not behind him.
+func watcher_sees(g: Guard) -> bool:
+	if g.state in ["asleep", "intro_exit", "fight"] or (P.hidden and g.knows_hide != P.cover):
+		return false
+	var torso: Vector2 = sample_points()[1]
+	var eye := Vector2(g.x, g.y - 52)
+	var dx := torso.x - eye.x
+	if (signf(dx) != g.facing and absf(dx) > 6.0) or absf(g.y - (P.y + P.h)) > 40.0 or blocked(eye, torso):
+		return false
+	return absf(dx) < FIGHT.sight or (exposure > TUNE.exposed_threshold and absf(dx) < FIGHT.lit_sight)
+
+func watcher_near() -> Guard:                 # a watcher you could strike from where you stand
+	if not P.on_ground or P.clinging:
+		return null
+	var px := P.x + P.w / 2
+	for g in guards:
+		if g.kind == "watcher" and g.state != "asleep" and absf(g.x - px) < FIGHT.reach and absf(g.y - (P.y + P.h)) < 8:
+			return g
+	return null
+
+func fight_ready() -> bool:
+	return state == "play" and recall == "" and can.has("fight") and (fight != null or watcher_near() != null)
+
+func start_fight(g: Guard) -> void:
+	if P.crawling:
+		if not can_stand():
+			return
+		P.y -= TUNE.stand_h - TUNE.crawl_h
+		P.h = TUNE.stand_h
+		P.crawling = false
+	release_grip()
+	P.tuck_to = -1.0
+	fight = g
+	g.state = "fight"
+	g.seen_t = time
+	g.moving = false
+	g.cur_v = 0.0
+	g.gm = ""
+	g.next_attack = randf_range(0.7, 1.2)
+	g.facing = 1 if P.x + P.w / 2 > g.x else -1
+	P.facing = -g.facing
+	P.vx = 0.0
+	P.lean = 0.0
+	aiming = false
+	nm = ""
+	presses.clear()
+
+func end_fight() -> void:
+	if fight != null and fight.state == "fight":
+		fight.state = "chase"                    # you got away from him: after you
+		fight.last_seen = P.x + P.w / 2
+		fight.track_t = time
+	fight = null
+	nm = ""
+
+func start_move(name: String) -> void:
+	nm = name
+	nt = 0.0
+	if not Fight.MOVES[name].g.is_empty():
+		fight.gm = name
+		fight.gt = 0.0
+	if name in Fight.STRIKES or name in Fight.SPECIALS:
+		last_move = name
+
+# Where his feet would be after a move that carries him dx px (toward the watcher) - if he can stand there.
+func lands_ok(dx: float) -> bool:
+	var x := P.x + P.facing * dx
+	return not rect_hits(x, P.y, P.w, P.h) and solid_px(x + P.w / 2, P.y + P.h + 2)
+
+func fight_strike() -> void:
+	if fight == null:
+		var w := watcher_near()
+		if w == null:
+			return
+		start_fight(w)
+		if fight == null:
+			return
+	var g := fight
+	if g.gm in ["late", "counter", "getup"] or nm in ["late", "counter", "finish", "hop", "over"] or nm in Fight.SPECIALS:
+		return                                   # his swing, his fall, or a move of yours that isn't done
+	presses = presses.filter(func(t): return time - t < FIGHT.quick)
+	presses.append(time)
+	if g.hp <= 0.0:                              # dazed: finish it
+		if nm == "":
+			start_move("finish")
+		return
+	if presses.size() >= 3:                      # quick: a special, cutting the strike short
+		presses.clear()
+		var pool: Array = Fight.SPECIALS.filter(func(m): return m != last_move and (m != "vault" or lands_ok(52.0)))
+		start_move(pool[randi() % pool.size()])
+		return
+	if nm == "":
+		var pool: Array = Fight.STRIKES.filter(func(m): return m != last_move)
+		start_move(pool[randi() % pool.size()])
+
+func fight_block() -> void:                    # in his wind-up: the counter
+	var g := fight
+	var tell: Array = Fight.MOVES.late.tell
+	if g != null and g.gm == "late" and nm == "late" and g.gt >= tell[0] and g.gt <= tell[1]:
+		g.gm = "counter"
+		nm = "counter"
+
+func fight_jump(dir: int) -> void:             # a short hop back; toward him, over him
+	if nm != "" and not (nm == "late" and nt < 1.0):
+		return
+	if dir == P.facing and lands_ok(64.0):
+		start_move("over")
+	elif lands_ok(36.0 * -1.0) or lands_ok(-20.0):
+		nm = "hop"                               # his alone: whatever the watcher's doing goes on
+		nt = 0.0
+
+func hit_fx(p: Vector2, size: float) -> void:
+	fx.append({"p": p, "t": time, "size": size})
+	(sfx_thud_big if size >= 1.5 else (sfx_thud_small if size < 1.0 else sfx_thud)).play()
+	if size >= 1.5:
+		shake_t = time
+
+func knock_out(g: Guard) -> void:
+	g.state = "asleep"
+	g.ko = true
+	g.sleep_t = time
+	g.gm = ""
+	g.fall = 1.0
+	g.moving = false
+	make_noise(g.x, g.y - 10, NOISE.thud)        # he hits the floor: it carries a little
+	if fight == g:
+		fight = null
+		nm = ""
+
+func update_fight(dt: float) -> void:
+	var g := fight
+	if g == null:
+		return
+	var px := P.x + P.w / 2
+	if absf(g.x - px) > FIGHT.leave or absf(g.y - (P.y + P.h)) > 16:
+		end_fight()
+		return
+	if jump_queued:
+		jump_queued = false
+		fight_jump((1 if held("right") else 0) - (1 if held("left") else 0))
+	# the blows land as their moment comes: on him from his track, on you from his (if you're still there)
+	if g.gm != "":
+		var M: Dictionary = Fight.MOVES[g.gm]
+		var was := g.gt
+		g.gt += dt
+		for sp in M.get("sparks", []):
+			if sp[1] != "g" and sp[0] > was and sp[0] <= g.gt and nm == g.gm:
+				hit_fx(Vector2(px + P.facing * sp[2], P.y + P.h + sp[3]), sp[4])
+				if sp[1] == "n":                 # he lands it: the meter jumps, and he shouts
+					meter = minf(1.0, meter + FIGHT.hit)
+					calm = 0.0
+					sfx_shout.play()
+					make_noise(g.x, g.y - 40, NOISE.shout)
+	if nm != "":
+		var M: Dictionary = Fight.MOVES[nm]
+		var was := nt
+		nt += dt
+		for sp in M.get("sparks", []):
+			if sp[1] == "g" and sp[0] > was and sp[0] <= nt and g.gm == nm:
+				g.hp = maxf(0.0, g.hp - Fight.damage(sp[4]))
+				hit_fx(Vector2(g.x - g.facing * sp[2], g.y + sp[3]), sp[4])
+		if nt >= Fight.track_end(M.n):           # done: he stays where it left him (a hop, over the watcher)
+			var last := Fight.pose(Fight.NP, M.n[-1][1])
+			if last.dx != 0.0 and lands_ok(last.dx):
+				P.x += P.facing * last.dx
+			if last.spin > 0.5:
+				P.facing = -P.facing
+			nm = ""
+	if g.gm != "":
+		var M: Dictionary = Fight.MOVES[g.gm]
+		var falls: Array = M.get("fall", [])
+		if g.gt >= maxf(Fight.track_end(M.g), Fight.track_end(falls)):
+			var down := Fight.num_at(falls, g.gt) > 0.5
+			if Fight.pose(Fight.GP, M.g[-1][1]).spin > 0.5:
+				g.facing = -g.facing             # he turned round to face you
+			if down and g.hp <= 0.0:
+				knock_out(g)
+				return
+			g.gm = "getup" if down and g.gm != "getup" else ""
+			g.gt = 0.0
+			g.next_attack = randf_range(FIGHT.attack[0], FIGHT.attack[1])
+	px = P.x + P.w / 2
+	# between moves: face each other, he keeps his distance, and now and then he swings
+	if g.gm == "" and nm == "":
+		g.facing = 1 if px > g.x else -1
+		P.facing = -g.facing
+		var want := clampf(px + P.facing * Fight.GAP, g.min_x, g.max_x)
+		g.x = move_toward(g.x, want, FIGHT.step * dt)
+		if g.hp > 0.0 and absf(g.x - want) < 4.0:
+			g.next_attack -= dt
+			if g.next_attack <= 0.0:
+				start_move("late")
+	# the poses, for drawing
+	var stand := "dazed" if g.hp <= 0.0 else "stance"
+	npose = Fight.pose_at(Fight.MOVES[nm].n, Fight.NP, nt, "stance") if nm != "" else Fight.pose(Fight.NP, "stance")
+	if npose.name == "stance" or npose.name == "block":
+		npose.lift += sin(time * 7.0) * 0.7      # light on his feet
+	var GM: Dictionary = Fight.MOVES[g.gm] if g.gm != "" else {}
+	g.fpose = Fight.pose_at(GM.g, Fight.GP, g.gt, stand) if g.gm != "" else Fight.pose(Fight.GP, stand)
+	g.fall = Fight.num_at(GM.get("fall", []), g.gt) if g.gm != "" else 0.0
+	if g.fpose.name == "dazed":
+		g.fpose.tilt += sin(time * 3.1) * 0.09   # swaying
+	fx = fx.filter(func(e): return time - e.t < 0.3)
+
+# His pose a moment ago (speed lines), or now.
+func npose_at(t: float) -> Dictionary:
+	if nm == "":
+		return Fight.pose(Fight.NP, "stance")
+	return Fight.pose_at(Fight.MOVES[nm].n, Fight.NP, maxf(t, 0.0), "stance")
+
+# Where the watcher's tell is, if he's winding up (0..1 how strong), else 0.
+func tell_k() -> float:
+	if fight == null or not (fight.gm in ["late", "counter"]):
+		return 0.0
+	var tell: Array = Fight.MOVES[fight.gm].tell
+	return clampf((fight.gt - tell[0]) / 0.08, 0.0, 1.0) if fight.gt >= tell[0] and fight.gt < tell[1] else 0.0
 
 # =====================================================================
 #  STEP / FRAME
@@ -2254,18 +2784,23 @@ func _physics_process(dt: float) -> void:
 	if state != "play":
 		return
 	update_intro(dt)
-	if intro != "talk":                      # the talk is a cutscene: no control, nobody looks
+	update_recall(dt)
+	if recall != "":                         # the recall: he stands there (held() is all false), nothing else moves
+		update_player(dt)
+	elif intro != "talk":                    # the talk is a cutscene: no control, nobody looks
 		if not waking():                     # coming to: he can't move yet
 			update_player(dt)
-		update_stones(dt)
+		update_noises(dt)
 		update_stars(dt)
 		update_guards(dt)
+		update_fight(dt)
 		update_detection(dt)
 		update_cameras(dt)
 		update_alarm(dt)
 	update_scarf()
 	update_hints(dt)
-	run_t += dt
+	if recall == "":
+		run_t += dt                          # the floor's clock starts once he's back in control
 	level_t += dt
 	notice_t += dt
 	var target := clampf(P.x + P.w / 2 - VIEW_W * 0.45 + P.facing * 70, 0, LW * T - VIEW_W)
@@ -2280,7 +2815,17 @@ func _physics_process(dt: float) -> void:
 
 func _process(dt: float) -> void:
 	fps = lerpf(fps, 1.0 / maxf(dt, 0.001), 0.05)
-	camera.position = cam.round()
+	camera.zoom = Vector2(zoom, zoom)
+	if zoom > 1.001:                         # the recall: close in on him (his chest a little above centre)
+		var view := Vector2(VIEW_W, VIEW_H) / zoom
+		var f := Vector2(P.x + P.w / 2, P.y + P.h / 2)
+		var zp := (f - view * Vector2(0.5, 0.56)).clamp(Vector2.ZERO, Vector2(LW * T, LH * T) - view)
+		camera.position = cam.lerp(zp, (zoom - 1.0) / (RECALL.zoom - 1.0)).round()
+	else:
+		camera.position = cam.round()
+	var sk := (time - shake_t) / 0.16              # a heavy blow shakes the view for a moment
+	if sk >= 0.0 and sk < 1.0:
+		camera.position.x += sin(time * 160.0) * 2.0 * (1.0 - sk)
 	mouse_world = get_global_mouse_position()
 	Input.mouse_mode = Input.MOUSE_MODE_HIDDEN if state == "play" else Input.MOUSE_MODE_VISIBLE
 	var hb := 0.0                            # the red-edge pulse: one throb per heartbeat
@@ -2347,12 +2892,47 @@ func _capture_setup(setup: String) -> void:
 		"starthrow":                            # floor 4: stars in hand, aiming at the first lamp
 			start_run(3)
 			P.x = 13 * T
-			weapon = "star"
 			aiming = true
 			pad = true                          # aim with the stick: the real mouse would override a set target
 			for L in lights:
 				if L.kind == "lamp" and absf(L.pos.x - 16.5 * T) < 4:
 					pad_aim = L.pos + Vector2(0, 4) - Vector2(P.x + P.w / 2, 15 * T - TUNE.stand_h / 2)
+		"push", "pull":                         # floor 5: pushing the first desk (or pulling it back)
+			start_run(4)
+			P.x = 7 * T
+			level_t = 9.0
+			test_keys = {"grip": true}
+			_run(30)
+			test_keys = {"grip": true, "right" if setup == "push" else "left": true}
+		"creep":                                # floor 5: ducked behind the desk, moving it (↓ + E)
+			start_run(4)
+			props[0].x = 8.0
+			P.x = 9 * T
+			level_t = 9.0
+			test_keys = {"down": true, "grip": true, "right": true}
+		"camdesk":                              # floor 5: ducked behind a desk between bay 1's cameras
+			start_run(4)
+			props[0].x = 16.0
+			P.x = 17 * T
+			level_t = 9.0
+			test_keys = {"down": true}
+		"fight":                                # floor 6: a fight, a move part way (--move=jab --at=20 frames)
+			_capture_fight(_capture.get("move", "jab"))
+		"fighttell":                            # floor 6: his wind-up, the ticks over his head
+			_capture_fight("tell")
+		"climb":                                # floor 5: up on the desk pushed against the wall
+			start_run(4)
+			props[2].x = 52.0 - PROP_W.desk / T
+			P.x = 50.5 * T
+			P.y = 15 * T - DESK_TOP - P.h
+			P.on_ground = true
+			level_t = 9.0
+		"hall":                                 # floor 5: the hall, the first desk on its way
+			start_run(4)
+			props[3].x = 64.0
+			P.x = 63.4 * T
+			level_t = 9.0
+			test_keys = {"grip": true}
 		"starbroken":                           # floor 4: the first lamp out, glass on the floor
 			start_run(3)
 			P.x = 13 * T
@@ -2379,8 +2959,8 @@ func _capture_setup(setup: String) -> void:
 			intro = "talk"
 			talk_i = 1
 			bars = 1.0
-		"remember":                             # floor 3 cleared: the scarf comes back
-			start_run(2)
+		"remember":                             # floor 2 cleared: a memory with no ability shows on the end screen
+			start_run(1)
 			run_t = 151.0
 			state = "escaped"
 			state_t = 3.0
@@ -2393,6 +2973,14 @@ func _capture_setup(setup: String) -> void:
 			P.x = 4 * T
 			level_t = 9.0
 			test_keys = {"right": true, "walk": true}
+		"recall", "gift":                       # floor 4 opens: he remembers the stars (mid-line / the flash)
+			recall_on = true
+			start_run(3)
+			recall = "say" if setup == "recall" else "gift"
+			recall_i = 1
+			recall_t = 1.6 if setup == "recall" else 0.9
+			zoom = RECALL.zoom
+			bars = 1.0
 		"howto":                                # the how-to-play card before the first New Game
 			open_menu("title")
 			menu_page = "howto"
@@ -2477,29 +3065,6 @@ func _selftest() -> void:
 	_run(30)
 	out["duct: guard walked under, seen?"] = seen
 	out["duct: drop takedown"] = "%s, torch level %.0f" % [guards[0].state, guards[0].torch.level]
-	# stone lure: thrown from behind a desk past a guard
-	start_run()
-	guards[0].x = 47 * T
-	guards[0].facing = -1
-	P.x = 40 * T + 26
-	P.y = 15 * T - TUNE.crawl_h
-	P.h = TUNE.crawl_h
-	P.crawling = true
-	P.facing = 1
-	test_keys = {"down": true}
-	_run(2)
-	mouse_seen = true
-	mouse_world = Vector2(52 * T, 15 * T - 2)
-	throw_stone()
-	var seq := [guards[0].state]
-	var max_m := 0.0
-	for i in 60 * 16:
-		_run(1)
-		max_m = maxf(max_m, meter)
-		if seq[-1] != guards[0].state:
-			seq.append(guards[0].state)
-	out["stone: guard"] = " > ".join(seq)
-	out["stone: max meter / state"] = "%.2f / %s" % [max_m, state]
 	# noise: running behind a guard vs sneaking
 	for keys in [{"right": true}, {"right": true, "walk": true}]:
 		start_run()
@@ -2521,17 +3086,6 @@ func _selftest() -> void:
 	guards[1].pause = 99
 	make_noise(76.5 * T, 15 * T, 400)
 	out["sound: behind raised floor 304px"] = guards[1].state
-	# aim preview matches the real stone
-	start_run()
-	P.x = 41 * T
-	mouse_world = Vector2(49 * T, 15 * T - 2)
-	var a := aim_throw()
-	var pred: Vector2 = predict_path(a).end
-	throw_stone()
-	var s: Stone = stones[0]
-	while not stone_step(s, 1.0 / 60.0):
-		pass
-	out["aim: predicted vs actual landing x"] = "%.1f vs %.1f" % [pred.x, s.x]
 	# the speed ramp: run from a standstill, then let go
 	start_run()
 	P.x = 39 * T
@@ -2565,10 +3119,10 @@ func _selftest() -> void:
 	for k in out:
 		print("  ", k, ": ", out[k])
 
-# Dev tool: throw mode - Ctrl toggles it, the mouse only throws inside it, and it ends after one throw.
+# Dev tool: throw mode - nothing to throw before the stars; then Ctrl toggles it, the mouse only throws
+# inside it, and it ends after one throw.
 #   godot_console --headless --path . -- --selftest=throwmode
 func _selftest_throw_mode() -> void:
-	load_level(1)
 	var press := func(code):
 		var ev := InputEventKey.new()
 		ev.physical_keycode = code
@@ -2579,13 +3133,16 @@ func _selftest_throw_mode() -> void:
 		ev.button_index = MOUSE_BUTTON_LEFT
 		ev.pressed = true
 		_unhandled_input(ev)
-	start_run()
+	start_run(1)
 	test_keys = {}
-	P.x = 41 * T
+	press.call(KEY_CTRL)
+	print("  %s (no stars yet): ctrl -> aiming: %s" % [level.name, aiming])
+	start_run(3)
+	P.x = 9 * T
 	mouse_seen = true
-	mouse_world = Vector2(47 * T, 15 * T - 2)
+	mouse_world = Vector2(14 * T, 12 * T)
 	click.call()
-	print("  click outside throw mode -> stones left: ", stone_count)
+	print("  %s: click outside throw mode -> stars left: %d" % [level.name, star_count])
 	press.call(KEY_CTRL)
 	print("  ctrl -> aiming: ", aiming)
 	test_keys = {"right": true}
@@ -2593,7 +3150,7 @@ func _selftest_throw_mode() -> void:
 	_run(20)
 	print("  holding D while aiming -> moved px: ", P.x - x0)
 	click.call()
-	print("  click in throw mode -> stones left: ", stone_count, ", still aiming: ", aiming)
+	print("  click in throw mode -> stars left: ", star_count, ", still aiming: ", aiming)
 	press.call(KEY_CTRL)
 	press.call(KEY_CTRL)
 	print("  ctrl twice -> aiming: ", aiming)
@@ -2601,6 +3158,9 @@ func _selftest_throw_mode() -> void:
 	press.call(KEY_W)
 	_run(5)
 	print("  W jumps -> on ground: ", P.on_ground)
+	star_count = 0
+	press.call(KEY_CTRL)
+	print("  out of stars: ctrl -> aiming: ", aiming)
 	test_keys = null
 
 # Dev tool: menus - keyboard navigation, Esc pause/resume, About/Controls pages.
@@ -2800,12 +3360,9 @@ func _selftest_floor3() -> void:
 func _selftest_stars() -> void:
 	test_keys = {}
 	start_run(2)
-	switch_weapon()
-	print("  %s: stars %d, Q -> %s (not remembered yet)" % [level.name, star_count, weapon])
+	print("  %s: stars %d, can throw: %s (not remembered yet)" % [level.name, star_count, can_throw()])
 	start_run(3)
-	print("  %s: remembers %s, stars %d, stones %d" % [level.name, can.keys(), star_count, stone_count])
-	switch_weapon()
-	print("  Q -> %s" % weapon)
+	print("  %s: remembers %s, stars %d, can throw: %s" % [level.name, can.keys(), star_count, can_throw()])
 	var lamp: Lt = null
 	var cam_l: Lt = null
 	for L in lights:
@@ -2820,7 +3377,7 @@ func _selftest_stars() -> void:
 	aiming = true
 	var aim := star_aim()
 	print("  aim line at the lamp over x16.5: would put it out: %s" % (aim.trace.light == lamp))
-	throw_now()
+	throw_star()
 	aiming = false
 	var seen := {"noise": false}                  # (a dictionary: lambdas capture it by reference)
 	var t := _walk({}, func():
@@ -2840,7 +3397,7 @@ func _selftest_stars() -> void:
 	star_count = 2
 	mouse_world = lamp.pos + Vector2(0, 4)
 	aiming = true
-	throw_now()
+	throw_star()
 	aiming = false
 	_run(20)
 	print("  a guard 6 tiles off hears the glass: %s, going to x%.1f" % [g0.state, g0.invest_x / T])
@@ -2855,7 +3412,7 @@ func _selftest_stars() -> void:
 	aiming = true
 	var ca := star_aim()
 	print("  aim line at the camera: would blind it: %s" % (ca.trace.light == cam_l))
-	throw_now()
+	throw_star()
 	aiming = false
 	_walk({}, func(): return cam_l.broken, 60)
 	P.x = 90 * T
@@ -2866,14 +3423,12 @@ func _selftest_stars() -> void:
 	mouse_world = Vector2(P.x + 300, P.y - 200)
 	aiming = true
 	var miss := star_aim()
-	throw_now()
+	throw_star()
 	aiming = false
 	_run(60)
 	print("  a miss: aimed at the wall (%s), the star %s at x%.1f" % [miss.trace.wall, stars[-1].state, stars[-1].x / T])
 	star_count = 0
-	weapon = "star"
-	pick_loaded()
-	print("  out of stars: throw mode picks up the stone: %s" % weapon)
+	print("  out of stars: can throw: %s" % can_throw())
 	start_run()                                   # R: the same floor again
 	_run(2)
 	print("  retry: lamp lit again %s, camera back %s, stars %d" % [not lamp.broken and lamp.level > 0, not cam_l.broken, star_count])
@@ -2937,7 +3492,7 @@ func _selftest_lockon() -> void:
 	test_keys = null
 
 
-# Dev tool: the alarm - a camera raises it, a stone through the panel kills it, letting it run
+# Dev tool: the alarm - a camera raises it, a star through the panel kills it, letting it run
 # out means a lockdown that ends after a while; the floor time and best time are recorded.
 #   godot_console --headless --path . -- --selftest=alarm
 func _selftest_alarm() -> void:
@@ -2955,10 +3510,12 @@ func _selftest_alarm() -> void:
 	_run(2)
 	mouse_seen = true
 	mouse_world = Vector2(panels[0].x * T, panels[0].row * T - 48)
-	var a := aim_throw()
-	throw_stone()
+	aiming = true
+	var a := star_aim()
+	throw_star()
+	aiming = false
 	var hit := _walk({"down": true}, func(): return panels[0].broken, 120)
-	print("  stone from behind the cooler (in range: %s): panel broken after %.2fs, alarm: '%s', told: '%s'" % [a.in_range, hit / 60.0, alarm, notice])
+	print("  star from behind the cooler (aim rings the panel: %s): panel broken after %.2fs, alarm: '%s', told: '%s'" % [a.trace.panel == panels[0], hit / 60.0, alarm, notice])
 	_run(60)
 	print("  camera sees you again with the panel dead -> alarm: '%s'" % alarm)
 	start_run(3)
@@ -2993,6 +3550,46 @@ func _selftest_alarm() -> void:
 	P.x = exit_x
 	_run(2)
 	print("  slower run %s -> new best: %s (best still %s)" % [clock(run_t), new_best, clock(best[1])])
+	test_keys = null
+
+
+# Dev tool: the recall - a floor after a memory opens on him remembering it; skippable, skipped on a retry.
+#   godot_console --headless --path . -- --selftest=recall
+func _selftest_recall() -> void:
+	var press := func(code):
+		var ev := InputEventKey.new()
+		ev.physical_keycode = code
+		ev.pressed = true
+		_unhandled_input(ev)
+	test_keys = {}
+	start_run(0)
+	print("  %s (nothing before it): recall '%s'" % [level.name, recall])
+	for from in [0, 1, 2]:                         # clear Floors 1, 2, 3: Enter goes on to the next (2 has no ability)
+		start_run(from)
+		state = "escaped"
+		press.call(KEY_ENTER)
+		var x0 := P.x
+		var seen := {"phases": [recall], "zoom": 1.0, "lines": 0, "stars_hidden": false}
+		var t := _walk({"right": true}, func():
+			if seen.phases[-1] != recall:
+				seen.phases.append(recall)
+			seen.zoom = maxf(seen.zoom, zoom)
+			if recall == "say":
+				seen.lines = maxi(seen.lines, recall_i + 1)
+			return recall == "", 60 * 30)
+		print("  %s: %s over %.1fs, zoom up to %.2f, %d lines, moved %dpx, meter %.2f, clock %.1fs" % [level.name,
+			" > ".join(seen.phases), t / 60.0, seen.zoom, seen.lines, P.x - x0, meter, run_t])
+		print("    then: zoom %.2f, bars %.2f, floor name at %.1fs, remembers %s, can throw %s" % [zoom, bars, level_t, can.keys(), can_throw()])
+	press.call(KEY_R)
+	print("  R (retry): recall '%s'" % recall)
+	recall_seen = -1                               # as a pick from Levels does
+	start_run(3)
+	_run(90)
+	press.call(KEY_SPACE)
+	print("  space -> line %d" % recall_i)
+	press.call(KEY_ESCAPE)
+	var out := _walk({}, func(): return recall == "", 60 * 5)
+	print("  esc -> '%s'%s, back in play %.1fs later, state %s" % ["out" if out > 0 else recall, "", out / 60.0, state])
 	test_keys = null
 
 
@@ -3033,6 +3630,7 @@ func _selftest_intro() -> void:
 	_run(1)
 	print("  skipped: guards %d, alarm light %.2f" % [guards.size(), lights.filter(func(L): return L.kind == "alarm")[0].level])
 	intro_seen = false
+	recall_seen = -1
 	start_run(0)                                  # standing in the open by the machine
 	var hunt := _walk({}, func(): return intro == "", 60 * 30)
 	for i in 60 * 8:
@@ -3103,3 +3701,429 @@ func _selftest_music() -> void:
 	_unhandled_input(ev)
 	print("  M again -> playing: ", not music_base.stream_paused)
 	test_keys = null
+
+# Moving desks (Floor 5):  godot_console --headless --path . -- --selftest=push
+func _selftest_push() -> void:
+	start_run(3)
+	test_keys = {"grip": true}
+	P.x = 7 * T
+	_run(30)
+	print("  %s: E by a desk grips it: %s (not remembered yet)" % [level.name, P.grip >= 0])
+	start_run(4)
+	print("  %s: remembers %s" % [level.name, can.keys()])
+	_sleep_all()
+	_break_cameras()                              # the mechanics first, with nothing watching
+	var d: Dictionary = props[0]
+	var x0: float = d.x
+	P.x = 6 * T                                   # standing over the desk's left part
+	test_keys = {"grip": true}
+	_run(30)
+	print("  grip: desk %d, hands on: %s, facing %d, his middle %.1f px off its end" % [P.grip, P.grip_on, P.facing, grip_end() - (P.x + P.w / 2)])
+	var scrapes := func(keys: Dictionary, frames: int) -> Array:   # [desk moved px, scrapes heard]
+		test_keys = keys
+		var from: float = d.x
+		var n := 0
+		var before := noises.size()
+		for i in frames:
+			_run(1)
+			if noises.size() > before:
+				n += 1
+			before = noises.size()
+		return [(d.x - from) * T, n]
+	var r: Array = scrapes.call({"grip": true, "right": true}, 120)
+	print("  push right 2s: desk moved %.0f px, scrapes %d, lean %.2f" % [r[0], r[1], P.lean])
+	r = scrapes.call({"grip": true, "right": true, "walk": true}, 120)
+	print("  with SHIFT 2s: desk moved %.0f px, scrapes %d" % [r[0], r[1]])
+	r = scrapes.call({"grip": true, "left": true}, 60)
+	print("  pull left 1s: desk moved %.0f px, lean %.2f, still facing %d" % [r[0], P.lean, P.facing])
+	var off := grip_end() - (P.x + P.w / 2)
+	test_keys = {"grip": true, "down": true}
+	_run(1)
+	test_keys = {"down": true}
+	_run(19)
+	print("  ↓: let go %s, crawling %s, hidden %s behind desk %d (his hands were %.1f px off)" % [P.grip < 0, P.crawling, P.hidden, P.cover, off])
+	test_keys = {}
+	_run(10)
+	print("  up again: standing %s, gripping %s" % [not P.crawling, P.grip >= 0])
+	# ducked behind it, ↓ + E: he grips it low and moves it, hidden the whole way
+	P.x = d.x * T + PROP_W.desk / 2 - P.w / 2
+	test_keys = {"down": true}
+	_run(10)
+	test_keys = {"down": true, "grip": true}
+	_run(5)
+	var low := P.grip_low
+	var hid := true
+	var n0 := noises.size()
+	var from: float = d.x
+	test_keys = {"down": true, "grip": true, "right": true}
+	for i in 120:
+		_run(1)
+		hid = hid and P.hidden
+	print("  ↓ + E behind it: grips low %s, 2s moved it %.0f px, hidden all along %s, noises %d" % [low, (d.x - from) * T, hid, noises.size() - n0])
+	test_keys = {"down": true}
+	_run(5)
+	print("  let go of E: gripping %s, still hidden %s" % [P.grip >= 0, P.hidden])
+	# under a live camera: still, it's furniture; moving, it's the alarm
+	for move in [false, true]:
+		start_run(4)
+		_sleep_all()
+		props[0].x = 21.0
+		P.x = 22 * T - P.w / 2
+		test_keys = {"down": true}
+		_run(10)
+		alarm = ""                                # (he stood up in the beam for a moment, placed there)
+		alarm_raised = false
+		meter = 0.0
+		for L in lights:
+			L.locked = false
+		test_keys = {"down": true, "grip": true, "right": true} if move else {"down": true, "grip": true}
+		_run(600)
+		print("  10s under the camera behind a desk, %s: alarm %s, meter %.2f" % ["moving it" if move else "still", alarm_raised, meter])
+	# into furniture: push the second desk left until it meets the plant at x30
+	var d1: Dictionary = props[2]
+	release_grip()
+	P.x = 39 * T
+	P.y = 15 * T - P.h
+	test_keys = {"grip": true, "left": true}
+	_run(700)
+	print("  pushed into the plant: desk's left end at x%.2f (plant's right end x%.2f)" % [d1.x, 30 + PROP_W.plant / T])
+	# the wall: too high to jump, but not from a desk pushed against it
+	start_run(4)
+	_sleep_all()
+	_break_cameras()
+	var wall_top := 11.0 * T
+	P.x = 50 * T
+	var made := _walk({"right": true, "jump": true}, func(): return P.on_ground and P.y + P.h <= wall_top + 0.5, 240)
+	print("  the wall from the floor: on top %s" % (made >= 0))
+	P.x = 37 * T
+	P.y = 15 * T - P.h
+	test_keys = {"grip": true}
+	_run(30)
+	test_keys = {"grip": true, "right": true}
+	_run(600)
+	print("  desk pushed to the wall: its right end at x%.2f (wall at x52)" % (props[2].x + PROP_W.desk / T))
+	release_grip()
+	test_keys = {}
+	_run(5)
+	P.x = 48 * T
+	made = _walk({"right": true, "jump": true}, func(): return P.on_ground and P.y + P.h <= wall_top + 0.5, 240)
+	print("  onto the desk, then the wall: on top %s, at x%.1f" % [made >= 0, (P.x + P.w / 2) / T])
+	# a guard who hears it comes to look
+	start_run(4)
+	_break_cameras()
+	var g0: Guard = guards[0]
+	P.x = 6 * T
+	test_keys = {"grip": true}
+	_run(30)
+	g0.x = props[0].x * T + 35 + 90
+	g0.facing = 1                                 # his back to it
+	g0.state = "patrol"
+	g0.pause = 99.0
+	test_keys = {"grip": true, "right": true}
+	var states := [g0.state]
+	for i in 60:
+		_run(1)
+		if g0.state != states[-1]:
+			states.append(g0.state)
+	print("  a guard 90 px off, back turned, hears the scrape: %s" % " > ".join(states))
+	# the point of it all: a desk in his beat, ducked behind - he walks right over you
+	start_run(4)
+	_break_cameras()
+	g0 = guards[0]
+	g0.min_x = 8 * T                              # (he's the hall's guard, borrowed for bay 1)
+	g0.from_x = 10 * T
+	props[0].x = 17.0
+	P.x = 18 * T - P.w / 2
+	test_keys = {"down": true}
+	_run(10)
+	g0.x = 27 * T
+	g0.facing = -1
+	g0.state = "patrol"
+	g0.to_x = 14 * T
+	g0.pause = 0.0
+	var top := 0.0
+	var passed := false
+	for i in 500:
+		_run(1)
+		top = maxf(top, meter)
+		passed = passed or g0.x < 15 * T
+	print("  hidden behind a pushed desk: guard walked past %s, meter peak %.2f, his state %s" % [passed, top, g0.state])
+	# is the desk needed? the lazy way through each camera bay: just run (or sneak), whatever the sweep
+	var tries := {"bay 1 (run)": [3.0, 30.5, false], "bay 1 (sneak)": [3.0, 30.5, true], "the hall (run)": [55.0, 92.5, false],
+		"the hall (run, guard awake)": [55.0, 92.5, false]}
+	for name in tries:
+		var tr: Array = tries[name]
+		var outcomes := []
+		for k in 8:
+			start_run(4)
+			if not "awake" in name:
+				_sleep_all()
+			P.x = tr[0] * T
+			_run(k * 20)                            # a different moment in the sweeps
+			meter = 0.0
+			test_keys = {"right": true, "walk": true} if tr[2] else {"right": true}
+			var f := 0
+			while state == "play" and P.x + P.w / 2 < tr[1] * T and f < 1800:
+				_run(1)
+				f += 1
+			outcomes.append("caught" if state == "caught" else ("%.2f%s" % [meter, " alarm" if alarm_raised else ""]))
+		print("  %s without a desk: %s" % [name, outcomes])
+	# the start is dark: standing about at the spawn (or by the desk) never fills the meter
+	var idle := []
+	for x in [3.0, 7.0, 11.0]:
+		start_run(4)
+		P.x = x * T
+		test_keys = {}
+		var peak := 0.0
+		for i in 1200:
+			_run(1)
+			peak = maxf(peak, meter)
+		idle.append("x%d %.2f" % [x, peak])
+	print("  standing still for 20 s, meter peak: %s" % [idle])
+	# and with one: bay 1 leapfrogged (push while the beam's away, duck when it comes near)
+	var r1 := _leapfrog(0, 27.5)
+	print("  bay 1 behind the desk: to x%.1f in %.1fs, ducked %d times, meter peak %.2f, caught %s" % r1)
+	# the hall: two desks - push the first, then the second the rest of the way
+	var r2 := _leapfrog(3, 92.5, 55.5)
+	print("  the hall behind two desks: to x%.1f in %.1fs, ducked %d times, meter peak %.2f, caught %s" % r2)
+	# bay 1 from behind the desk (↓ + E): crawled straight through, then stopping while a lens is on it
+	for careful in [false, true]:
+		var r3 := _creep(0, 27.5, careful)
+		print("  bay 1 crept behind the desk%s: to x%.1f in %.1fs, alarm %s, meter peak %.2f" % [" (still under the lens)" if careful else "", r3[0], r3[1], r3[2], r3[3]])
+	start_run(4)
+	print("  retry: desks back at %s" % [props.filter(func(p): return p.type == "desk").map(func(p): return p.x)])
+	test_keys = null
+
+func _creep(desk: int, to_x: float, careful: bool) -> Array:
+	start_run(4)
+	_sleep_all()
+	P.x = props[desk].x * T + PROP_W.desk / 2 - P.w / 2
+	test_keys = {"down": true}
+	_run(10)
+	var frames := 0
+	var top := 0.0
+	while state == "play" and props[desk].x * T + PROP_W.desk < to_x * T and frames < 120 * 60:
+		var near := false
+		for L in lights:
+			if L.kind == "camera" and not L.broken:
+				var beam: Vector2 = L.pos + Vector2.from_angle(L.dir) * ((15 * T - L.pos.y) / sin(L.dir))
+				near = near or absf(beam.x - (props[desk].x * T + PROP_W.desk / 2)) < 140.0
+		test_keys = {"down": true, "grip": true} if careful and near else {"down": true, "grip": true, "right": true}
+		_run(1)
+		top = maxf(top, meter)
+		frames += 1
+	return [props[desk].x + PROP_W.desk / T, frames / 60.0, alarm_raised, top]
+
+func _break_cameras() -> void:
+	for L in lights:
+		if L.kind == "camera":
+			L.broken = true
+
+# A careful player on Floor 5: grip the desk he's at and push right; duck whenever a camera's beam comes
+# within reach; when the desk won't go further, walk on to the next one. Returns [x reached, s, ducks, peak, caught].
+func _leapfrog(desk: int, to_x: float, from_x := -1.0) -> Array:
+	start_run(4)
+	_sleep_all()
+	P.x = (props[desk].x if from_x < 0.0 else from_x) * T
+	var ducks := 0
+	var frames := 0
+	var top := 0.0
+	var stalled := 0
+	var walk_on := 0
+	while state == "play" and P.x + P.w / 2 < to_x * T and frames < 120 * 60:
+		var near := false
+		for L in lights:
+			if L.kind == "camera" and not L.broken:
+				var beam: Vector2 = L.pos + Vector2.from_angle(L.dir) * ((15 * T - L.pos.y) / sin(L.dir))
+				near = near or absf(beam.x - (P.x + P.w / 2)) < 140.0
+		if near:
+			if not P.crawling:
+				ducks += 1
+			test_keys = {"down": true}
+			walk_on = 0
+		elif walk_on > 0:                       # on to the next desk (or the exit), quietly
+			test_keys = {"right": true, "walk": true}
+			walk_on -= 1
+		else:
+			test_keys = {"grip": true, "right": true}
+		var x_was := P.x
+		_run(1)
+		stalled = stalled + 1 if gripping() and absf(P.x - x_was) < 0.01 and not near else 0
+		if stalled > 20:                        # this desk's done: let go and move on
+			stalled = 0
+			walk_on = 40
+		top = maxf(top, meter)
+		frames += 1
+	return [(P.x + P.w / 2) / T, frames / 60.0, ducks, top, state == "caught"]
+
+# Floor 6: the watchers and the fight.
+func _selftest_fight() -> void:
+	start_run(5)
+	print("  %s: remembers %s" % [level.name, can.keys()])
+	var w: Guard
+	# sight: no torch - in the dark, only up close and in front
+	var seen := []
+	for d in [3.0, 1.5, -1.2]:
+		w = _fight_setup(10.0, 10.0 + d, 1)
+		seen.append("%+.1f tiles: %s" % [d, watcher_sees(w)])
+	print("  a watcher in the dark sees you at %s  (exposure %.2f)" % [seen, exposure])
+	# walk up to him: he squares up
+	w = _fight_setup(10.0, 14.0, 1)
+	w.pause = 0.0
+	test_keys = {"left": true, "walk": true}
+	var f := 0
+	while fight == null and f < 600:
+		_run(1)
+		f += 1
+	test_keys = {}
+	print("  sneak up to him: a fight %s after %.1fs, %.0f px apart, facing each other %s" % [fight == w, f / 60.0, absf(w.x - (P.x + P.w / 2)), P.facing == -w.facing])
+	_run(30)
+	print("  squared up: %.0f px apart (gap %.0f)" % [absf(w.x - (P.x + P.w / 2)), Fight.GAP])
+	# one press: a strike at random
+	w.next_attack = 99.0
+	var moves := []
+	for i in 5:
+		fight_strike()
+		moves.append(nm)
+		var thuds := fx.size()
+		_run(70)
+	print("  five single presses: %s, his health now %.2f" % [moves, w.hp])
+	# three quick presses: a special
+	w.hp = 1.0
+	for i in 3:
+		fight_strike()
+		_run(6)
+	var special := nm
+	var fr := 0
+	while nm != "" and fr < 300:
+		_run(1)
+		fr += 1
+	_run(60)
+	print("  three quick presses: %s (a special: %s), his health %.2f, his move now '%s', fight on %s" % [special, special in Fight.SPECIALS, w.hp, w.gm, fight == w])
+	# his swing, not blocked: the meter jumps, he shouts
+	w = _fight_setup(10.0, 10.0 + Fight.GAP / T, -1, true)
+	var heard := false
+	var n0 := noises.size()
+	for i in 150:
+		_run(1)
+		heard = heard or noises.size() > n0
+	print("  his swing, no block: meter %.2f, the shout heard %s" % [meter, heard])
+	# blocked in the tell: the counter
+	w = _fight_setup(10.0, 10.0 + Fight.GAP / T, -1, true)
+	while w.gm != "late":
+		_run(1)
+	while w.gt < 0.6:
+		_run(1)
+	var k := tell_k()
+	fight_block()
+	var countered := nm == "counter"
+	_run(150)
+	print("  block in his tell (ticks showing %s): counter %s, meter %.2f, his health %.2f" % [k > 0.0, countered, meter, w.hp])
+	# blocked too early (no tell yet): nothing
+	w = _fight_setup(10.0, 10.0 + Fight.GAP / T, -1, true)
+	_run(5)
+	fight_block()
+	print("  block with no swing coming: %s" % ["counter" if nm == "counter" else "nothing"])
+	# a hop back in his tell: he swings at air
+	w = _fight_setup(10.0, 10.0 + Fight.GAP / T, -1, true)
+	while w.gt < 0.5 or w.gm != "late":
+		_run(1)
+	var x0 := P.x
+	jump_queued = true
+	_run(130)
+	print("  hop back in his tell: moved %.0f px back, meter %.2f (the punch missed)" % [(x0 - P.x) * P.facing, meter])
+	# jump toward him: over him; he turns round
+	w = _fight_setup(10.0, 10.0 + Fight.GAP / T, -1, true)
+	w.next_attack = 99.0
+	_run(30)
+	var side0 := signf(P.x + P.w / 2 - w.x)
+	test_keys = {"right" if P.facing > 0 else "left": true}
+	jump_queued = true
+	_run(1)
+	test_keys = {}
+	_run(120)
+	print("  jump toward him: over him %s, facing each other again %s, %.0f px apart" % [signf(P.x + P.w / 2 - w.x) == -side0, P.facing == -w.facing, absf(w.x - (P.x + P.w / 2))])
+	# worn down: dazed, then the finisher puts him out
+	w = _fight_setup(10.0, 10.0 + Fight.GAP / T, -1, true)
+	w.next_attack = 99.0
+	w.hp = 0.15
+	fight_strike()
+	_run(80)
+	var dazed := w.hp <= 0.0
+	var tries := 0
+	while fight != null and tries < 10:
+		fight_strike()
+		_run(60)
+		tries += 1
+	_run(200)
+	print("  worn down: dazed %s; then the finisher: out %s (asleep %s, ko %s), the fight over %s" % [dazed, w.ko, w.state == "asleep", w.ko, fight == null])
+	# no dropping on him
+	w = _fight_setup(10.0, 10.0, 1)
+	P.y = 9 * T
+	P.on_ground = false
+	_run(60)
+	print("  dropped onto from above: he's %s" % w.state)
+	# in the light, a fight is seen anyway
+	w = _fight_setup(21.0, 21.0 + Fight.GAP / T, -1)
+	start_fight(w)
+	w.next_attack = 99.0
+	_run(90)
+	print("  a fight under the lamp: meter %.2f after 1.5s" % meter)
+	# a watcher finds a sleeping guard: the alarm goes up
+	start_run(5)
+	var gd: Guard = guards[2]
+	var wt: Guard = guards[3]
+	for o in guards:
+		if o != gd and o != wt:
+			o.state = "asleep"
+			o.found = true
+	P.x = 4 * T
+	gd.state = "asleep"
+	gd.x = 76 * T
+	wt.x = 84 * T
+	wt.facing = -1
+	wt.to_x = 66 * T
+	wt.from_x = 66 * T
+	wt.pause = 0.0
+	test_keys = {}
+	_run(400)
+	print("  a watcher walks up to a sleeping guard: found %s, alarm '%s', the guard %s" % [gd.found, alarm, gd.state])
+	test_keys = null
+
+# Floor 6 with only the first watcher awake, at gx (tiles), standing still facing face; him at px. fight: squared up.
+func _fight_setup(gx: float, px: float, face: int, fight_now := false) -> Guard:
+	start_run(5)
+	var w: Guard = guards[0]
+	for o in guards:
+		if o != w:
+			o.state = "asleep"
+			o.torch.level = 0.0
+			o.found = true
+	w.x = gx * T
+	w.facing = face
+	w.state = "patrol"
+	w.pause = 99.0                              # standing still
+	P.x = px * T - P.w / 2
+	test_keys = {}
+	_run(2)
+	if fight_now:
+		start_fight(w)
+		w.next_attack = 0.0
+		meter = 0.0
+	return w
+
+func _capture_fight(setup: String) -> void:
+	start_run(5)
+	var w: Guard = guards[0]
+	w.x = 12 * T
+	P.x = 12 * T - Fight.GAP - P.w / 2
+	start_fight(w)
+	w.next_attack = 99.0
+	level_t = 9.0
+	if setup == "tell":
+		w.next_attack = 0.0
+		_run(65)
+	else:
+		w.hp = 0.5
+		start_move(setup)
+		_run(int(_capture.get("at", "20")))

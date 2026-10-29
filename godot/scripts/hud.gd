@@ -44,8 +44,15 @@ func _opening() -> void:
 		draw_rect(Rect2(0, 540 - h, 960, h), Color(0, 0, 0))
 	if m.intro == "talk":
 		_talk_line()
+	if m.intro == "talk" or m.recall == "say":
 		var top: float = 31.0 * m.bars
 		_text(_k("SPACE  next    ·    ESC  skip", "A  next    ·    START  skip"), Vector2(480, top + 4), m.font_regular, 9, Color(1, 1, 1, 0.25), 2, true)
+	if m.recall == "say":                       # his own words, under him
+		var line: String = m.recall_mem.say[m.recall_i]
+		var sx: float = (m.get_viewport().get_canvas_transform() * Vector2(m.P.x + m.P.w / 2, 0)).x
+		_say(line, sx, m.recall_t, m.line_dur([0, line]))
+	if m.recall == "gift":
+		_gift()
 	if m.wake_seen() < 1.0:                     # waking: the dark lifts
 		draw_rect(Rect2(0, 0, 960, 540), Color(0.035, 0.035, 0.04, 1.0 - m.wake_seen()))
 
@@ -54,20 +61,22 @@ const TALK_SIZE := 13
 const TALK_INK := Color(0.6, 0.6, 0.6)
 const TALK_FAINT := Color(0.24, 0.24, 0.25)       # the words he half-hears
 
-# One line, in the bottom bar under the speaker: small spaced caps. Each word drifts up into place
-# a beat after the last; when the line's done, it lifts away. ~faint~ words are the half-heard ones.
 func _talk_line() -> void:
+	var line: Array = m.level.intro.talk[m.talk_i]
+	var g = m.intro_guards()[line[0]]
+	_say(line[1], g.x - m.cam.x, m.talk_t, m.line_dur(line))
+
+# One line, in the bottom bar under the speaker (sx: his x on screen): small spaced caps. Each word
+# drifts up into place a beat after the last; when the line's done, it lifts away. ~faint~ words are
+# the half-heard (or half-remembered) ones.
+func _say(text: String, sx: float, t: float, dur: float) -> void:
 	if talk_font == null:
 		talk_font = FontVariation.new()
 		talk_font.base_font = m.font_regular
 		talk_font.spacing_glyph = 3
-	var line: Array = m.level.intro.talk[m.talk_i]
-	var g = m.intro_guards()[line[0]]
-	var t: float = m.talk_t
-	var dur: float = m.line_dur(line)
 	var words := []                                  # [word, faint]
 	var faint := false
-	for w in String(line[1]).split(" "):
+	for w in text.split(" "):
 		if w.begins_with("~"):
 			faint = true
 		words.append([w.replace("~", "").to_upper(), faint])
@@ -77,7 +86,7 @@ func _talk_line() -> void:
 	var total := -sp
 	for w in words:
 		total += talk_font.get_string_size(w[0], HORIZONTAL_ALIGNMENT_LEFT, -1, TALK_SIZE).x + sp
-	var cx := clampf(g.x - m.cam.x, total / 2 + 24, 960 - total / 2 - 24)
+	var cx := clampf(sx, total / 2 + 24, 960 - total / 2 - 24)
 	var y: float = 540 - 31.0 * m.bars + TALK_SIZE * 0.35
 	var out := smoothstep(dur + m.TALK_GAP * 0.6 - 0.45, dur + m.TALK_GAP * 0.6, t)
 	var x := cx - total / 2
@@ -88,11 +97,37 @@ func _talk_line() -> void:
 		draw_string(talk_font, Vector2(x, y + (1.0 - k) * 9.0 - out * 8.0), words[i][0], HORIZONTAL_ALIGNMENT_LEFT, -1, TALK_SIZE, col)
 		x += talk_font.get_string_size(words[i][0], HORIZONTAL_ALIGNMENT_LEFT, -1, TALK_SIZE).x + sp
 
-func _star_icon(c: Vector2, col: Color) -> void:
+func _star_icon(c: Vector2, col: Color, r := 5.0, rot := 0.4) -> void:
 	var pts := PackedVector2Array()
 	for i in 8:
-		pts.append(c + Vector2.from_angle(0.4 + i * TAU / 8.0) * (5.0 if i % 2 == 0 else 1.6))
+		pts.append(c + Vector2.from_angle(rot + i * TAU / 8.0) * (r if i % 2 == 0 else r * 0.32))
 	draw_colored_polygon(pts, col)
+
+# Where the HUD's star icons sit (the recall's star flies to the middle one).
+func _star_slot(i: int) -> Vector2:
+	return Vector2(28.0 + 230.0 + 76.0 + i * 15.0, 34.0)
+
+# The recall's gift: the star flashes in at the top, turns, its name under it - then it shrinks and
+# flies down into its place in the HUD.
+func _gift() -> void:
+	var g: Dictionary = m.recall_gift()
+	var t: float = m.recall_t
+	var fly: float = m.RECALL.fly
+	var top := Vector2(480, 128)
+	var f := smoothstep(fly, m.RECALL.gift - 0.15, t)          # 0 at the top -> 1 in the HUD
+	var pop := smoothstep(0.0, 0.25, t)
+	var c := top.lerp(_star_slot(1), f)
+	var r := lerpf(24.0 * (1.0 + 0.35 * (1.0 - smoothstep(0.25, 0.6, t))) * pop, 5.0, f)
+	var flash := 0.5 + 0.5 * cos(minf(t, fly) * TAU * 1.6)     # pulses while it hangs there
+	if f < 1.0:
+		var ring := smoothstep(0.0, 0.9, t)                      # one bright ring going out
+		draw_arc(top, 20.0 + ring * 70.0, 0, TAU, 48, Color(1, 1, 1, 0.5 * (1.0 - ring)), 2.0, true)
+		for k in 3:                                              # a soft glow behind it
+			draw_circle(c, r * (1.6 + k * 0.5), Color(1, 1, 1, (0.05 + 0.07 * flash) * (1.0 - f) / (k + 1)))
+	_star_icon(c, Color(1, 1, 1, lerpf(0.75 + 0.25 * flash, 0.75, f)), r, 0.4 + t * 1.2 * (1.0 - f))
+	var la := smoothstep(0.35, 0.8, t) * (1.0 - smoothstep(fly - 0.4, fly, t))
+	_text(g.name, Vector2(480, top.y + 52), m.font_regular, 15, Color(1, 1, 1, 0.85 * la), 8, true, 4)
+	_text(_k(g["keys"], g.pad), Vector2(480, top.y + 74), m.font_italic, 12, Color(1, 1, 1, 0.55 * la), 1, true, 4)
 
 func _eye(c: Vector2, o: float) -> void:            # opens with exposure
 	var hh := 1 + o * 8
@@ -131,29 +166,16 @@ func _hud() -> void:
 	for t in [m.METER_SUSPICIOUS, m.METER_ALERT]:
 		draw_rect(Rect2(x + w * t, y - 3, 1, h + 6), Color(1, 1, 1, 0.45))
 	_eye(Vector2(x + w + 32, y + 4), m.exposure)
-	var stars: bool = m.can.has("stars")
-	var sel_stone: bool = m.weapon == "stone"
-	for i in m.STONE.max:                             # stones in your pouch (brighter while they're in hand)
-		var c := Vector2(x + w + 72 + i * 13, y + 4)
-		var a := 0.7 if (sel_stone or not stars) else 0.4
-		if i < m.stone_count:
-			draw_circle(c, 4, Color(1, 1, 1, a))
-		else:
-			draw_arc(c, 4, 0, TAU, 16, Color(1, 1, 1, 0.35 * a / 0.7), 1.0, true)
-	var tx := x + w + 112
-	if stars:                                         # and the stars, once he remembers them
-		for i in m.STAR.max:
-			var c := Vector2(x + w + 118 + i * 15, y + 4)
-			var a := 0.75 if not sel_stone else 0.35
-			_star_icon(c, Color(1, 1, 1, a if i < m.star_count else 0.15))
-		var u: float = (x + w + 72 - 5) if sel_stone else (x + w + 118 - 6)
-		draw_rect(Rect2(u, y + 12, (m.STONE.max * 13 - 3) if sel_stone else (m.STAR.max * 15 - 3), 1), Color(1, 1, 1, 0.5))
-		tx = x + w + 170
-	if m.aiming:
-		_text(_k("THROW MODE  ·  click to throw  ·  %sCTRL to cancel" % ("Q stone/star  ·  " if stars else ""),
-			"THROW  ·  right stick aims  ·  let go of RT  ·  %sB cancels" % ("X stone/star  ·  " if stars else "")), Vector2(tx, y + 8), m.font_regular, 11, Color(1, 1, 1, 0.75), 2)
-	elif m.has_ammo():
-		_text(_k("CTRL" + ("   Q" if stars else ""), "RT" + ("   X" if stars else "")), Vector2(tx, y + 8), m.font_regular, 10, Color(1, 1, 1, 0.3), 2)
+	# the stars, once he remembers them - hidden until the recall's flash has dropped them into place
+	if m.can.has("stars") and not m.recall in ["in", "say", "gift"]:
+		for i in m.star_max:
+			_star_icon(_star_slot(i), Color(1, 1, 1, 0.75 if i < m.star_count else 0.15))
+		var tx := _star_slot(m.star_max).x + 2
+		if m.aiming:
+			_text(_k("THROW MODE  ·  click to throw  ·  CTRL to cancel", "THROW  ·  right stick aims  ·  let go of RT  ·  B cancels"),
+				Vector2(tx, y + 8), m.font_regular, 11, Color(1, 1, 1, 0.75), 2)
+		elif m.can_throw():
+			_text(_k("CTRL", "RT"), Vector2(tx, y + 8), m.font_regular, 10, Color(1, 1, 1, 0.3), 2)
 	var seen_hide := false
 	for g in m.guards:
 		if g.knows_hide >= 0:
@@ -176,11 +198,14 @@ const CONTROLS := [                                   # keyboard, controller (Xb
 	["hold  SHIFT", "hold  LT", "sneak  (silent)"],
 	["SPACE  /  W  /  ↑", "A", "jump  ·  grab a duct  ·  land on a guard to put him to sleep"],
 	["S  /  ↓", "B  /  ↓", "crawl  ·  hide behind furniture  ·  drop from a duct"],
-	["CTRL", "hold  RT", "throw  -  aim (mouse / right stick), click / let go to throw"],
-	["Q", "X", "stone or star  (once you remember the stars)"],
+	["CTRL", "hold  RT", "throw a star  -  aim, click / let go  (once you remember them)"],
+	["hold  E", "hold  X", "grip a desk  -  move to push or pull it  (once you remember)"],
+	["↓  +  hold  E", "↓  +  hold  X", "behind a desk: move it, hidden  -  a camera sees a desk move"],
+	["LEFT CLICK  /  E  /  F", "X", "fight a watcher:  strike  -  3 quick for a special  (once you remember)"],
+	["RIGHT CLICK  /  Q", "Y", "fight:  block his swing, as he winds up   ·   jump: hop back, or over him"],
 	["ESC", "START", "pause menu"],
 	["R    ·    F11", "VIEW", "restart    ·    fullscreen"],
-	["M", "Y", "music on / off"],
+	["M", "Y  (in a menu)", "music on / off"],
 ]
 
 # The prompt for whichever device you last touched.
@@ -190,7 +215,7 @@ const ABOUT := [
 	"You slipped into a high-security office tower. Now you have to get out.",
 	"Light is the enemy. Lamps, moonlight and every guard's torch fill your detection meter;",
 	"shadow drains it. Fill it and you're caught.",
-	"Hide behind furniture, cling to ducts, throw stones to pull guards away,",
+	"Hide behind furniture, cling to ducts, let a guard hear you to pull him away,",
 	"or drop on one to put him to sleep - his torch goes dark with him.",
 	"A guard who sees you duck knows where you went. One who doesn't walks right past.",
 ]
@@ -218,11 +243,12 @@ func _screens() -> void:
 				_text(_k("ENTER  menu    ·    R  replay this floor", "A  menu    ·    VIEW  replay this floor"), Vector2(480, 375), m.font_regular, 13, Color(1, 1, 1, 0.5), 2, true)
 			else:
 				_text(m.level.name + "  CLEARED", Vector2(480, 260), m.font_regular, 40, Color(1, 1, 1, 0.92), 12, true)
-				if m.level.has("remember"):         # what this floor brought back
-					var mem: Dictionary = m.level.remember
-					var accent := Color(0.62, 0.08, 0.1, 0.95) if (mem.has("colors") or mem.has("scarf")) else Color(1, 1, 1, 0.75)
-					_text(mem.lines[0], Vector2(480, 296), m.font_italic, 16, accent, 0, true)
-					_text(mem.lines[1], Vector2(480, 316), m.font_regular, 12, Color(1, 1, 1, 0.5), 1, true)
+				# a memory with no ability in it shows here; one with an ability he says himself as the next
+				# floor opens (the recall)
+				var mem: Dictionary = m.level.get("remember", {})
+				if mem.has("say") and mem.get("abilities", []).is_empty():
+					_text(mem.say[0].replace("~", ""), Vector2(480, 290), m.font_italic, 16, Color(1, 1, 1, 0.75), 0, true)
+					_text(mem.say[1].replace("~", ""), Vector2(480, 312), m.font_italic, 14, Color(1, 1, 1, 0.5), 0, true)
 				else:
 					_text("down the stairs, into the dark.", Vector2(480, 300), m.font_italic, 16, Color(1, 1, 1, 0.6), 0, true)
 				_times(t)
@@ -280,7 +306,7 @@ func _menu(paused: bool) -> void:
 	if m.menu_page == "howto":                       # before the first New Game
 		_text("HOW TO PLAY", Vector2(480, 105), m.font_regular, 30, Color(1, 1, 1, 0.9), 10, true)
 		_text("stay in the dark. the light you see is the light that catches you.", Vector2(480, 140), m.font_italic, 16, Color(1, 1, 1, 0.65), 0, true)
-		_table(210, true)
+		_table(200, true, 22.0)
 		var a := 0.45 + 0.35 * sin(m.time * 3.0)
 		_text(_k("press any key", "press any button"), Vector2(480, 470), m.font_regular, 14, Color(1, 1, 1, a), 4, true)
 		return
@@ -304,21 +330,21 @@ func _about() -> void:
 	for i in ABOUT.size():
 		_text(ABOUT[i], Vector2(480, 125 + i * 22), m.font_italic, 15, Color(1, 1, 1, 0.75), 0, true)
 	_text("CONTROLS", Vector2(480, 275), m.font_regular, 13, Color(1, 1, 1, 0.55), 6, true)
-	_table(305)
+	_table(294, false, 15.0, 12)
 	_text("a greyscale stealth prototype, after Limbo and Mark of the Ninja", Vector2(480, 482), m.font_italic, 12, Color(1, 1, 1, 0.4), 0, true)
 	_footer(_k("ESC  back", "B  back"))
 
-func _table(y0: float, heads := false) -> void:     # keyboard | controller | what it does; your device is brighter
+func _table(y0: float, heads := false, dy := 24.0, size := 14) -> void:     # keyboard | controller | what it does; your device is brighter
 	var kb := 0.85 if not m.pad else 0.45
 	var jp := 0.85 if m.pad else 0.45
 	if heads:
 		draw_string(m.font_regular, Vector2(40, y0 - 30), "KEYBOARD", HORIZONTAL_ALIGNMENT_RIGHT, 230, 10, Color(1, 1, 1, kb * 0.6))
 		draw_string(m.font_regular, Vector2(290, y0 - 30), "CONTROLLER", HORIZONTAL_ALIGNMENT_LEFT, -1, 10, Color(1, 1, 1, jp * 0.6))
 	for i in CONTROLS.size():
-		var y := y0 + i * 24
-		draw_string(m.font_regular, Vector2(40, y), CONTROLS[i][0], HORIZONTAL_ALIGNMENT_RIGHT, 230, 14, Color(1, 1, 1, kb))
-		draw_string(m.font_regular, Vector2(290, y), CONTROLS[i][1], HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(1, 1, 1, jp))
-		draw_string(m.font_italic, Vector2(420, y), CONTROLS[i][2], HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color(1, 1, 1, 0.6))
+		var y := y0 + i * dy
+		draw_string(m.font_regular, Vector2(40, y), CONTROLS[i][0], HORIZONTAL_ALIGNMENT_RIGHT, 230, size, Color(1, 1, 1, kb))
+		draw_string(m.font_regular, Vector2(290, y), CONTROLS[i][1], HORIZONTAL_ALIGNMENT_LEFT, -1, size, Color(1, 1, 1, jp))
+		draw_string(m.font_italic, Vector2(420, y), CONTROLS[i][2], HORIZONTAL_ALIGNMENT_LEFT, -1, size, Color(1, 1, 1, 0.6))
 
 func _footer(s: String) -> void:
 	_text(s, Vector2(480, 515), m.font_regular, 11, Color(1, 1, 1, 0.35), 2, true)
