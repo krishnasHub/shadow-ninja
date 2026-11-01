@@ -311,4 +311,43 @@ const LEVELS := [
 		"panels": [[100.5, 15]],
 		"spawn": [3, 15], "exit": 126,
 	},
+	{
+		"name": "FLOOR 7", "subtitle": "the dark",
+		# the blackout: a moment after you arrive the guards cut the lights. Black; sound is the only light -
+		# your steps send out ripples that outline what they reach (walls stop them), out to where the guards
+		# hear it. Sneak and you're quiet and nearly blind; run and you see, and they hear. The guards see in
+		# the dark (night vision): you see only their eyes. 1: a room and one guard, to learn on. 2: through a
+		# doorway, two guards and a duct over them. 3: through another, a guard on his rounds and one by the exit.
+		"width": 112,
+		"blackout": true,
+		"solids": [[30, 2, 1, 10], [66, 2, 1, 10]],
+		"holes": [],
+		"ducts": [[42, 10, 12, 1]],
+		"props": [["desk", 8, 15], ["plant", 20, 15],
+			["desk", 35, 15], ["cooler", 55, 15], ["desk", 59, 15],
+			["desk", 73, 15], ["plant", 84, 15], ["desk", 92, 15], ["cooler", 101, 15]],
+		"hints": [
+			[2.5, 170, "floor 7. the dark."],
+			[6.0, 215, "they still see you. you can only hear them."],
+			[11.0, 250, "move, and the dark shows itself. sneak: a little.  run: more - and they hear."],
+			[33.0, 190, "eyes in the dark. that's where they're looking."],
+			[69.0, 190, "almost out."],
+		],
+		"lights": [
+			{"kind": "lamp", "x": 10.5, "spread": 0.45, "radius": 520, "intensity": 0.9},
+			{"kind": "lamp", "x": 24.5, "spread": 0.45, "radius": 520},
+			{"kind": "lamp", "x": 47.5, "spread": 0.45, "radius": 520},
+			{"kind": "lamp", "x": 80.5, "spread": 0.45, "radius": 520},
+			{"kind": "lamp", "x": 98.5, "spread": 0.45, "radius": 520},
+			{"kind": "sign", "x": 108},
+		],
+		"guards": [
+			{"x": 24, "from": 15, "to": 28, "min_x": 12, "max_x": 29, "row": 15},
+			{"x": 40, "from": 33, "to": 52, "min_x": 31, "max_x": 64, "row": 15},
+			{"x": 58, "from": 46, "to": 63, "min_x": 31, "max_x": 64, "row": 15},
+			{"x": 80, "from": 70, "to": 94, "min_x": 68, "max_x": 104, "row": 15},
+			{"x": 103, "from": 99, "to": 105, "min_x": 96, "max_x": 106, "row": 15},
+		],
+		"spawn": [3, 15], "exit": 108,
+	},
 ]

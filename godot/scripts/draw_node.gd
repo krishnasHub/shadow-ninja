@@ -4,6 +4,7 @@ extends Node2D
 
 var m
 var kind := ""
+var ink := Color(0, 0, 0, 0)    # the blackout: draw props, guards and the ninja in this one colour (a = 0: off)
 
 const T := 32
 const Fight := preload("res://scripts/fight.gd")
@@ -21,6 +22,10 @@ func _draw() -> void:
 		"actors": _actors()
 		"overlay": _overlay()
 		"aim": _aim()
+		"bo_back": _bo_back()
+		"bo_ink": _bo_things(true)
+		"bo_fill": _bo_things(false)
+		"bo_top": _bo_top()
 
 # ---------- helpers ----------
 static func grey(v: int, a := 1.0) -> Color:
@@ -237,7 +242,7 @@ func _stage() -> void:
 func _prop(p: Dictionary) -> void:
 	var x: float = p.x * T
 	var y: float = p.y
-	var c := grey(0x15)
+	var c := ink if ink.a > 0.0 else grey(0x15)
 	match p.type:
 		"desk":
 			draw_rect(Rect2(x, y - 28, 70, 6), c)
@@ -325,7 +330,7 @@ func _guard(g) -> void:
 	if g.kind == "watcher":
 		_watcher(g)
 		return
-	var c := grey(0x12)
+	var c := ink if ink.a > 0.0 else grey(0x12)
 	var f: float = g.facing
 	var x: float = g.x
 	var by: float = g.y
@@ -363,7 +368,7 @@ func _guard(g) -> void:
 # The watcher: a guard without the cap or the torch - a bare head, an earpiece, both hands free (fists up
 # in a fight). His colour is his health: near black, fading to a dull grey as he's worn down.
 func _watcher(g) -> void:
-	var c := grey(int(lerpf(0x58, 0x12, clampf(g.hp, 0.0, 1.0))))
+	var c := ink if ink.a > 0.0 else grey(int(lerpf(0x58, 0x12, clampf(g.hp, 0.0, 1.0))))
 	var f: float = g.facing
 	var x: float = g.x
 	var by: float = g.y
@@ -432,7 +437,7 @@ const DEEP_RED := Color(0.25, 0.018, 0.024)
 
 func _scarf(P, col: Color) -> void:
 	var pts: PackedVector2Array = m.scarf_pos
-	if not m.scarf_red:
+	if not m.scarf_red or ink.a > 0.0:
 		draw_polyline(pts, col, 3.0, true)
 		return
 	var shade := 1.0 - smoothstep(0.0, 0.5, P.vis)  # colour only in shadow: gone by half-lit
@@ -462,7 +467,7 @@ static func body_tr(mm) -> Transform2D:
 func _ninja() -> void:
 	var P = m.P
 	var g := lerpf(6, 215, P.vis) / 255.0
-	var col := Color(g, g, g)
+	var col := ink if ink.a > 0.0 else Color(g, g, g)
 	var f: float = P.facing
 	# stride grows with speed, so a slow first step is a small step
 	var sw: float = sin(P.walk_phase) * clampf(absf(P.vx) / (50.0 if (P.crawling or P.clinging) else 120.0), 0.0, 1.0)
@@ -663,6 +668,8 @@ func _overlay() -> void:
 		_fight_fx()
 	_noise_and_stars()
 	_guard_marks()
+	if m.blackout > 0.0:                           # the blackout: the guards' night vision, the only eyes in the dark
+		_bo_eyes()
 	if m.debug:
 		_debug()
 
@@ -689,9 +696,10 @@ func _eyes() -> void:
 	else:
 		draw_set_transform_matrix(body_tr(m))
 		h = Vector2(cx + f * 1.5, by - 38)
+	var fade: float = m.bo_self() if m.blackout > 0.0 else 1.0     # the blackout: held still, his eyes go too
 	for e in [[Vector2(f * 2.5, -1.5), 1.7], [Vector2(f * 5.8, -1.8), 1.5]]:
-		draw_circle(h + e[0], e[1] + 2.5, Color(1, 1, 1, 0.25))
-		draw_circle(h + e[0], e[1], Color.WHITE)
+		draw_circle(h + e[0], e[1] + 2.5, Color(1, 1, 1, 0.25 * fade))
+		draw_circle(h + e[0], e[1], Color(1, 1, 1, fade))
 	draw_set_transform_matrix(Transform2D.IDENTITY)
 
 # A fight: the watcher's tell (three white ticks over his head), speed lines where his hands and feet
@@ -728,7 +736,7 @@ func _fight_fx() -> void:
 				draw_line(e.p + d * r * 0.4, e.p + d * r, Color(1, 1, 1, 0.9 * (1.0 - k)), 1.2, true)
 
 func _noise_and_stars() -> void:
-	for n in m.noises:                              # a bubble that spreads to the noise's reach, cut off by walls
+	for n in (m.noises if m.blackout <= 0.0 else []):   # a bubble that spreads to the noise's reach, cut off by walls
 		var k: float = n.t / 0.6
 		var rr: float = maxf(1.0, n.r * minf(1.0, k * 1.6))
 		var circle := PackedVector2Array()
@@ -804,3 +812,98 @@ func _aim_star() -> void:
 	draw_circle(t, 1.8, col)
 	if not can:
 		_text(m.font_italic, t + Vector2(0, 24), "no stars", 11, col, true)
+
+# =====================================================================
+#  THE BLACKOUT (Floor 7) - black over the world; sound shows the outlines (main.gd: sound_at, ripples)
+# =====================================================================
+func _bo_view() -> Rect2:
+	return Rect2(m.camera.position - Vector2(60, 60), Vector2(m.VIEW_W, m.VIEW_H) / m.zoom + Vector2(120, 120))
+
+# Black, then the walls' and floors' edges (each bit as bright as the sound on it), then the ripples' thin rings.
+func _bo_back() -> void:
+	var k: float = m.blackout
+	if k <= 0.0:
+		return
+	var view := _bo_view()
+	draw_rect(view, Color(0, 0, 0, k))
+	if m.bo_lit.is_empty():
+		return
+	var lit: PackedFloat32Array = m.bo_lit.chunks
+	for i in mini(lit.size(), m.bo_chunks.size()):
+		var b: float = lit[i]
+		if b > 0.004:
+			draw_line(m.bo_chunks[i][0], m.bo_chunks[i][1], Color(b, b, b, k), 1.5)
+	var on_view: Rect2 = m.bo_lit.view
+	for n in m.bo_lit.waves:                        # the ripple itself, a thin ring in the air, stopped by walls
+		var rad := minf(n.r, n.t * m.BLACKOUT.speed)
+		var fade := 1.0 - clampf((n.t - n.r / m.BLACKOUT.speed) / m.BLACKOUT.fade, 0.0, 1.0)
+		var o := Vector2(n.x, n.y)
+		if rad <= 0.0:
+			continue
+		var a: float = 0.08 * fade * k * (1.0 if n.loud else 0.5) * n.power
+		if a < 0.004:
+			continue
+		var prev := o + Vector2(rad, 0)
+		var segs := clampi(int(rad / 14.0), 24, 96)       # big rings: more, shorter pieces (the off-screen ones are skipped)
+		for i in range(1, segs + 1):
+			var q := o + Vector2.from_angle(TAU * i / segs) * rad
+			var mid := (prev + q) / 2
+			if on_view.has_point(mid) and m.ripple_covers(n, mid + (n.src - mid).normalized()):
+				draw_line(prev, q, Color(1, 1, 1, a), 1.0)
+			prev = q
+
+# Props, guards and the ninja: white (as bright as the sound on them) at the 8 offsets, then black on top.
+func _bo_things(outline: bool) -> void:
+	var k: float = m.blackout
+	if k <= 0.0 or m.state == "title" or m.bo_lit.is_empty():
+		return
+	if not outline and m.P.hidden:                  # hidden, he's behind the furniture
+		ink = Color(0, 0, 0, 0)
+		_ninja()
+	var pl: Array = m.bo_lit.props
+	for i in mini(pl.size(), m.props.size()):
+		var b: float = pl[i]
+		if b < 0.0:
+			continue                                # off screen
+		ink = Color(b, b, b, k) if outline else Color(0, 0, 0, k)
+		_prop(m.props[i])
+	var gl: Array = m.bo_lit.guards
+	for i in mini(gl.size(), m.guards.size()):
+		var g = m.guards[i]
+		var b: float = gl[i]
+		if b < 0.0:
+			continue
+		if m.bo_look == "jitter" and g.state != "asleep":
+			b = maxf(b, 0.4 if g.moving else 0.1)
+		ink = Color(b, b, b, k) if outline else Color(0, 0, 0, k)
+		draw_set_transform(g.jit)
+		_guard(g)
+		draw_set_transform_matrix(Transform2D.IDENTITY)
+	if outline:                                     # he knows where his own body is - faintly, once he's faded out
+		var o: float = lerpf(m.BLACKOUT.outline[0], m.BLACKOUT.outline[1], m.bo_self())
+		ink = Color(o, o, o, k)
+		_ninja()
+	ink = Color(0, 0, 0, 0)
+
+# Himself, as he always looks in shadow (dark, what he's remembered); his eyes are on the overlay.
+func _bo_top() -> void:
+	modulate.a = 1.0
+	if m.blackout <= 0.0 or m.state == "title" or m.P.hidden:
+		return
+	ink = Color(0, 0, 0, 0)
+	modulate.a = m.bo_self()                        # held still, he fades into the dark
+	_ninja()
+
+# The guards' eyes: faint, brighter once they've heard or seen you. In look A it's all of them you get.
+func _bo_eyes() -> void:
+	for g in m.guards:
+		if g.state == "asleep":
+			continue
+		var alert: bool = g.state in ["chase", "search", "investigate"]
+		if m.bo_look == "jitter" and not alert:
+			continue
+		var a: float = (0.85 if alert else 0.3) * m.blackout
+		for ox in [3.0, 6.5]:
+			var e: Vector2 = Vector2(g.x + g.facing * ox, g.y - 54) + g.jit
+			draw_circle(e, 2.2, Color(1, 1, 1, a * 0.2))
+			draw_circle(e, 1.1 if alert else 0.85, Color(1, 1, 1, a))

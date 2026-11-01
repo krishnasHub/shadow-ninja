@@ -74,6 +74,21 @@ const FIGHT := {"engage": 46.0, "reach": 62.0, "sight": 64.0, "lit_sight": 300.0
 # Throwing stars (remembered after Floor 3; there's nothing to throw before that): straight and fast;
 # one through a lamp, a camera's lens or an alarm panel puts it out for good. Not picked up again.
 const STAR := {"max": 3, "speed": 950.0, "range": 700.0, "gravity": 1400.0}
+# The blackout (Floor 7): the guards cut the lights. The screen goes black and sound is the only light: every
+# noise sends out a ripple that outlines what it reaches - `reach` x as far as the guards hear it (user's call:
+# wider - you see further than they hear), and walls stop it
+# (the noise's own visibility polygon). Sneaking feet, and shimmying along a duct, send a smaller one nobody
+# hears; so does every footfall of a guard's. Any movement's wave crosses the whole screen (`screen` px; user's
+# call), walls permitting. Each wave echoes off the walls it reaches, and each echo off
+# one more (user's call: a pattern of waves, more of the room shown). Stand still and it's
+# black (user's call: only moving shows you the room). The
+# guards see in the dark (night vision: their torch is still how they see, it just isn't a light you can see).
+# Look A ("eyes"): only their eyes show, and the small ripples of their own steps. Look B ("jitter"): a moving
+# guard always shows, vibrating. V toggles them (for now, to compare).
+const BLACKOUT := {"cut": 1.4, "flicker": 0.35, "speed": 800.0, "fade": 0.6, "hum": 0.0,
+	"reach": 2.5, "screen": 1000.0, "sneak": 1000.0, "guard_step": 1000.0, "chunk": 16.0,
+	"echoes": 2, "echo_min": 20.0, "echo_power": [0.6, 0.36],
+	"still": [1.0, 3.5], "outline": [0.1, 0.22]}   # standing still he fades out between these seconds, to a faint outline   # walls it echoes off (nearest first), not closer than echo_min
 
 const STOPS_LAMP := [[0.0, 1.0], [0.5, 0.85], [0.8, 0.5], [1.0, 0.0]]
 const STOPS_FLAT := [[0.0, 1.0], [1.0, 1.0]]
@@ -172,6 +187,7 @@ class Guard:
 	var sleep_t := 0.0
 	var torch: Lt
 	var kind := "guard"      # or "watcher": no torch, and you fight him
+	var jit := Vector2.ZERO  # the blackout, look B: this frame's shake while he moves
 	var hp := 1.0            # a watcher's health: he fades to a dull grey as it goes; 0 = dazed
 	var ko := false          # put down in a fight
 	var gm := ""             # in a fight: the move his body is playing (fight.gd), and how far in
@@ -195,6 +211,12 @@ class NoiseEvent:
 	var r := 0.0
 	var t := 0.0
 	var poly := PackedVector2Array()
+	var loud := true         # the blackout: a noise guards hear (else just his sneaking feet, or theirs)
+	var echo := false        # an echo: x, y is the source mirrored in the wall it bounced off (wall_a - wall_b)
+	var src := Vector2.ZERO  # where the sound really started
+	var power := 1.0
+	var wall_a := Vector2.ZERO
+	var wall_b := Vector2.ZERO
 
 # ---------- state ----------
 # ---------- the current floor (loaded from levels.gd) ----------
@@ -251,6 +273,14 @@ var zoom := 1.0                 # camera zoom: 1 in play, RECALL.zoom in the rec
 const RECALL := {"zoom": 1.9, "in": 1.3, "gift": 2.6, "fly": 1.7}   # gift: the flash, then it flies to the HUD from "fly"
 # What a remembered ability shows in the recall's flash (only the ones with a HUD icon).
 const GIFTS := {"stars": {"name": "THROWING STARS", "keys": "CTRL  to throw", "pad": "hold RT  to throw"}}
+var blackout := 0.0             # the blackout floor: 0..1 how dark (the cut flickers it in)
+var bo_cut := false             # the lights have gone (this run)
+var bo_look := "eyes"           # how the guards show in it: "eyes" (A) or "jitter" (B)
+var ripples: Array = []         # the blackout's ripples (NoiseEvents that live longer and spread)
+var bo_chunks: Array = []       # [a, b, mid]: every wall and floor edge cut short, so a ripple lights it bit by bit
+var bo_still := 0.0             # seconds he's held still (the blackout: he fades into the dark)
+var bo_shapes := {}             # a wave's reach and the walls it echoes off, by where it starts (16 px) and how far
+var bo_lit := {}                # this frame's brightness: "chunks" (-1 = off screen), "props", "guards" - worked out once
 var notice := ""                # a line that fades in mid-screen, e.g. "a door unlocks below."
 var pad := false                # the last input came from a controller: prompts name its buttons
 var pad_aim := Vector2.ZERO     # controller throw mode: where the star goes, relative to the ninja
@@ -412,6 +442,8 @@ func _ready() -> void:
 			_selftest_push()
 		elif _capture.selftest == "fight":
 			_selftest_fight()
+		elif _capture.selftest == "blackout":
+			_selftest_blackout()
 		else:
 			_selftest()
 		get_tree().quit()
@@ -566,8 +598,21 @@ func build_layers() -> void:
 
 func _build_screen_layers() -> void:
 	# overlay: world-space things drawn after lighting (eyes, bulbs, hints, noise, aim) - not darkened
+	# the blackout (Floor 7): black over the world, then the outlines sound shows (empty on other floors).
+	# Outlines: everything drawn white at 8 one-pixel offsets, then black on top - a ring is left.
+	var bo := CanvasLayer.new()
+	bo.layer = 1
+	bo.follow_viewport_enabled = true
+	add_child(bo)
+	draw_nodes.append(_add_draw("bo_back", bo, 0))
+	for d in [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1), Vector2(0.7, 0.7), Vector2(-0.7, 0.7), Vector2(0.7, -0.7), Vector2(-0.7, -0.7)]:
+		var n := _add_draw("bo_ink", bo, 1)
+		n.position = d
+		draw_nodes.append(n)
+	draw_nodes.append(_add_draw("bo_fill", bo, 2))
+	draw_nodes.append(_add_draw("bo_top", bo, 3))
 	var over := CanvasLayer.new()
-	over.layer = 1
+	over.layer = 2
 	over.follow_viewport_enabled = true
 	add_child(over)
 	draw_nodes.append(_add_draw("overlay", over, 0))
@@ -1015,6 +1060,14 @@ func build_segments() -> void:
 					seg_b.append(Vector2(x * T, y * T))
 				run = t
 				start = y
+	bo_shapes.clear()
+	bo_chunks.clear()                       # the blackout lights edges a bit at a time
+	for i in seg_a.size():
+		var n := maxi(1, ceili(seg_a[i].distance_to(seg_b[i]) / BLACKOUT.chunk))
+		for k in n:
+			var a: Vector2 = seg_a[i].lerp(seg_b[i], float(k) / n)
+			var b: Vector2 = seg_a[i].lerp(seg_b[i], float(k + 1) / n)
+			bo_chunks.append([a, b, (a + b) / 2])
 
 # Godot's light occluders: one rectangle per horizontal run of solid tiles
 func build_occluders() -> void:
@@ -1056,7 +1109,7 @@ func blocked(a: Vector2, b: Vector2) -> bool:
 	return false
 
 # Everything a point can "see" within radius r, as an angle-sorted polygon (used for noise).
-func visibility_polygon(o: Vector2, r: float) -> PackedVector2Array:
+func visibility_polygon(o: Vector2, r: float, steps := 0) -> PackedVector2Array:   # steps: extra rays all round
 	var x0 := o.x - r
 	var y0 := o.y - r
 	var x1 := o.x + r
@@ -1080,6 +1133,8 @@ func visibility_polygon(o: Vector2, r: float) -> PackedVector2Array:
 			angles.append(an - 1e-4)
 			angles.append(an)
 			angles.append(an + 1e-4)
+	for i in steps:                         # (corners alone miss where a floor runs out of the box: a cut corner)
+		angles.append(-PI + TAU * i / steps)
 	angles.sort()
 	var pts := PackedVector2Array()
 	for an in angles:
@@ -1260,6 +1315,13 @@ func start_run(idx := -1) -> void:
 		torch_pool[i].level = 0.0
 		torch_pool[i].guard = null
 	noises.clear()
+	ripples.clear()
+	blackout = 0.0
+	bo_cut = false
+	bo_still = 0.0
+	for L in lights:                         # the blackout floor: the lamps are on until the cut
+		if L.kind == "lamp" and not L.broken:
+			L.level = L.intensity
 	stars.clear()
 	fight = null
 	nm = ""
@@ -1463,6 +1525,11 @@ func _unhandled_input(e: InputEvent) -> void:
 				next_recall_line()
 			elif code in [KEY_ESCAPE, KEY_P] and recall != "out":
 				end_recall()
+			return
+		if code == KEY_V and is_blackout() and state == "play":     # the blackout: compare the two looks
+			bo_look = "jitter" if bo_look == "eyes" else "eyes"
+			notice = "the guards: only their eyes." if bo_look == "eyes" else "the guards: vibrating."
+			notice_t = 0.0
 			return
 		match code:
 			KEY_SPACE, KEY_W, KEY_UP:
@@ -1721,6 +1788,8 @@ func start_cling() -> void:
 	P.h = TUNE.crawl_h
 	P.vx = 0.0
 	P.vy = 0.0
+	if is_blackout():                       # grabbing on: a wave nobody hears
+		add_ripple(P.x + P.w / 2, P.y + 12, BLACKOUT.sneak, false)
 
 func update_cling(dt: float, dir: int) -> bool:
 	if held("down"):                    # let go - top stays at the duct, then fall
@@ -1735,7 +1804,10 @@ func update_cling(dt: float, dir: int) -> bool:
 	var nx := P.x + dir * TUNE.cling * dt
 	P.vx = dir * TUNE.cling * ramp(P.move_t, TUNE.ramp_cling) if dir != 0 and grip_over(nx) and not rect_hits(nx, P.y, P.w, P.h) else 0.0
 	P.x += P.vx * dt
+	var ph := P.walk_phase
 	P.walk_phase += absf(P.vx) * dt * 0.12
+	if is_blackout() and absf(P.vx) > 8 and floori(P.walk_phase / TAU) != floori(ph / TAU):
+		add_ripple(P.x + P.w / 2, P.y + 12, BLACKOUT.sneak, false)   # hand over hand: a wave nobody hears
 	P.cover = -1
 	P.hidden = false
 	P.running = false
@@ -1893,6 +1965,8 @@ func update_player(dt: float) -> void:
 	# running footsteps are loud; sneaking and crawling are silent
 	if P.running and P.on_ground and absf(P.vx) > 150 and floori(P.walk_phase / TAU) != floori(prev_phase / TAU):
 		make_noise(mid, P.y + P.h, NOISE.run)
+	elif is_blackout() and P.on_ground and moving and floori(P.walk_phase / PI) != floori(prev_phase / PI):
+		add_ripple(mid, P.y + P.h - 6, BLACKOUT.sneak, false)      # sneaking feet: nobody hears it, you see a little
 	# running: the anime lean, pitched from the hip (see dashing()); sneaking: a touch forward
 	var lean_to := 0.0 if (P.crawling or not moving) else P.facing * (0.62 if dashing() else 0.06)
 	P.lean = move_toward(P.lean, lean_to, dt * 2.5)
@@ -2199,6 +2273,8 @@ func make_noise(x: float, y: float, r: float) -> void:
 	n.r = r
 	n.poly = visibility_polygon(Vector2(x, y), r)
 	noises.append(n)
+	if is_blackout():
+		add_ripple(x, y, maxf(r * BLACKOUT.reach, BLACKOUT.screen))
 	for g in guards:
 		if g.state != "asleep" and Vector2(g.x - x, g.y - 30 - y).length() < r and not blocked(Vector2(x, y), Vector2(g.x, g.y - 30)):
 			hear(g, x)
@@ -2358,6 +2434,168 @@ func update_noises(dt: float) -> void:
 	for n in noises:
 		n.t += dt
 	noises = noises.filter(func(n): return n.t < 0.6)
+	for n in ripples:
+		n.t += dt
+	ripples = ripples.filter(func(n): return n.t < n.r / BLACKOUT.speed + BLACKOUT.fade)
+
+# =====================================================================
+#  THE BLACKOUT (Floor 7) - sound is the only light
+# =====================================================================
+func is_blackout() -> bool:
+	return level.get("blackout", false)
+
+func add_ripple(x: float, y: float, r: float, loud := true) -> void:
+	var o := Vector2(x, y)
+	if not loud and not Rect2(cam, Vector2(VIEW_W, VIEW_H)).grow(VIEW_W * 0.5).has_point(o):
+		return                               # nobody hears it and it's well off screen: skip the work
+	var n := NoiseEvent.new()
+	n.x = x
+	n.y = y
+	n.r = r
+	n.loud = loud
+	n.src = o
+	var shape := bo_shape(o, r)
+	n.poly = shape.poly
+	ripples.append(n)
+	var walls: Array = shape.walls
+	for w in walls:
+		var m1 := _echo(n, mirror(o, w[1], w[2]), w[1], w[2], BLACKOUT.echo_power[0])
+		for w2 in walls:
+			if w2 != w:
+				_echo(n, mirror(m1, w2[1], w2[2]), w2[1], w2[2], BLACKOUT.echo_power[1])
+				break
+
+# Where a wave from o reaches (walls stop it) and the nearest walls it echoes off - the same for every wave
+# started at the same spot, so it's worked out once per 16 px spot (the costly part: the rays).
+func bo_shape(o: Vector2, r: float) -> Dictionary:
+	var key := Vector3i(roundi(o.x / 16.0), roundi(o.y / 16.0), roundi(r))
+	if bo_shapes.has(key):
+		return bo_shapes[key]
+	var poly := visibility_polygon(o, r, 48)
+	var walls := []
+	for k in seg_a.size():
+		var a := seg_a[k]
+		var b := seg_b[k]
+		var f := Geometry2D.get_closest_point_to_segment(o, a, b)
+		var d := o.distance_to(f)
+		if d > r * 0.85 or o.distance_to(Geometry2D.get_closest_point_to_segment_uncapped(o, a, b)) < BLACKOUT.echo_min:
+			continue                         # out of reach, or the floor under his feet
+		if Geometry2D.is_point_in_polygon(f + (o - f).normalized() * 3.0, poly):
+			walls.append([d, a, b])
+	walls.sort_custom(func(p, q): return p[0] < q[0])
+	var shape := {"poly": poly, "walls": walls.slice(0, BLACKOUT.echoes)}
+	bo_shapes[key] = shape
+	return shape
+
+static func mirror(p: Vector2, a: Vector2, b: Vector2) -> Vector2:
+	return 2.0 * Geometry2D.get_closest_point_to_segment_uncapped(p, a, b) - p
+
+func _echo(parent: NoiseEvent, m: Vector2, a: Vector2, b: Vector2, power: float) -> Vector2:
+	var e := NoiseEvent.new()
+	e.x = m.x
+	e.y = m.y
+	e.r = parent.r
+	e.loud = parent.loud
+	e.echo = true
+	e.src = parent.src
+	e.poly = parent.poly                     # it stays in the room the sound was made in
+	e.power = power
+	e.wall_a = a
+	e.wall_b = b
+	ripples.append(e)
+	return m
+
+# Does ripple n reach point q? Inside the room it was made in (walls stop it) - and an echo only where the
+# wall it bounced off sends it: the line from its mirrored source crosses that wall.
+func ripple_covers(n: NoiseEvent, q: Vector2) -> bool:
+	if not Geometry2D.is_point_in_polygon(q, n.poly):
+		return false
+	return not n.echo or Geometry2D.segment_intersects_segment(Vector2(n.x, n.y), q, n.wall_a, n.wall_b) != null
+
+# The lights go a moment after the floor starts: a clunk, a flicker, then black.
+func update_blackout() -> void:
+	if not is_blackout():
+		blackout = 0.0
+		return
+	var k := level_t - BLACKOUT.cut
+	if k >= 0.0 and not bo_cut:
+		bo_cut = true
+		sfx_lever.play()
+		for L in lights:
+			if L.kind == "lamp":
+				L.level = 0.0
+		notice = "the lights are gone."
+		notice_t = 0.0
+		bo_still = 0.0                       # he fades from here on, not from when he arrived
+	blackout = 0.0 if k < 0.0 else (1.0 if k > BLACKOUT.flicker or sin(k * 60.0) > 0.0 else 0.0)
+	var still := absf(P.vx) < 8.0 and P.on_ground and fight == null and not aiming
+	bo_still = bo_still + 1.0 / 60.0 if still else 0.0
+	for g in guards:                         # look B: a moving guard vibrates
+		g.jit = Vector2(randf_range(-1.3, 1.3), randf_range(-1.3, 1.3)) if bo_look == "jitter" and g.moving else Vector2.ZERO
+
+# How bright sound makes each edge, prop and guard this frame - worked out once, for all the drawing passes.
+func bo_frame() -> void:
+	if blackout <= 0.0:
+		return
+	var view := Rect2(camera.position, Vector2(VIEW_W, VIEW_H) / zoom).grow(60.0)
+	var hum := bo_hum()
+	var on := []                             # the waves that can light anything on screen this frame
+	for n in ripples:
+		var rad := minf(n.r, n.t * BLACKOUT.speed)
+		if rad <= 0.0:
+			continue
+		var c := Vector2(n.x, n.y)
+		var near := c.distance_to(c.clamp(view.position, view.end))
+		var far := 0.0
+		for corner in [view.position, view.end, Vector2(view.position.x, view.end.y), Vector2(view.end.x, view.position.y)]:
+			far = maxf(far, c.distance_to(corner))
+		if rad + 1.0 >= near and (not n.echo or rad - 40.0 <= far):
+			on.append(n)
+	var ch := PackedFloat32Array()
+	ch.resize(bo_chunks.size())
+	for i in bo_chunks.size():
+		var mid: Vector2 = bo_chunks[i][2]
+		ch[i] = maxf(hum, sound_at(mid, on)) if view.has_point(mid) else -1.0
+	var pr := []
+	for p in props:
+		var mid := Vector2(p.x * T + PROP_W.get(p.type, 30.0) / 2, p.y)
+		pr.append(maxf(hum, maxf(sound_at(mid + Vector2(0, -8), on), sound_at(mid + Vector2(0, -40), on))) if view.has_point(mid) else -1.0)
+	var gd := []
+	for g in guards:
+		gd.append(maxf(sound_at(Vector2(g.x, g.y - 10), on), sound_at(Vector2(g.x, g.y - 50), on)) if view.has_point(Vector2(g.x, g.y)) else -1.0)
+	var me := sound_at(Vector2(P.x + P.w / 2, P.y + P.h / 2), on)
+	bo_lit = {"chunks": ch, "props": pr, "guards": gd, "waves": on, "view": view, "self": me}
+
+# How much of him shows: all of him while he moves; held still he fades out - until a wave passes over him.
+func bo_self() -> float:
+	var k := 1.0 - smoothstep(BLACKOUT.still[0], BLACKOUT.still[1], bo_still)
+	return maxf(k, bo_lit.get("self", 0.0))
+
+func bo_hum() -> float:                      # still things, barely there (0 now: stand still and it's black)
+	return BLACKOUT.hum * (0.85 + 0.15 * sin(time * 1.7))
+
+# How bright sound makes point p: the brightest ripple on it - bright at its front, fading behind, and only
+# where the noise could reach (walls stop it).
+func sound_at(p: Vector2, waves = null) -> float:
+	var b := 0.0
+	for n in (ripples if waves == null else waves):
+		var o := Vector2(n.x, n.y)
+		var d := p.distance_to(o)
+		var rad := minf(n.r, n.t * BLACKOUT.speed)
+		if d > rad + 1.0 or ((n.echo or not n.loud) and d < rad - 40.0):
+			continue                             # not there yet - or behind the front (only a loud wave lingers)
+		var k := 0.18 * d / maxf(rad - 40.0, 1.0)
+		if d > rad - 5.0:
+			k = 1.0
+		elif d > rad - 40.0:
+			k = lerpf(0.18, 1.0, (d - (rad - 40.0)) / 35.0)
+		var v: float = k * (1.0 - clampf((n.t - n.r / BLACKOUT.speed) / BLACKOUT.fade, 0.0, 1.0)) * (0.95 if n.loud else 0.55) * n.power
+		if v <= b:
+			continue
+		var q := p + Vector2(signf(n.src.x - p.x), signf(n.src.y - p.y)) * 3.0   # off the edge it's on, toward the noise
+		if ripple_covers(n, q):
+			b = v
+	return b
 
 # =====================================================================
 #  GUARDS - a guard's torch is just a moving light
@@ -2513,7 +2751,10 @@ func update_guard(g: Guard, dt: float) -> void:
 		var v := speed * ramp(g.move_t, GUARD.ramp)
 		v = minf(v, sqrt(2.0 * GUARD.decel * absf(dx)) + 5.0)          # ease into the stop
 		g.x += d * minf(absf(dx), v * dt)
+		var ph := g.phase
 		g.phase += v * dt * 0.08
+		if is_blackout() and floori(g.phase / PI) != floori(ph / PI):
+			add_ripple(g.x, g.y - 6, BLACKOUT.guard_step, false)      # each of his footfalls: a wave
 		g.moving = true
 		g.cur_v = v
 	else:
@@ -2823,6 +3064,7 @@ func _physics_process(dt: float) -> void:
 		if not waking():                     # coming to: he can't move yet
 			update_player(dt)
 		update_noises(dt)
+		update_blackout()
 		update_stars(dt)
 		update_guards(dt)
 		update_fight(dt)
@@ -2867,6 +3109,7 @@ func _process(dt: float) -> void:
 	post_mat.set_shader_parameter("heartbeat", hb)
 	update_music(dt)
 	post_mat.set_shader_parameter("seed", randf() * 100.0)
+	bo_frame()
 	for n in draw_nodes:
 		n.queue_redraw()
 	hud.queue_redraw()
@@ -2875,6 +3118,7 @@ func _process(dt: float) -> void:
 		if _frame == int(_capture.get("frames", "30")):
 			await RenderingServer.frame_post_draw
 			get_viewport().get_texture().get_image().save_png(_capture.capture)
+			print("capture: %.0f fps" % fps)
 			get_tree().quit()
 
 # Dev tool: put the game in a known spot for a screenshot.
@@ -2895,6 +3139,15 @@ func _capture_setup(setup: String) -> void:
 			start_run(3)
 			P.x = 3 * T
 			level_t = 1.0
+		"blackout", "blackoutB", "blackoutsneak", "blackoutstill":   # floor 7, the lights gone: running (or sneaking, or holding still)
+			start_run(6)
+			bo_look = "jitter" if setup == "blackoutB" else "eyes"
+			level_t = 5.0
+			P.x = float(_capture.get("x", "12")) * T
+			test_keys = {"right": true, "walk": true} if setup == "blackoutsneak" else ({} if setup == "blackoutstill" else {"right": true})
+			if setup == "blackoutstill":
+				for sleeper in guards:
+					sleeper.state = "asleep"
 		"catwalk":
 			start_run(3)
 			P.x = 56 * T
@@ -4167,6 +4420,103 @@ func _selftest_fight() -> void:
 	_run(400)
 	print("  a watcher walks up to a sleeping guard: found %s, alarm '%s', the guard %s" % [gd.found, alarm, gd.state])
 	test_keys = null
+
+# The blackout (Floor 7):  godot_console --headless --path . -- --selftest=blackout
+func _selftest_blackout() -> void:
+	start_run(6)
+	print("  %s (%s): blackout %s, remembers %s" % [level.name, level.subtitle, is_blackout(), can.keys()])
+	var lit := lights.filter(func(L): return L.kind == "lamp" and L.level > 0.0).size()
+	_run(int(BLACKOUT.cut * 60) - 10)
+	print("  before the cut: dark %.1f, lamps on %d" % [blackout, lit])
+	_run(40)
+	print("  after it: dark %.1f, lamps on %d, notice '%s'" % [blackout, lights.filter(func(L): return L.kind == "lamp" and L.level > 0.0).size(), notice])
+	# sneaking: tiny ripples nobody hears; running: big ones, heard
+	test_keys = {"right": true, "walk": true}
+	ripples.clear()
+	_run(60)
+	var small := ripples.filter(func(n): return not n.loud and not n.echo and n.r == BLACKOUT.sneak).size()
+	var loud := ripples.filter(func(n): return n.loud and not n.echo).size()
+	print("  1s sneaking: %d silent ripples (%.0f px), %d loud" % [small, BLACKOUT.sneak, loud])
+	test_keys = {"right": true}
+	_run(60)
+	loud = ripples.filter(func(n): return n.loud and not n.echo).size()
+	var big := 0.0
+	for n in ripples:
+		big = maxf(big, n.r)
+	print("  1s running: %d loud ripples, reaching %.0f px" % [loud, big])
+	test_keys = {}
+	# shimmying along the duct
+	var duct: Array = level.ducts[0]
+	P.x = (duct[0] + 2) * T
+	P.y = (duct[1] + 1) * T
+	start_cling()
+	ripples.clear()
+	test_keys = {"right": true}
+	_run(60)
+	test_keys = {}
+	print("  1s shimmying along the duct: clinging %s, %d silent ripples, %d loud" % [P.clinging, ripples.filter(func(n): return not n.loud and not n.echo).size(), ripples.filter(func(n): return n.loud and not n.echo).size()])
+	# what a ripple shows: the front bright, the inside dimmer, nothing past it - and nothing behind a wall
+	ripples.clear()
+	var wall_x: float = level.solids[0][0] * T
+	add_ripple(wall_x - 60, 15 * T - 6, NOISE.run)
+	var n0: NoiseEvent = ripples[0]
+	n0.t = 100.0 / BLACKOUT.speed
+	var floor_y := 15.0 * T
+	print("  a run ripple 100 px out: at 98 px %.2f, 50 px %.2f, 130 px %.2f" % [sound_at(Vector2(wall_x - 60 + 98, floor_y)), sound_at(Vector2(wall_x - 60 + 50, floor_y)), sound_at(Vector2(wall_x - 60 + 130, floor_y))])
+	print("  ...the wall above the doorway at 96 px: %.2f (the near face) - its far face: %.2f" % [sound_at(Vector2(wall_x, 15 * T - 85)), sound_at(Vector2(wall_x + T, 15 * T - 85))])
+	print("  ...through the doorway, at 95 px: %.2f" % sound_at(Vector2(wall_x - 60 + 92, floor_y - 30)))
+	# an echo: a run beside the wall; the wave bounced off its face comes back over a spot the first front passed
+	ripples.clear()
+	add_ripple(wall_x - 60, 15 * T - 6, NOISE.run * BLACKOUT.reach)
+	var pe := Vector2(wall_x - 110, 200)                 # 278 px from him, 322 px from his mirror image in the wall
+	for e in ripples:
+		e.t = 322.5 / BLACKOUT.speed
+	print("  a run by the wall: %d echoes; when the echo's front gets back to a spot the wave passed: %.2f (the wave alone there: about 0.17)" % [ripples.filter(func(n): return n.echo).size(), sound_at(pe)])
+	# the guards still see you: night vision - the meter fills in his (unseen) beam
+	start_run(6)
+	_run(int(BLACKOUT.cut * 60) + 30)
+	var g: Guard = guards[0]
+	g.state = "patrol"
+	g.pause = 99.0
+	g.facing = -1
+	P.x = g.x - 5 * T
+	meter = 0.0
+	_run(60)
+	print("  standing 5 tiles in front of a guard in the dark: meter %.2f, he's %s" % [meter, g.state])
+	P.x = g.x + 5 * T
+	g.state = "patrol"
+	meter = 0.0
+	_run(60)
+	print("  ...5 tiles behind him: meter %.2f, he's %s" % [meter, g.state])
+	# held still he fades into the dark; a step and he's back
+	start_run(6)
+	for sleeper in guards:
+		sleeper.state = "asleep"
+	_run(int(BLACKOUT.cut * 60) + 10)
+	ripples.clear()
+	var seen_still := []
+	for sec in 5:
+		_run(60)
+		bo_frame()
+		seen_still.append("%.2f" % bo_self())
+	test_keys = {"right": true, "walk": true}
+	_run(6)
+	bo_frame()
+	test_keys = {}
+	print("  held still, how much of him shows each second: %s; a step: %.2f" % [seen_still, bo_self()])
+	# A / B
+	bo_look = "eyes"
+	var ev := InputEventKey.new()
+	ev.physical_keycode = KEY_V
+	ev.pressed = true
+	_unhandled_input(ev)
+	print("  V: look %s ('%s')" % [bo_look, notice])
+	_unhandled_input(ev)
+	print("  V again: look %s" % bo_look)
+	# other floors stay lit
+	start_run(5)
+	_run(120)
+	print("  floor 6: blackout %s, dark %.1f" % [is_blackout(), blackout])
 
 # Floor 6 with only the first watcher awake, at gx (tiles), standing still facing face; him at px. fight: squared up.
 func _fight_setup(gx: float, px: float, face: int, fight_now := false) -> Guard:
