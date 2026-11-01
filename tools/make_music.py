@@ -1,4 +1,4 @@
-"""Builds Shadow Ninja's music: two seamless 60-second loops in D minor, 64 BPM.
+"""Builds Shadow Ninja's music: three seamless 60-second loops in D minor, 64 BPM.
 
     python tools/make_music.py
 
@@ -6,6 +6,8 @@
                                  with a soft echo, and a quiet low pulse. Always playing.
   godot/audio/music_tension.wav  same key, chords and length: a muted bass ostinato, a faint tick
                                  and a thin high shimmer. The game fades it in as danger rises.
+  godot/audio/music_fight.wav    same key, chords and length: low drums driving on 16ths, a gritty bass,
+                                 a backbeat, a heavy stab every two bars. Fades in during a fight (Floor 6 on).
 
   godot/audio/heartbeat.wav      a muffled lub-dub; the game plays it faster and louder as the meter fills
   godot/audio/riser.wav          an uneasy high cluster (loops); fades in and rises in pitch near full
@@ -166,6 +168,62 @@ def shimmer():
         seg = (t >= c * CHORD_LEN) & (t < (c + 1) * CHORD_LEN + 1)
         s += np.where(seg, np.sin(2 * np.pi * f * t), 0)
     return lowpass(s * trem, 2500)
+
+# ---------------------------------------------------------------- fight layer (Floor 6 on)
+def drum(f0=70, dur=0.5, slap=0.4):                      # a big low drum: a pitch-dropping body and a skin slap
+    tt = np.arange(int(dur * SR)) / SR
+    f = f0 * (1 + 1.2 * np.exp(-tt / 0.025))
+    body = np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-tt / (dur * 0.3))
+    skin = lowpass(rng.standard_normal(len(tt)), 900) * np.exp(-tt / 0.02) * slap
+    return (body + skin) * np.minimum(1, tt / 0.002)
+
+FIGHT_HITS = {0: 1.0, 3: 0.6, 6: 0.75, 8: 0.9, 10: 0.55, 11: 0.7, 14: 0.8}   # 16ths in a bar: syncopated
+
+def drums():
+    out = np.zeros(N)
+    step = BEAT / 4
+    for k in range(int(LOOP / step)):
+        pos = k % 16
+        if pos in FIGHT_HITS:
+            place(out, drum(64 if pos in (0, 8) else 82) * FIGHT_HITS[pos], k * step)
+        elif rng.random() < 0.3:                         # ghost notes: small, higher drums in the gaps
+            place(out, drum(120, 0.2, 0.6) * 0.25, k * step)
+        if pos in (4, 12):                               # the backbeat: a hard, dry crack
+            n = int(0.25 * SR)
+            crack = rng.standard_normal(n) * np.exp(-np.arange(n) / (0.045 * SR))
+            place(out, (lowpass(crack, 2600) - lowpass(crack, 300)) * 0.9, k * step)
+            place(out, drum(180, 0.15, 0) * 0.4, k * step)
+    return out
+
+def grit_bass():                                         # the chord root on every 16th, driven into saturation
+    out = np.zeros(N)
+    step = BEAT / 4
+    for k in range(int(LOOP / step)):
+        root = CHORDS[int(k * step // CHORD_LEN) % 4][0]
+        place(out, bass_note(hz(root), 0.22) * (1.0 if k % 4 == 0 else 0.55), k * step)
+    return np.tanh(2.5 * lowpass(out, 700))
+
+def stabs():                                             # a heavy, brassy chord hit every two bars
+    out = np.zeros(N)
+    bar = 4 * BEAT
+    for b in range(0, int(LOOP / bar), 2):
+        root, notes = CHORDS[int(b * bar // CHORD_LEN) % 4]
+        tt = np.arange(int(1.4 * SR)) / SR
+        hit = np.zeros(len(tt))
+        for note in [root] + notes[:3]:
+            for cents in (-8, 8):
+                hit += 2 * ((hz(note) * 2 ** (cents / 1200) * tt) % 1) - 1
+        place(out, hit * np.exp(-tt / 0.35) * np.minimum(1, tt / 0.004), b * bar)
+    return lowpass(np.tanh(0.6 * out), 1500)
+
+def swells():                                            # noise rising through the last bar into each chord change
+    out = np.zeros(N)
+    dur = 4 * BEAT
+    tt = np.arange(int(dur * SR)) / SR
+    for c in range(4):
+        sw = lowpass(rng.standard_normal(len(tt)), 2200) * (tt / dur) ** 3
+        place(out, sw, (c + 1) * CHORD_LEN - dur)
+    return out
 
 # ---------------------------------------------------------------- mix, loop, write
 def fold(x):                                             # wrap the tail back onto the start: seamless loop
@@ -333,3 +391,5 @@ if __name__ == '__main__':
     write(os.path.join(root, 'thud_small.wav'), thud(200, 85, 0.09, 0.35), 0.5)
     write(os.path.join(root, 'thud_big.wav'), thud(120, 36, 0.28, 0.8), 0.9)
     write(os.path.join(root, 'shout.wav'), shout(), 0.6)
+    fight = reverb(0.8 * drums() + 0.35 * grit_bass() + 0.3 * stabs() + 0.12 * swells(), 1.2, 0.2)
+    write(os.path.join(root, 'music_fight.wav'), fold(fight), 0.6)   # last: rng order keeps the others identical
