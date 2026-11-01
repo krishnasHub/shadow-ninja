@@ -61,14 +61,16 @@ const CAM_LOCK := {"track": 0.8, "slack": 0.3, "ease_back": 1.5}
 const ALARM := {"countdown": 30.0, "lockdown": 30.0, "regroup": 5.0}
 const NOISE := {"run": 150.0, "land": 120.0, "panel": 280.0, "thud": 140.0, "lever": 230.0, "rattle": 90.0,
 	"glass": 300.0, "tink": 80.0, "scrape": 110.0, "shout": 320.0}
-# Fighting (remembered after Floor 5) - only the watchers: no torch, they see you in the dark up close
-# (sight px in front; in any light, lit_sight), can't be dropped on, and find the guards you leave asleep.
+# Fighting (remembered after Floor 5) - only the watchers: no torch, but they see as far as a guard's
+# torch reaches, in the same cone, in the dark too (and in any light, lit_sight; up close, sight px in
+# front). Spotted, he runs at you (`run` x a guard's chase speed); duck then and it's no use - he drags you
+# out (drag s). They can't be dropped on, and find the guards you leave asleep.
 # He squares up when he's on you (engage px); or strike when you're by one (reach px). One press: a strike;
 # quick presses (3 inside `quick` s): a special. His wind-up: block in it and you counter; miss it and he
 # lands it - the meter jumps (`hit`) and he shouts. Worn down (each blow takes some), he's dazed: the next
 # press finishes it. Moves and poses: fight.gd.
 const FIGHT := {"engage": 46.0, "reach": 62.0, "sight": 64.0, "lit_sight": 300.0, "find": 70.0,
-	"hit": 0.35, "quick": 0.55, "attack": [1.3, 2.4], "step": 90.0, "leave": 170.0}
+	"hit": 0.35, "quick": 0.55, "attack": [1.3, 2.4], "step": 90.0, "leave": 170.0, "run": 1.45, "drag": 0.3}
 # Throwing stars (remembered after Floor 3; there's nothing to throw before that): straight and fast;
 # one through a lamp, a camera's lens or an alarm panel puts it out for good. Not picked up again.
 const STAR := {"max": 3, "speed": 950.0, "range": 700.0, "gravity": 1400.0}
@@ -304,13 +306,18 @@ var font_italic: Font
 var font_bold: Font
 var _tex_cache := {}
 # music (tools/make_music.py): a soft base loop always playing, and a tension layer in the same key
-# that fades in as danger rises (meter, a guard hunting you, a camera on you). M toggles it.
+# that fades in as danger rises (meter, a guard hunting you, a camera on you), and a fight layer
+# (drums, a gritty bass) that comes in hard while he's fighting a watcher. M toggles them.
 var music_base: AudioStreamPlayer
 var music_tension: AudioStreamPlayer
+var music_fight: AudioStreamPlayer
 var music_on := true
 var tension := 0.0
+var fight_mix := 0.0
 const MUSIC_BASE_DB := -7.0
 const MUSIC_TENSION_DB := -5.0
+const MUSIC_FIGHT_DB := -4.0
+const FIGHT_MUSIC := {"in": 3.0, "out": 0.5}    # per second: in at once, out over ~2 s after the fight
 # the meter's own sound: a heartbeat that quickens, an uneasy tone that rises, the music pulling
 # back - and a sting when you're caught. These are sound effects: M only toggles the music.
 const METER_AUDIO := {
@@ -337,6 +344,7 @@ var fight: Guard = null         # the watcher he's fighting
 var nm := ""                    # the move he's playing in it ("" = squared up), and how far in
 var nt := 0.0
 var npose: Dictionary = {}      # his pose this frame
+var dragged_t := -99.0          # when a watcher dragged him out from behind cover into the fight
 var presses: Array = []         # when strike was pressed: three quick ones are a special
 var last_move := ""
 var fx: Array = []              # blows landing: {p, t, size} - a white burst
@@ -410,7 +418,7 @@ func _ready() -> void:
 
 func _setup_music() -> void:
 	var players := []
-	for which in ["base", "tension"]:
+	for which in ["base", "tension", "fight"]:
 		var st := AudioStreamWAV.load_from_file("res://audio/music_%s.wav" % which)   # raw file: no import step needed
 		var p := AudioStreamPlayer.new()
 		if st != null:
@@ -421,10 +429,13 @@ func _setup_music() -> void:
 		players.append(p)
 	music_base = players[0]
 	music_tension = players[1]
+	music_fight = players[2]
 	music_base.volume_db = MUSIC_BASE_DB
 	music_tension.volume_db = -80.0
-	music_base.play()                        # started together, so the two layers stay in step
+	music_fight.volume_db = -80.0
+	music_base.play()                        # started together, so the layers stay in step
 	music_tension.play()
+	music_fight.play()
 	sfx_heart = _sfx_player("heartbeat")
 	sfx_riser = _sfx_player("riser", true)
 	sfx_caught = _sfx_player("caught")
@@ -484,6 +495,9 @@ func update_music(dt: float) -> void:
 	var target := music_danger() if state == "play" else 0.0
 	tension = move_toward(tension, target, dt * (0.6 if target > tension else 0.2))   # rises quickly, settles slowly
 	music_tension.volume_db = linear_to_db(maxf(tension, 0.0001)) + MUSIC_TENSION_DB
+	var fighting := fight != null and state == "play"
+	fight_mix = move_toward(fight_mix, 1.0 if fighting else 0.0, dt * (FIGHT_MUSIC.in if fighting else FIGHT_MUSIC.out))
+	music_fight.volume_db = linear_to_db(maxf(fight_mix, 0.0001)) + MUSIC_FIGHT_DB
 	update_meter_audio(dt)
 
 # The meter, heard: a heartbeat that quickens and grows, a tone that rises, the music pulling back.
@@ -1338,6 +1352,7 @@ func toggle_music() -> void:
 	music_on = not music_on
 	music_base.stream_paused = not music_on
 	music_tension.stream_paused = not music_on
+	music_fight.stream_paused = not music_on
 
 # A controller button, pressed. In menus the buttons stand in for keys; in play they're the controls.
 func pad_button(b: int) -> void:
@@ -2464,6 +2479,8 @@ func update_guard(g: Guard, dt: float) -> void:
 	elif g.state == "chase" or g.state == "investigate":
 		var chasing := g.state == "chase"
 		speed = (GUARD.chase if chasing else GUARD.investigate) * boost
+		if chasing and g.kind == "watcher":
+			speed *= FIGHT.run                            # a watcher runs at you
 		target = clampf(g.last_seen if chasing else g.invest_x, g.min_x, g.max_x)
 		if seeing and absf(px - g.x) < (70.0 if g.kind == "watcher" and fight != null else 30.0):
 			target = null                                 # standing over you (a watcher waits his turn)
@@ -2551,7 +2568,8 @@ func takedown(g: Guard) -> void:
 #  (g.gm, g.gt). A strike sets both - he strikes, the watcher reels. His wind-up sets both too; a block in
 #  it turns both into the counter. A hop back is his alone: the watcher's punch lands on air.
 # =====================================================================
-# No torch: in the dark he sees you up close in front of him; in any light, further. Not behind him.
+# No torch, but he sees as far as a guard's torch would reach, in its cone - in the dark too. Up close,
+# anywhere in front of him; in any light, further. Not behind him.
 func watcher_sees(g: Guard) -> bool:
 	if g.state in ["asleep", "intro_exit", "fight"] or (P.hidden and g.knows_hide != P.cover):
 		return false
@@ -2560,7 +2578,10 @@ func watcher_sees(g: Guard) -> bool:
 	var dx := torso.x - eye.x
 	if (signf(dx) != g.facing and absf(dx) > 6.0) or absf(g.y - (P.y + P.h)) > 40.0 or blocked(eye, torso):
 		return false
-	return absf(dx) < FIGHT.sight or (exposure > TUNE.exposed_threshold and absf(dx) < FIGHT.lit_sight)
+	if absf(dx) < FIGHT.sight or (exposure > TUNE.exposed_threshold and absf(dx) < FIGHT.lit_sight):
+		return true
+	var ang := atan2(torso.y - (g.y - 32), absf(dx))      # a guard's cone: from his torch's height, at his aim
+	return eye.distance_to(torso) < GUARD.torch_radius and absf(ang - g.aim) < GUARD.torch_spread
 
 func watcher_near() -> Guard:                 # a watcher you could strike from where you stand
 	if not P.on_ground or P.clinging:
@@ -2575,12 +2596,18 @@ func fight_ready() -> bool:
 	return state == "play" and recall == "" and can.has("fight") and (fight != null or watcher_near() != null)
 
 func start_fight(g: Guard) -> void:
+	var from_hiding := P.hidden
 	if P.crawling:
 		if not can_stand():
 			return
 		P.y -= TUNE.stand_h - TUNE.crawl_h
 		P.h = TUNE.stand_h
 		P.crawling = false
+	P.hidden = false
+	P.cover = -1
+	if from_hiding:                               # he saw you duck: he hauls you out
+		dragged_t = time
+		sfx_thud_small.play()
 	release_grip()
 	P.tuck_to = -1.0
 	fight = g
@@ -2738,7 +2765,12 @@ func update_fight(dt: float) -> void:
 		g.facing = 1 if px > g.x else -1
 		P.facing = -g.facing
 		var want := clampf(px + P.facing * Fight.GAP, g.min_x, g.max_x)
-		g.x = move_toward(g.x, want, FIGHT.step * dt)
+		if time - dragged_t < FIGHT.drag:           # dragged out: he pulls you in to him
+			var to := move_toward(P.x, g.x - P.facing * Fight.GAP - P.w / 2, 160.0 * dt)
+			if not rect_hits(to, P.y, P.w, P.h):
+				P.x = to
+		else:
+			g.x = move_toward(g.x, want, FIGHT.step * dt)
 		if g.hp > 0.0 and absf(g.x - want) < 4.0:
 			g.next_attack -= dt
 			if g.next_attack <= 0.0:
@@ -3658,7 +3690,7 @@ func _selftest_intro() -> void:
 # Dev tool: music - both loops load and play; the tension layer follows danger; M toggles.
 #   godot_console --headless --path . -- --selftest=music
 func _selftest_music() -> void:
-	print("  loops: base %.0fs, tension %.0fs, playing: %s" % [music_base.stream.get_length(), music_tension.stream.get_length(), music_base.playing and music_tension.playing])
+	print("  loops: base %.0fs, tension %.0fs, fight %.0fs, playing: %s" % [music_base.stream.get_length(), music_tension.stream.get_length(), music_fight.stream.get_length(), music_base.playing and music_tension.playing and music_fight.playing])
 	start_run(1)
 	test_keys = {}
 	for i in 120:
@@ -3676,6 +3708,17 @@ func _selftest_music() -> void:
 	for i in 300:
 		update_music(1.0 / 60.0)
 	print("  safe again for 5s: tension %.2f" % tension)
+	fight = guards[0]                                # the fight layer: in fast, out slowly
+	for i in 30:
+		update_music(1.0 / 60.0)
+	print("  fighting for 0.5s: fight layer %.2f (%.0f dB)" % [fight_mix, music_fight.volume_db])
+	fight = null
+	for i in 60:
+		update_music(1.0 / 60.0)
+	print("  1s after the fight: fight layer %.2f" % fight_mix)
+	for i in 120:
+		update_music(1.0 / 60.0)
+	print("  3s after: fight layer %.2f" % fight_mix)
 	for level_m in [0.2, 0.5, 0.8, 0.98]:            # the meter, heard: beats per minute and the rising tone
 		start_run(1)
 		var beats := 0
@@ -3697,7 +3740,7 @@ func _selftest_music() -> void:
 	ev.physical_keycode = KEY_M
 	ev.pressed = true
 	_unhandled_input(ev)
-	print("  M -> music paused: ", music_base.stream_paused and music_tension.stream_paused)
+	print("  M -> music paused: ", music_base.stream_paused and music_tension.stream_paused and music_fight.stream_paused)
 	_unhandled_input(ev)
 	print("  M again -> playing: ", not music_base.stream_paused)
 	test_keys = null
@@ -3961,17 +4004,52 @@ func _selftest_fight() -> void:
 	start_run(5)
 	print("  %s: remembers %s" % [level.name, can.keys()])
 	var w: Guard
-	# sight: no torch - in the dark, only up close and in front
+	# sight: no torch, but a guard's reach and cone, in the dark too - and never behind him
 	var seen := []
-	for d in [3.0, 1.5, -1.2]:
+	for d in [12.0, 9.0, 3.0, 1.5, -1.2, -3.0]:
 		w = _fight_setup(10.0, 10.0 + d, 1)
 		seen.append("%+.1f tiles: %s" % [d, watcher_sees(w)])
 	print("  a watcher in the dark sees you at %s  (exposure %.2f)" % [seen, exposure])
+	# spotted from far off: "!", he runs at you, and ducking behind the desk then is no use
+	w = _fight_setup(18.0, 9.0, -1)
+	P.x = 9.0 * T - P.w / 2
+	_run(20)
+	var top := 0.0
+	for i in 30:
+		_run(1)
+		top = maxf(top, w.cur_v)
+	print("  spotted 9 tiles off in the dark: he's %s (\"!\"), running at %.0f px/s (a guard chases at %.0f)" % [w.state, top, GUARD.chase])
+	test_keys = {"down": true}
+	var f := 0
+	var hid := 0
+	while fight == null and f < 300:
+		_run(1)
+		f += 1
+		hid += 1 if P.hidden else 0
+	var hid_at := P.x
+	_run(int(FIGHT.drag * 60) + 2)
+	print("  ducked behind the desk: hidden %.1fs, then the fight %s after %.1fs; dragged out %s (pulled %.0f px), %.0f px apart" % [hid / 60.0, fight == w, f / 60.0, not P.hidden and not P.crawling, absf(P.x - hid_at), absf(w.x - (P.x + P.w / 2))])
+	test_keys = {}
+	# not spotted: ducking still works - he walks right past
+	w = _fight_setup(18.0, 9.0, 1)
+	test_keys = {"down": true}
+	_run(10)
+	w.pause = 0.0
+	w.facing = -1
+	w.from_x = 5.0 * T
+	f = 0
+	var past := false
+	while f < 600 and fight == null:
+		_run(1)
+		f += 1
+		past = past or w.x < 7.0 * T
+	print("  ducked before he looked: he walked past %s, no fight %s, he's %s" % [past, fight == null, w.state])
+	test_keys = {}
 	# walk up to him: he squares up
 	w = _fight_setup(10.0, 14.0, 1)
 	w.pause = 0.0
 	test_keys = {"left": true, "walk": true}
-	var f := 0
+	f = 0
 	while fight == null and f < 600:
 		_run(1)
 		f += 1

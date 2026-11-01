@@ -268,8 +268,8 @@ const LEVELS := [
 	},
 	{
 		"name": "FLOOR 6", "subtitle": "the watch",
-		# fighting: the watchers carry no torch - in the dark they see you only up close, they can't be dropped
-		# on, and they find the guards you leave asleep. 1: one watcher alone in the dark, to learn on.
+		# fighting: the watchers carry no torch but see as far as a guard's would reach, even in the dark; spotted,
+		# they run at you and hiding is no use. They can't be dropped on, and find the guards you leave asleep. 1: one watcher alone in the dark, to learn on.
 		# 2: a torch guard under a duct - the old way still works. 3: a watcher walking near a torch guard:
 		# put the guard to sleep and the watcher finds him. 4: a camera, then a last watcher by the exit.
 		"width": 130,
@@ -282,7 +282,7 @@ const LEVELS := [
 			["desk", 98, 15], ["cooler", 110, 15], ["plant", 121, 15]],
 		"hints": [
 			[2.5, 170, "floor 6 - the watch. some of them carry no light."],
-			[7.0, 210, "no torch: in the dark he sees you only up close. and he won't let you drop on him."],
+			[7.0, 210, "no torch, but he sees as far as the rest. once he has, hiding won't help."],
 			[7.0, 245, "by him:  LEFT CLICK / E  strike.   RIGHT CLICK / Q  block.", "by him:  X  strike.   Y  block."],
 			[15.0, 280, "three quick strikes: something special.", "three quick X: something special."],
 			[24.0, 190, "when he winds up - the ticks over his head - block."],
