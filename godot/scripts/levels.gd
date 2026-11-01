@@ -8,9 +8,10 @@ extends RefCounted
 ##   hints:  [x, y_px, text]  - faint words painted on the back wall
 ##   lights: lamp (ceiling unless y given), moon (through a skylight gap), sign, camera (sweeps)
 ##   guards: x start, patrol from/to, walkable bounds min_x/max_x, row they stand on;
-##           kind "watcher": no torch, sees you in the dark only up close, can't be dropped on - you fight
+##           kind "watcher": no torch, but sees as far as a guard (in the dark too), can't be dropped on - you fight
 ##           him (once "fight" is remembered) - and finds the guards you leave asleep (the alarm goes up)
 ##   exit:   the door's tile x; reaching it clears the floor (exit_row: the row it stands on, default 15)
+##   blackout: true - the guards cut the lights a moment in; sound is the only light (main.gd: BLACKOUT).
 ##   height: rows (default 17). The floor is always the bottom 2 rows; taller floors scroll vertically.
 ##   doors:  [x, y, w, h] locked doors (solid);  switches: {x, row, door} - walk up to one and the
 ##           ninja pulls it, which opens doors[door]. He reaches it from TUNE.lever_reach px either side,
