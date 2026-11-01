@@ -105,6 +105,10 @@ One colour, one thing: the scarf, and only in shadow. Floor by floor the colour 
 <div class="grid" id="fightguard" style="margin-top: 12px"></div>
 <div class="wide" id="fightwide"></div>
 
+<h2>Blackout · going by sound</h2>
+<p class="lede">A later floor where the guards kill every light. The screen goes black; sound is the only light. Still things hum faintly. Every step sends out a ripple that outlines whatever it reaches, out to the same distance the guards hear it (a run: 150 px, as in the game), so <b>the room you see is the room that hears you</b>. Sneaking is silent and leaves you nearly blind; running shows you the room and gives you away. He knows his own body (a faint outline, his eyes, and what he's remembered). The scene: sneak, run, heard. <b>A:</b> the guards wear night vision - only their eyes show, and the small ripples of their own steps. <b>B:</b> the first pitch - a moving guard always shows, vibrating.</p>
+<div class="wide" id="blackout"></div>
+
 <footer>Game units: a tile is 32 px; the ninja is 18 × 44, a guard about 62 tall. Drawn here at the game's size, scaled up 2.5×. Nothing here changes the game.</footer>
 
 <script>
@@ -1152,6 +1156,136 @@ One colour, one thing: the scarf, and only in shadow. Floor by floor the colour 
   speechScene("B · Cut-out bubble", "the bubble is the same black ink as the guards, part of their silhouette; grey caps inside.", sayCutout);
   speechScene("C · Overheard", "no bubble: soft italic words drift up by the speaker and fade, like the hints on the walls.", sayOverheard);
   speechScene("D · Grey bubble", "the comic bubble from before (style, lettering and size above), with the faint words.", sayBubble);
+
+  // ---- the blackout: going by sound ----
+  // Everything is drawn as a silhouette into a buffer, turned white, then thinned to its outline. The hum shows
+  // the still outlines faintly; each ripple shows every outline it passes, bright at its front, then fading.
+  const BW = 420, BH = 130, BFY = 112, LOOP_B = 11;
+  const RIPPLE = { run: 150, sneak: 26, guard: 46, speed: 230, fade: 0.8 };
+  const BL = document.getElementById("blackout");
+  const BT = new URLSearchParams(location.search).has("bt") ? +new URLSearchParams(location.search).get("bt") : null;   // ?bt=<s>: hold the scenes there
+  const buf = cv => { const o = document.createElement("canvas"); o.width = cv.width; o.height = cv.height; return o; };
+  function silhouette(dst, k, draw) {                    // draw (in game units) -> a white mask
+    const x = dst.getContext("2d");
+    x.setTransform(1, 0, 0, 1, 0, 0); x.globalCompositeOperation = "source-over"; x.clearRect(0, 0, dst.width, dst.height);
+    x.setTransform(k, 0, 0, k, 0, 0); draw(x);
+    x.setTransform(1, 0, 0, 1, 0, 0); x.globalCompositeOperation = "source-in"; x.fillStyle = "#fff"; x.fillRect(0, 0, dst.width, dst.height);
+    x.globalCompositeOperation = "source-over";
+  }
+  function outline(src, dst, w) {                        // the mask's edge, w device px thick
+    const x = dst.getContext("2d");
+    x.setTransform(1, 0, 0, 1, 0, 0); x.clearRect(0, 0, dst.width, dst.height);
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [0.7, 0.7], [-0.7, 0.7], [0.7, -0.7], [-0.7, -0.7]]) x.drawImage(src, dx * w, dy * w);
+    x.globalCompositeOperation = "destination-out"; x.drawImage(src, 0, 0); x.globalCompositeOperation = "source-over";
+  }
+  function plant(c, x, y) { rrect(c, x, y - 14, 16, 14, 2, "#000"); ellipse(c, x + 8, y - 24, 9, 11, "#000"); ellipse(c, x + 2, y - 30, 5, 8, "#000"); ellipse(c, x + 14, y - 31, 5, 8, "#000"); }
+  function cooler(c, x, y) { rrect(c, x, y - 34, 18, 34, 2, "#000"); rrect(c, x + 3, y - 50, 12, 17, 4, "#000"); }
+  function blackoutScene(title, note, guardLook) {
+    let L = null, S = null;
+    const reset = () => {
+      const n = makeNinja("walk", 0); n.f = 1;
+      const g = makeGuard("walk", 20, 1); g.x = 270;
+      S = { T: 0, n, nx: 30, g, ripples: [], heard: -1, nstep: 0, gstep: 0 };
+    };
+    const step = dt => {
+      S.T += dt;
+      const T = S.T, { n, g } = S;
+      // him: sneak, then run, then still
+      const vx = T < 4.5 ? 40 : T < 5.7 ? 110 : 0;
+      n.vx = vx; S.nx += vx * dt;
+      updateNinja(n, dt, S.nx, BFY, 0);
+      const ns = Math.floor(n.phase / Math.PI);
+      if (ns !== S.nstep && vx > 0) S.ripples.push({ x: S.nx, y: BFY - 2, R: vx > 80 ? RIPPLE.run : RIPPLE.sneak, age: 0, loud: vx > 80 });
+      S.nstep = ns;
+      // the guard: walking away, until he hears a run; then he turns and comes to where it was
+      if (S.heard < 0) { g.v = 20; g.f = 1; }
+      else if (T - S.heard > 0.35) {
+        g.f = -1;
+        const want = S.nx + 30;
+        g.v = g.x - want > 2 ? 55 : 0;
+      } else g.v = 0;
+      g.x += g.f * g.v * dt;
+      updateGuard(g, dt);
+      const gs = Math.floor(g.phase / Math.PI);
+      if (gs !== S.gstep && g.v > 0 && guardLook === "eyes") S.ripples.push({ x: g.x, y: BFY - 2, R: RIPPLE.guard, age: 0 });
+      S.gstep = gs;
+      for (const r of S.ripples) {
+        r.age += dt;
+        r.rad = clamp(r.age * RIPPLE.speed, 0, r.R);
+        if (r.loud && S.heard < 0 && Math.abs(g.x - r.x) < r.rad) S.heard = T;
+      }
+      S.ripples = S.ripples.filter(r => r.age < r.R / RIPPLE.speed + RIPPLE.fade);
+    };
+    card(BL, title, note, BW, BH, (c, dt, time) => {
+      const cv = c.canvas, k = cv.width / BW;
+      if (!L || L.w !== cv.width) L = { w: cv.width, s: buf(cv), g: buf(cv), n: buf(cv), os: buf(cv), og: buf(cv), on: buf(cv), tmp: buf(cv) };
+      if (!S) { reset(); if (BT !== null) while (S.T < BT) step(1 / 60); }
+      if (BT === null) { step(Math.max(dt, 0)); if (S.T >= LOOP_B) reset(); }
+      const T = S.T, { n, g } = S;
+      // the outlines
+      silhouette(L.s, k, x => { x.fillStyle = "#000"; x.fillRect(-10, BFY, BW + 20, 40); drawDesk(x, 60, BFY, "#000"); plant(x, 168, BFY); cooler(x, 236, BFY); drawDesk(x, 330, BFY, "#000"); });
+      silhouette(L.g, k, x => drawGuard(x, g, g.x, BFY));
+      silhouette(L.n, k, x => drawNinja(x, n, S.nx, BFY, 0, 0, time));
+      outline(L.s, L.os, k * 0.8); outline(L.g, L.og, k * 0.8); outline(L.n, L.on, k * 0.6);
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      c.fillStyle = "#000"; c.fillRect(0, 0, cv.width, cv.height);
+      c.globalAlpha = 0.07 + 0.03 * Math.sin(time * 1.7);  // the hum: still things, barely there
+      c.drawImage(L.os, 0, 0);
+      // ripples: each lights the outlines it's passing, bright at its front
+      c.globalCompositeOperation = "lighter";
+      const tx = L.tmp.getContext("2d");
+      for (const r of S.ripples) {
+        const fade = 1 - clamp((r.age - r.R / RIPPLE.speed) / RIPPLE.fade, 0, 1);
+        const R1 = r.rad + 1;
+        tx.setTransform(1, 0, 0, 1, 0, 0); tx.globalCompositeOperation = "source-over"; tx.clearRect(0, 0, cv.width, cv.height);
+        tx.drawImage(L.os, 0, 0); tx.drawImage(L.og, 0, 0);
+        const grd = tx.createRadialGradient(r.x * k, r.y * k, 0, r.x * k, r.y * k, R1 * k);
+        grd.addColorStop(0, "rgba(255,255,255,0)");
+        grd.addColorStop(Math.max(0, (r.rad - 40) / R1), "rgba(255,255,255,0.18)");
+        grd.addColorStop(Math.max(0, (r.rad - 5) / R1), "rgba(255,255,255,1)");
+        grd.addColorStop(1, "rgba(255,255,255,0)");
+        tx.globalCompositeOperation = "destination-in"; tx.fillStyle = grd; tx.fillRect(0, 0, cv.width, cv.height);
+        c.globalAlpha = fade * (r.R >= 100 ? 0.95 : 0.55);
+        c.drawImage(L.tmp, 0, 0);
+        c.globalAlpha = fade * 0.07;                        // the ripple itself, a thin ring in the air
+        c.strokeStyle = "#fff"; c.lineWidth = k * 0.7;
+        c.beginPath(); c.arc(r.x * k, r.y * k, r.rad * k, Math.PI, TAU); c.stroke();
+      }
+      c.globalCompositeOperation = "source-over";
+      // B: a moving guard vibrates
+      if (guardLook === "jitter") {
+        const moving = g.v > 1;
+        for (let i = 0; i < (moving ? 2 : 1); i++) {
+          c.globalAlpha = moving ? 0.4 : 0.1;
+          const j = moving ? 1.3 * k : 0;
+          c.drawImage(L.og, (Math.random() - 0.5) * j * 2, (Math.random() - 0.5) * j * 2);
+        }
+      }
+      // him: a faint outline (he knows his own body), then himself in shadow: dark, his eyes, what he's remembered
+      c.globalAlpha = 0.22; c.drawImage(L.on, 0, 0); c.globalAlpha = 1;
+      c.setTransform(k, 0, 0, k, 0, 0);
+      drawNinja(c, n, S.nx, BFY, 0, 0, time, { reach: 0.65 });
+      // A: night vision - only his eyes, brighter once he's heard you
+      const alert = S.heard >= 0 && T - S.heard > 0.2;
+      if (guardLook === "eyes" || alert) {
+        const hy = BFY - 54, a = alert ? 0.85 : 0.3;
+        for (const ox of [3, 7]) {
+          circle(c, g.x + g.f * ox, hy, 2.2, `rgba(255,255,255,${a * 0.2})`);
+          circle(c, g.x + g.f * ox, hy, alert ? 1.1 : 0.8, `rgba(255,255,255,${a})`);
+        }
+      }
+      if (alert) {
+        c.font = "bold 13px Georgia, serif"; c.textAlign = "center"; c.fillStyle = "rgba(255,255,255,0.85)";
+        c.fillText("!", g.x, BFY - 70);
+      }
+      c.font = "italic 6.5px Georgia, serif"; c.textAlign = "left"; c.fillStyle = "rgba(255,255,255,0.35)";
+      c.fillText(T < 4.5 ? "sneaking: silent, nearly blind" : T < 5.7 ? "running: every step lights the room..." : "...and he heard it", 8, 12);
+      const edge = Math.max(clamp(1 - T / 0.5, 0, 1), clamp((T - (LOOP_B - 0.6)) / 0.6, 0, 1));
+      if (edge > 0) { c.setTransform(1, 0, 0, 1, 0, 0); c.fillStyle = `rgba(0,0,0,${edge})`; c.fillRect(0, 0, cv.width, cv.height); }
+    });
+  }
+  blackoutScene("A · Night vision", "the guards: only their eyes, faint - brighter once they've heard you - and the small ripples of their own steps.", "eyes");
+  blackoutScene("B · Vibrating", "the first pitch: a moving guard always shows, his outline jittering; still, he's barely there.", "jitter");
 
   // ---- run ----
   let last = performance.now();
