@@ -348,6 +348,19 @@ const MUSIC_BASE_DB := -7.0
 const MUSIC_TENSION_DB := -5.0
 const MUSIC_FIGHT_DB := -4.0
 const FIGHT_MUSIC := {"in": 3.0, "out": 0.5}    # per second: in at once, out over ~2 s after the fight
+# the lights go (Floor 7), and so does the music: near silence, so the footsteps carry it. Per second: gone
+# in 0.5 s with the cut, back over 2.5 s. The tension layer stays, far down, so a hunt is still felt.
+const DARK_MUSIC := {"in": 2.0, "out": 0.4, "db": -10.0, "tension": 0.3}
+# footsteps in the dark: placed left/right in the room, fading out by "reach" px. kind: [file(s), volume dB]
+const DARK_STEPS := {"reach": 1200.0, "attenuation": 1.3, "voices": 12, "pitch": [0.93, 1.05],
+	"boot": -2.0, "wall": -3.0, "soft": -15.0, "run": -10.0, "land": -6.0, "grab": -8.0, "shimmy": -12.0}
+var sfx_takedown: AudioStreamPlayer
+var music_dark: AudioStreamPlayer
+var dark_mix := 0.0
+var step_voices: Array = []     # AudioStreamPlayer2Ds, used in turn so tails overlap
+var step_voice := 0
+var step_sounds := {}
+var steps_played := {}          # how many of each, for the self-test
 # the meter's own sound: a heartbeat that quickens, an uneasy tone that rises, the music pulling
 # back - and a sting when you're caught. These are sound effects: M only toggles the music.
 const METER_AUDIO := {
@@ -450,7 +463,7 @@ func _ready() -> void:
 
 func _setup_music() -> void:
 	var players := []
-	for which in ["base", "tension", "fight"]:
+	for which in ["base", "tension", "fight", "dark"]:
 		var st := AudioStreamWAV.load_from_file("res://audio/music_%s.wav" % which)   # raw file: no import step needed
 		var p := AudioStreamPlayer.new()
 		if st != null:
@@ -462,12 +475,24 @@ func _setup_music() -> void:
 	music_base = players[0]
 	music_tension = players[1]
 	music_fight = players[2]
+	music_dark = players[3]
 	music_base.volume_db = MUSIC_BASE_DB
 	music_tension.volume_db = -80.0
 	music_fight.volume_db = -80.0
+	music_dark.volume_db = -80.0
 	music_base.play()                        # started together, so the layers stay in step
 	music_tension.play()
 	music_fight.play()
+	music_dark.play()
+	sfx_takedown = _sfx_player("takedown")
+	for file in ["boot_a", "boot_b", "boot_wall", "soft", "run", "land", "grab", "shimmy_a", "shimmy_b"]:
+		step_sounds[file] = AudioStreamWAV.load_from_file("res://audio/step_%s.wav" % file)
+	for i in DARK_STEPS.voices:
+		var v := AudioStreamPlayer2D.new()
+		v.max_distance = DARK_STEPS.reach
+		v.attenuation = DARK_STEPS.attenuation
+		add_child(v)
+		step_voices.append(v)
 	sfx_heart = _sfx_player("heartbeat")
 	sfx_riser = _sfx_player("riser", true)
 	sfx_caught = _sfx_player("caught")
@@ -526,7 +551,10 @@ func update_music(dt: float) -> void:
 		return                               # hold the mood while paused
 	var target := music_danger() if state == "play" else 0.0
 	tension = move_toward(tension, target, dt * (0.6 if target > tension else 0.2))   # rises quickly, settles slowly
-	music_tension.volume_db = linear_to_db(maxf(tension, 0.0001)) + MUSIC_TENSION_DB
+	var dark := bo_cut and (state == "play" or state == "caught")
+	dark_mix = move_toward(dark_mix, 1.0 if dark else 0.0, dt * (DARK_MUSIC.in if dark else DARK_MUSIC.out))
+	music_dark.volume_db = linear_to_db(maxf(dark_mix, 0.0001)) + DARK_MUSIC.db
+	music_tension.volume_db = linear_to_db(maxf(tension * lerpf(1.0, DARK_MUSIC.tension, dark_mix), 0.0001)) + MUSIC_TENSION_DB
 	var fighting := fight != null and state == "play"
 	fight_mix = move_toward(fight_mix, 1.0 if fighting else 0.0, dt * (FIGHT_MUSIC.in if fighting else FIGHT_MUSIC.out))
 	music_fight.volume_db = linear_to_db(maxf(fight_mix, 0.0001)) + MUSIC_FIGHT_DB
@@ -549,7 +577,7 @@ func update_meter_audio(dt: float) -> void:
 	var r := clampf((m - METER_AUDIO.riser_from) / (1.0 - METER_AUDIO.riser_from), 0.0, 1.0)
 	sfx_riser.volume_db = linear_to_db(maxf(pow(r, 1.5), 0.0001)) + METER_AUDIO.riser_db
 	sfx_riser.pitch_scale = 1.0 + METER_AUDIO.riser_pitch * r * r
-	music_base.volume_db = MUSIC_BASE_DB + linear_to_db(1.0 - METER_AUDIO.duck * m)
+	music_base.volume_db = MUSIC_BASE_DB + linear_to_db(maxf((1.0 - METER_AUDIO.duck * m) * (1.0 - dark_mix), 0.0001))
 	sfx_siren.volume_db = -9.0 + linear_to_db(maxf(wake_alarm(), 0.0001))
 	if state == "caught" and not was_caught:
 		sfx_caught.play()
@@ -1415,6 +1443,7 @@ func toggle_music() -> void:
 	music_base.stream_paused = not music_on
 	music_tension.stream_paused = not music_on
 	music_fight.stream_paused = not music_on
+	music_dark.stream_paused = not music_on
 
 # A controller button, pressed. In menus the buttons stand in for keys; in play they're the controls.
 func pad_button(b: int) -> void:
@@ -1790,6 +1819,7 @@ func start_cling() -> void:
 	P.vy = 0.0
 	if is_blackout():                       # grabbing on: a wave nobody hears
 		add_ripple(P.x + P.w / 2, P.y + 12, BLACKOUT.sneak, false)
+		dark_step("grab", Vector2(P.x + P.w / 2, P.y + 12), DARK_STEPS.grab)
 
 func update_cling(dt: float, dir: int) -> bool:
 	if held("down"):                    # let go - top stays at the duct, then fall
@@ -1808,6 +1838,7 @@ func update_cling(dt: float, dir: int) -> bool:
 	P.walk_phase += absf(P.vx) * dt * 0.12
 	if is_blackout() and absf(P.vx) > 8 and floori(P.walk_phase / TAU) != floori(ph / TAU):
 		add_ripple(P.x + P.w / 2, P.y + 12, BLACKOUT.sneak, false)   # hand over hand: a wave nobody hears
+		dark_step("shimmy_a" if posmod(floori(P.walk_phase / TAU), 2) == 0 else "shimmy_b", Vector2(P.x + P.w / 2, P.y + 12), DARK_STEPS.shimmy)
 	P.cover = -1
 	P.hidden = false
 	P.running = false
@@ -1913,6 +1944,7 @@ func update_player(dt: float) -> void:
 	# a hard landing is loud unless you're sneaking (Shift)
 	if P.on_ground and not was_on_ground and impact_v > TUNE.land_noise_v and not held("walk"):
 		make_noise(P.x + P.w / 2, P.y + P.h, NOISE.land)
+		dark_step("land", Vector2(P.x + P.w / 2, P.y + P.h), DARK_STEPS.land)
 
 	# hiding: ducked behind furniture with your middle inside its footprint
 	var mid := P.x + P.w / 2
@@ -1965,8 +1997,13 @@ func update_player(dt: float) -> void:
 	# running footsteps are loud; sneaking and crawling are silent
 	if P.running and P.on_ground and absf(P.vx) > 150 and floori(P.walk_phase / TAU) != floori(prev_phase / TAU):
 		make_noise(mid, P.y + P.h, NOISE.run)
+		dark_step("run", Vector2(mid, P.y + P.h), DARK_STEPS.run)
 	elif is_blackout() and P.on_ground and moving and floori(P.walk_phase / PI) != floori(prev_phase / PI):
 		add_ripple(mid, P.y + P.h - 6, BLACKOUT.sneak, false)      # sneaking feet: nobody hears it, you see a little
+		if P.running:                       # the other foot of a run
+			dark_step("run", Vector2(mid, P.y + P.h), DARK_STEPS.run)
+		else:
+			dark_step("soft", Vector2(mid, P.y + P.h), DARK_STEPS.soft)
 	# running: the anime lean, pitched from the hip (see dashing()); sneaking: a touch forward
 	var lean_to := 0.0 if (P.crawling or not moving) else P.facing * (0.62 if dashing() else 0.06)
 	P.lean = move_toward(P.lean, lean_to, dt * 2.5)
@@ -2512,6 +2549,19 @@ func ripple_covers(n: NoiseEvent, q: Vector2) -> bool:
 		return false
 	return not n.echo or Geometry2D.segment_intersects_segment(Vector2(n.x, n.y), q, n.wall_a, n.wall_b) != null
 
+# A footstep once it's dark: placed where it happened, so a guard can be heard off to one side before he's seen.
+func dark_step(kind: String, at: Vector2, db: float, pitch := 1.0) -> void:
+	if blackout <= 0.0 or step_voices.is_empty():
+		return
+	var v: AudioStreamPlayer2D = step_voices[step_voice]
+	step_voice = (step_voice + 1) % step_voices.size()
+	v.stream = step_sounds[kind]
+	v.global_position = at
+	v.volume_db = db
+	v.pitch_scale = pitch * randf_range(DARK_STEPS.pitch[0], DARK_STEPS.pitch[1])
+	v.play()
+	steps_played[kind] = steps_played.get(kind, 0) + 1
+
 # The lights go a moment after the floor starts: a clunk, a flicker, then black.
 func update_blackout() -> void:
 	if not is_blackout():
@@ -2755,6 +2805,11 @@ func update_guard(g: Guard, dt: float) -> void:
 		g.phase += v * dt * 0.08
 		if is_blackout() and floori(g.phase / PI) != floori(ph / PI):
 			add_ripple(g.x, g.y - 6, BLACKOUT.guard_step, false)      # each of his footfalls: a wave
+			var feet := Vector2(g.x, g.y - 30)
+			if blackout > 0.0 and blocked(Vector2(P.x + P.w / 2, P.y + P.h / 2), feet):
+				dark_step("boot_wall", feet, DARK_STEPS.wall)         # in the next room: heard, not seen
+			else:
+				dark_step("boot_a" if posmod(floori(g.phase / PI), 2) == 0 else "boot_b", feet, DARK_STEPS.boot)
 		g.moving = true
 		g.cur_v = v
 	else:
@@ -2803,6 +2858,7 @@ func takedown(g: Guard) -> void:
 	g.moving = false
 	P.vy = -320.0                                         # spring off him
 	make_noise(g.x, g.y - 10, NOISE.thud)                 # the thud can bring the other guard
+	sfx_takedown.play()
 
 # =====================================================================
 #  FIGHTING - the watchers (Floor 6 on). Two tracks play fight.gd's moves: his (nm, nt) and the watcher's
@@ -4430,10 +4486,24 @@ func _selftest_blackout() -> void:
 	print("  before the cut: dark %.1f, lamps on %d" % [blackout, lit])
 	_run(40)
 	print("  after it: dark %.1f, lamps on %d, notice '%s'" % [blackout, lights.filter(func(L): return L.kind == "lamp" and L.level > 0.0).size(), notice])
+	for i in 60:
+		update_music(1.0 / 60.0)
+	print("  1s later, in the dark: mix %.2f, base %.0f dB, room tone %.0f dB" % [dark_mix, music_base.volume_db, music_dark.volume_db])
+	state = "clear"
+	for i in 180:
+		update_music(1.0 / 60.0)
+	print("  3s after the floor ends: mix %.2f, base %.0f dB, room tone %.0f dB" % [dark_mix, music_base.volume_db, music_dark.volume_db])
+	state = "play"
+	dark_mix = 1.0
+	steps_played.clear()
+	_run(300)
+	print("  5s standing still in the dark, footsteps heard: %s" % steps_played)
+	steps_played.clear()
 	# sneaking: tiny ripples nobody hears; running: big ones, heard
 	test_keys = {"right": true, "walk": true}
 	ripples.clear()
 	_run(60)
+	print("  1s sneaking, footsteps: %s" % steps_played)
 	var small := ripples.filter(func(n): return not n.loud and not n.echo and n.r == BLACKOUT.sneak).size()
 	var loud := ripples.filter(func(n): return n.loud and not n.echo).size()
 	print("  1s sneaking: %d silent ripples (%.0f px), %d loud" % [small, BLACKOUT.sneak, loud])
@@ -4449,12 +4519,20 @@ func _selftest_blackout() -> void:
 	var duct: Array = level.ducts[0]
 	P.x = (duct[0] + 2) * T
 	P.y = (duct[1] + 1) * T
+	steps_played.clear()
 	start_cling()
 	ripples.clear()
 	test_keys = {"right": true}
 	_run(60)
 	test_keys = {}
+	print("  ...his sounds on the duct (guards' boots aside): %s" % [steps_played.keys().filter(func(k): return not k.begins_with("boot"))])
 	print("  1s shimmying along the duct: clinging %s, %d silent ripples, %d loud" % [P.clinging, ripples.filter(func(n): return not n.loud and not n.echo).size(), ripples.filter(func(n): return n.loud and not n.echo).size()])
+	var slept: Guard = guards[-1]
+	var was: String = slept.state
+	takedown(slept)
+	print("  a takedown: thud playing %s" % sfx_takedown.playing)
+	slept.state = was
+	P.vy = 0.0
 	# what a ripple shows: the front bright, the inside dimmer, nothing past it - and nothing behind a wall
 	ripples.clear()
 	var wall_x: float = level.solids[0][0] * T

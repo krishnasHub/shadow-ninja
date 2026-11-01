@@ -8,6 +8,11 @@
                                  and a thin high shimmer. The game fades it in as danger rises.
   godot/audio/music_fight.wav    same key, chords and length: low drums driving on 16ths, a gritty bass,
                                  a backbeat, a heavy stab every two bars. Fades in during a fight (Floor 6 on).
+  godot/audio/music_dark.wav     near silence: air, a far-off hum, the building settling. Replaces the base
+                                 music when the lights go (Floor 7).
+  godot/audio/step_*.wav         movement in the dark, in a big empty room (Floor 7): guards' boots, boots through
+                                 a wall; his soft step, run and landing; his hands on a duct (grab, shimmy)
+  godot/audio/takedown.wav       landing on a guard: a deep thud, the guard hitting the floor, his torch rattling
 
   godot/audio/heartbeat.wav      a muffled lub-dub; the game plays it faster and louder as the meter fills
   godot/audio/riser.wav          an uneasy high cluster (loops); fades in and rises in pitch near full
@@ -370,6 +375,91 @@ def shout():                                             # a watcher's punch lan
     env = np.clip(tt / 0.03, 0, 1) * np.exp(-np.clip(tt - 0.18, 0, None) / 0.06)
     return reverb(lowpass(x * env, 1600), 0.8, 0.25)
 
+# ---------------------------------------------------------------- the blackout (Floor 7): near silence, and footsteps
+def in_the_room(x, seconds, mix):                        # a dry sound with room left for its tail, in a big empty room
+    return reverb(np.concatenate([x, np.zeros(int(seconds * SR))]), seconds, mix)
+
+def boot(f0=105.0, f1=58.0, click=0.5, gap=0.055):       # a hard-soled boot: the heel comes down, then the sole slaps
+    n = int(0.22 * SR)
+    tt = np.arange(n) / SR
+    f = f1 + (f0 - f1) * np.exp(-tt / 0.02)
+    heel = np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-tt / 0.045)
+    tap = lowpass(rng.standard_normal(n), 2600) * np.exp(-tt / 0.006) * click
+    sole = lowpass(rng.standard_normal(n), 1300) * np.exp(-tt / 0.018) * 0.3
+    x = heel + tap
+    x[int(gap * SR):] += sole[:n - int(gap * SR)]
+    return in_the_room(x, 1.6, 0.42)
+
+def soft_step():                                         # his own foot: a muffled pad and a whisper of cloth
+    n = int(0.16 * SR)
+    tt = np.arange(n) / SR
+    pad_ = np.sin(2 * np.pi * (70 + 40 * np.exp(-tt / 0.02)) * tt) * np.exp(-tt / 0.035)
+    cloth = lowpass(rng.standard_normal(n), 900) * np.exp(-tt / 0.03) * 0.3
+    return in_the_room(lowpass(pad_ + cloth, 700), 1.1, 0.35)
+
+def ninja_run():                                         # his foot at a run: a split-toe slap and a flick of cloth, no heel, no weight
+    n = int(0.14 * SR)
+    tt = np.arange(n) / SR
+    slap = lowpass(rng.standard_normal(n), 1700) * np.exp(-tt / 0.012)
+    body = np.sin(2 * np.pi * np.cumsum(90 + 60 * np.exp(-tt / 0.012)) / SR) * np.exp(-tt / 0.02) * 0.5
+    x = slap + body
+    cloth = rng.standard_normal(n) * np.sin(np.pi * tt / tt[-1]) ** 2 * 0.09            # bright and airy: nothing like a boot
+    return in_the_room(x + cloth - lowpass(cloth, 1500), 0.8, 0.22)
+
+def ninja_land():                                        # he comes down: two feet just apart, knees taking it, cloth settling
+    x = np.zeros(int(0.35 * SR))
+    place(x, thud(115, 46, 0.12, 0.3), 0.0)
+    place(x, thud(95, 42, 0.14, 0.35) * 0.8, 0.035)
+    return in_the_room(x, 0.9, 0.25)
+
+def metal(tt, partials):                                 # struck sheet metal: inharmonic partials, each ringing its own time
+    return sum(a * np.sin(2 * np.pi * f * tt) * np.exp(-tt / d) for f, a, d in partials)
+
+def duct_grab():                                         # both hands catch the duct: a slap, and the hollow metal booms
+    n = int(0.6 * SR)
+    tt = np.arange(n) / SR
+    boom = metal(tt, [(142, 1.0, 0.13), (231, 0.7, 0.09), (387, 0.45, 0.06), (611, 0.25, 0.035)])
+    hands = lowpass(rng.standard_normal(n), 1800) * np.exp(-tt / 0.01) * 0.8
+    return in_the_room(lowpass(boom, 1500) + hands, 0.9, 0.3)
+
+def duct_shimmy(f0=520.0):                               # a hand moves along: the thin metal flexes (a quick upward tick) and fabric rubs
+    n = int(0.2 * SR)
+    tt = np.arange(n) / SR
+    flex = np.sin(2 * np.pi * np.cumsum(f0 * (1 + 0.35 * (1 - np.exp(-tt / 0.015)))) / SR) * np.exp(-tt / 0.022)
+    rub = rng.standard_normal(n) * np.sin(np.pi * tt / tt[-1]) ** 2 * 0.1
+    return in_the_room(lowpass(flex, 2400) + lowpass(rub, 3200), 0.5, 0.2)
+
+def takedown_thud():                                     # he lands on a guard: a deep body blow, the guard hits the floor, his torch rattles
+    x = np.zeros(int(1.0 * SR))
+    place(x, thud(135, 38, 0.3, 0.9), 0.0)
+    place(x, thud(92, 34, 0.24, 0.45) * 0.7, 0.26)
+    n = int(0.08 * SR)
+    tt = np.arange(n) / SR
+    tick = metal(tt, [(1450, 1.0, 0.012), (2230, 0.5, 0.008)])
+    for at, level in [(0.36, 0.1), (0.45, 0.07), (0.51, 0.04)]:
+        place(x, tick * level, at)
+    return in_the_room(x, 1.0, 0.25)
+
+def dark_room():                                   # the loop: air and a far-off hum, with something settling now and then
+    n = int(LOOP * SR)
+    spec = np.fft.rfft(rng.standard_normal(n))           # filtered in one piece, so the air loops with no seam
+    freqs = np.fft.rfftfreq(n, 1 / SR)
+    air = np.fft.irfft(spec / (1 + (freqs / 140) ** 2), n)
+    air /= np.max(np.abs(air))
+    tt = np.arange(n) / SR
+    cycles = lambda f: round(f * LOOP) / LOOP            # whole cycles per loop, so the hum does too
+    breath = 0.7 + 0.3 * np.sin(2 * np.pi * 3 * tt / LOOP)
+    hum = np.sin(2 * np.pi * cycles(hz('D2')) * tt) + 0.6 * np.sin(2 * np.pi * cycles(hz('D2') * 1.006) * tt)
+    x = 0.35 * air * breath + 0.05 * hum
+    for at, f, dur, level in [(9.0, 62, 3.2, 0.5), (27.5, 47, 4.0, 0.7), (44.0, 83, 2.4, 0.4)]:   # the building settling
+        m = int(dur * SR)
+        st = np.arange(m) / SR
+        groan = np.sin(2 * np.pi * np.cumsum(f * (1 + 0.05 * np.sin(2 * np.pi * 0.7 * st))) / SR)
+        groan += 0.5 * np.sin(2 * np.pi * np.cumsum(f * 2.71 * np.ones(m)) / SR)   # inharmonic: metal, not a note
+        env = np.sin(np.pi * st / dur) ** 2
+        place(x, in_the_room(lowpass(groan * env, 500), 2.5, 0.6) * level, at)
+    return x
+
 if __name__ == '__main__':
     root = os.path.join(os.path.dirname(__file__), '..', 'godot', 'audio')
     base = reverb(0.55 * pad() + 0.22 * drone() + 0.30 * plucks(), 2.8, 0.4) + 0.32 * pulse()
@@ -393,3 +483,15 @@ if __name__ == '__main__':
     write(os.path.join(root, 'shout.wav'), shout(), 0.6)
     fight = reverb(0.8 * drums() + 0.35 * grit_bass() + 0.3 * stabs() + 0.12 * swells(), 1.2, 0.2)
     write(os.path.join(root, 'music_fight.wav'), fold(fight), 0.6)   # last: rng order keeps the others identical
+    write(os.path.join(root, 'music_dark.wav'), dark_room(), 0.5)
+    boot_a = boot()
+    write(os.path.join(root, 'step_boot_a.wav'), boot_a, 0.8)
+    write(os.path.join(root, 'step_boot_b.wav'), boot(92.0, 52.0, 0.35, 0.07), 0.7)   # the other foot lands a little heavier and duller
+    write(os.path.join(root, 'step_boot_wall.wav'), lowpass(boot_a, 320), 0.6)        # the same boot, through a wall
+    write(os.path.join(root, 'step_soft.wav'), soft_step(), 0.6)
+    write(os.path.join(root, 'step_run.wav'), ninja_run(), 0.65)
+    write(os.path.join(root, 'step_land.wav'), ninja_land(), 0.75)
+    write(os.path.join(root, 'step_grab.wav'), duct_grab(), 0.7)
+    write(os.path.join(root, 'step_shimmy_a.wav'), duct_shimmy(), 0.55)
+    write(os.path.join(root, 'step_shimmy_b.wav'), duct_shimmy(450.0), 0.55)          # the other hand
+    write(os.path.join(root, 'takedown.wav'), takedown_thud(), 0.9)
