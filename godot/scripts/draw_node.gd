@@ -304,6 +304,27 @@ func _actors() -> void:
 		draw_rect(Rect2(piv.x - 6, piv.y - 12, 12, 24), grey(0x1a))
 		_limb(piv, m.lever_knob(sw), 3.0, grey(0x10))
 		draw_circle(m.lever_knob(sw), 3.5, grey(0x10))
+	for c in m.level.get("clues", []):              # a clue: a pale scrap at about hand height, lit like anything else
+		if not m.found.has(c[0]):
+			draw_set_transform(Vector2(c[1] * T, c[2] * T - 34), 0.14)
+			draw_rect(Rect2(-4, -5, 8, 10), grey(0xd0))
+			draw_rect(Rect2(-2, -2, 4, 1), grey(0x40))
+			draw_rect(Rect2(-2, 1, 3, 1), grey(0x40))
+			draw_set_transform_matrix(Transform2D.IDENTITY)
+	for lk in m.locks:
+		var c := Vector2(lk.x * T, lk.row * T)
+		if lk.get("safe", false):                   # a safe: squat steel, a dial; the door hangs open once it's solved
+			draw_rect(Rect2(c.x - 16, c.y - 36, 32, 36), grey(0x1c))
+			draw_rect(Rect2(c.x - 13, c.y - 33, 26, 30), grey(0x12) if lk.open else grey(0x24))
+			if lk.open:
+				draw_rect(Rect2(c.x + 13, c.y - 35, 10, 34), grey(0x24))
+			else:
+				draw_circle(c + Vector2(0, -18), 5, grey(0x12))
+		else:                                       # a keypad on the wall
+			draw_rect(Rect2(c.x - 7, c.y - 52, 14, 20), grey(0x1c))
+			for k in 3:
+				for n in 2:
+					draw_rect(Rect2(c.x - 4 + n * 5, c.y - 49 + k * 5, 3, 3), grey(0x30))
 	for st in m.stars:                              # a star stuck in a wall (or lying where it fell)
 		if st.state == "stuck":
 			_star(Vector2(st.x, st.y), st.ang, 4.5, grey(0x30))
@@ -659,11 +680,28 @@ func _overlay() -> void:
 			a = a * a * (3.0 - 2.0 * a)
 			var breathe := 0.88 + 0.12 * sin(m.time * 1.3 + i * 1.7)
 			_text(m.font_italic, Vector2(h[0] * T, h[1] + (1.0 - a) * 5.0), h[3] if m.pad and h.size() > 3 else h[2], 14, Color(1, 1, 1, 0.34 * a * breathe))
+	for c in m.level.get("clues", []):              # a clue: from close by, now and then, the faintest glint
+		if not m.found.has(c[0]) and m.state != "title" and m.P.y + m.P.h > c[2] * T - 60 and m.P.y + m.P.h < c[2] * T + 40 and absf(m.P.x - c[1] * T) < 7 * T:
+			var gl: float = maxf(0.0, sin(m.time * 1.4 + c[1]))
+			draw_circle(Vector2(c[1] * T, c[2] * T - 34), 4.0, Color(1, 1, 1, 0.16 * gl * gl * gl))
+			draw_circle(Vector2(c[1] * T, c[2] * T - 34), 1.2, Color(1, 1, 1, 0.5 * gl * gl * gl))
+	for lk in m.locks:                              # a keypad's or a safe's small light, until it's solved
+		if not lk.open and fmod(m.time + lk.x, 2.4) < 0.4:
+			draw_circle(Vector2(lk.x * T, lk.row * T - (40 if lk.get("safe", false) else 56)), 1.5, Color(1, 1, 1, 0.6))
+	if m.sl.state != "idle" and m.state != "title":  # rotors: the glass overhead catches something, pale and restless
+		var pulse: float = 0.5 + 0.5 * sin(m.time * 9.0)
+		for h in m.level.holes:
+			var hx: float = h[0] * T
+			if absf(hx - m.sl.x) < 500.0:
+				draw_rect(Rect2(hx, h[1] * T, h[2] * T, h[3] * T), Color(1, 1, 1, 0.05 + 0.1 * pulse))
 	var P = m.P
 	if m.state != "title":
 		if P.cover >= 0 and not P.hidden:           # nudge: you could hide here
 			var p: Dictionary = m.props[P.cover]
 			_text(m.font_regular, Vector2(p.x * T + m.PROP_W[p.type] / 2, p.y - 66), "↓", 13, Color(1, 1, 1, 0.45), true)
+		var it: Dictionary = m.near_thing()         # close enough to read it or try the keypad
+		if not it.is_empty():
+			_text(m.font_regular, Vector2(it.x * T, it.row * T - 66), "X" if m.pad else "E", 13, Color(1, 1, 1, 0.6), true)
 		_eyes()
 		_fight_fx()
 	_noise_and_stars()

@@ -10,6 +10,7 @@ const Hud := preload("res://scripts/hud.gd")
 const PostShader := preload("res://shaders/post.gdshader")
 const Levels := preload("res://scripts/levels.gd")
 const Fight := preload("res://scripts/fight.gd")
+const Clues := preload("res://scripts/clues.gd")
 
 const VIEW_W := 960.0
 const VIEW_H := 540.0
@@ -60,7 +61,7 @@ const CAM_LOCK := {"track": 0.8, "slack": 0.3, "ease_back": 1.5}
 # the alarm panel in time (once you remember the stars), or it's a lockdown: every guard on alert, hunting where you were seen.
 const ALARM := {"countdown": 30.0, "lockdown": 30.0, "regroup": 5.0}
 const NOISE := {"run": 150.0, "land": 120.0, "panel": 280.0, "thud": 140.0, "lever": 230.0, "rattle": 90.0,
-	"glass": 300.0, "tink": 80.0, "scrape": 110.0, "shout": 320.0}
+	"glass": 300.0, "tink": 80.0, "scrape": 110.0, "shout": 320.0, "buzz": 240.0}
 # Fighting (remembered after Floor 5) - only the watchers: no torch, but they see as far as a guard's
 # torch reaches, in the same cone, in the dark too (and in any light, lit_sight; up close, sight px in
 # front). Spotted, he runs at you (`run` x a guard's chase speed); duck then and it's no use - he drags you
@@ -355,6 +356,37 @@ const DARK_MUSIC := {"in": 2.0, "out": 0.4, "db": -10.0, "tension": 0.3}
 const DARK_STEPS := {"reach": 1200.0, "attenuation": 1.3, "voices": 12, "pitch": [0.93, 1.05],
 	"boot": -2.0, "wall": -3.0, "soft": -15.0, "run": -10.0, "land": -6.0, "grab": -8.0, "shimmy": -12.0}
 var sfx_takedown: AudioStreamPlayer
+var sfx_rotor: AudioStreamPlayer
+var sfx_page: AudioStreamPlayer
+var sfx_beep: AudioStreamPlayer
+var sfx_buzz: AudioStreamPlayer
+# Clues (clues.gd): what he's found this game, and the numbers made up for it. read_floor: the furthest floor he's
+# reached - how much of them he can read. journal: the J / Y screen (map + clues); the game holds still behind it.
+const REACH := 40.0             # px: how close to a clue or a keypad E works
+var found: Array = []           # clue ids, in the order he found them
+var codes := {}                 # "door" / "safe" -> a 4-digit string, made up each new game (kept through retries)
+var read_floor := 1
+var journal_tab := 0            # 0 the map, 1 the clues
+var journal_sel := 0
+var locks: Array = []           # this floor's keypads and safes: {x, row, code, door?, clue?, safe?, open}
+var keypad_lock := -1
+var keypad_digits: Array = []   # -1 = not entered yet
+var keypad_at := 0
+# Checkpoints and the save. floor_state: this floor's progress: "locks" (solved, always kept), and once he's reached a
+# checkpoint "cp" with what to put back. A retry goes back to it; picking the floor again clears it.
+var save_path := "user://save.cfg"
+var floor_state := {}
+var save_on := false            # off until the game's up, and always in self-tests and screenshots
+var saved_floor := 0
+# The searchlight (a floor's `searchlight`): "idle" -> "warn" (rotors) -> "sweep" -> "idle". See update_searchlight.
+var sl := {"state": "idle", "t": 0.0, "x": 0.0, "dir": 1, "end": 0.0, "stop": 0.0, "wait": 0.0}
+var sl_light: Lt = null
+var rotor_mix := 0.0
+var cam_floor := 0.0            # the floor he last stood on (see cam_y_target)
+# Ducked when a menu opens: he stays ducked after it closes, with nothing held, until you move, jump or press down
+# again. stay_wait: first let go of whatever was held coming out (B closes a menu, and B is also crouch).
+var stay_down := false
+var stay_wait := false
 var music_dark: AudioStreamPlayer
 var dark_mix := 0.0
 var step_voices: Array = []     # AudioStreamPlayer2Ds, used in turn so tails overlap
@@ -425,7 +457,11 @@ func _ready() -> void:
 	load_level(0)
 	start_run()
 	state = "title"
-	recall_on = not (_capture.has("capture") or _capture.has("selftest")) or _capture.get("selftest", "") == "recall"
+	make_codes()
+	if not (_capture.has("capture") or _capture.has("selftest")):
+		save_on = true
+		load_save()
+	recall_on =not (_capture.has("capture") or _capture.has("selftest")) or _capture.get("selftest", "") == "recall"
 	if _capture.has("capture"):
 		_capture_setup(_capture.get("setup", "title"))
 	if _capture.has("selftest"):
@@ -447,6 +483,10 @@ func _ready() -> void:
 			_selftest_alarm()
 		elif _capture.selftest == "intro":
 			_selftest_intro()
+		elif _capture.selftest == "floor1":
+			_selftest_floor1()
+		elif _capture.selftest == "save":
+			_selftest_save()
 		elif _capture.selftest == "music":
 			_selftest_music()
 		elif _capture.selftest == "recall":
@@ -485,6 +525,12 @@ func _setup_music() -> void:
 	music_fight.play()
 	music_dark.play()
 	sfx_takedown = _sfx_player("takedown")
+	sfx_rotor = _sfx_player("rotor", true)
+	sfx_rotor.volume_db = -80.0
+	sfx_rotor.play()
+	sfx_page = _sfx_player("page")
+	sfx_beep = _sfx_player("beep")
+	sfx_buzz = _sfx_player("buzz")
 	for file in ["boot_a", "boot_b", "boot_wall", "soft", "run", "land", "grab", "shimmy_a", "shimmy_b"]:
 		step_sounds[file] = AudioStreamWAV.load_from_file("res://audio/step_%s.wav" % file)
 	for i in DARK_STEPS.voices:
@@ -547,8 +593,10 @@ func update_music(dt: float) -> void:
 			sfx_siren.play()
 		else:
 			sfx_siren.stop()
-	if state == "pause":
+	if state == "pause" or overlay_on():
 		return                               # hold the mood while paused
+	rotor_mix = move_toward(rotor_mix, 1.0 if state == "play" and sl.state != "idle" else 0.0, dt * 0.6)
+	sfx_rotor.volume_db = linear_to_db(maxf(rotor_mix, 0.0001)) - 9.0
 	var target := music_danger() if state == "play" else 0.0
 	tension = move_toward(tension, target, dt * (0.6 if target > tension else 0.2))   # rises quickly, settles slowly
 	var dark := bo_cut and (state == "play" or state == "caught")
@@ -707,6 +755,11 @@ func load_level(idx: int) -> void:
 	panels = []
 	for pn in level.get("panels", []):
 		panels.append({"x": pn[0], "row": pn[1], "broken": false, "broken_t": -99.0})
+	locks = []
+	for lk in level.get("locks", []):
+		var copy: Dictionary = lk.duplicate()
+		copy["open"] = false
+		locks.append(copy)
 	props = []
 	for p in level.props:
 		props.append({"type": p[0], "x": float(p[1]), "y": float(p[2] * T)})
@@ -784,8 +837,11 @@ func update_intro(dt: float) -> void:
 				intro = ""
 
 # How long a line is up, by its length (the ~ marks don't count).
-func line_dur(line: Array) -> float:
-	return 1.4 + 0.05 * String(line[1]).replace("~", "").length()
+func line_dur(line: Array) -> float:                 # by the length of the line as spoken, read or not
+	var n := -1
+	for w in String(line[1]).replace("~", "").split(" "):
+		n += read_word(w)[0].length() + 1
+	return 1.4 + 0.05 * n
 
 # Who's talking shows in the body: the speaker nods and his free hand moves (a point, a shrug, or
 # just talking hands); the other one stands and listens.
@@ -1000,6 +1056,9 @@ func try_door(x: float) -> void:
 				make_noise(x, P.y + P.h / 2, NOISE.rattle)
 			if notice_t > 2.0:
 				notice = "locked."
+				for lk in locks:
+					if lk.has("door") and i >= doors[lk.door].x and i < doors[lk.door].x + doors[lk.door].w:
+						notice = "locked. it wants four numbers."
 				for sw in switches:
 					var d: Dictionary = doors[sw.door]
 					if not sw.on and i >= d.x and i < d.x + d.w:
@@ -1264,6 +1323,13 @@ func build_lights() -> void:
 			L.base_dir = L.dir
 		lights.append(L)
 		level_nodes.append(L.node)
+	sl_light = null
+	if level.has("searchlight"):             # from outside, far above the glass: off until it comes
+		var d: Dictionary = level.searchlight
+		sl_light = make_light("search", Vector2(0, -280), PI / 2, 0.13, 900.0, d.intensity, STOPS_FLAT, d.danger)
+		sl_light.level = 0.0
+		lights.append(sl_light)
+		level_nodes.append(sl_light.node)
 
 func all_lights() -> Array:
 	var out := lights.duplicate()
@@ -1315,7 +1381,15 @@ func light_at(L: Lt, p: Vector2) -> float:
 func start_run(idx := -1) -> void:
 	if idx >= 0:
 		load_level(idx)
+		floor_state = {}                     # picked or reached fresh: no checkpoint yet
+	read_floor = maxi(read_floor, level_idx + 1)
 	reset_doors()
+	for lk in locks:
+		lk.open = false
+	for i in floor_state.get("locks", []):   # a number once found stays found
+		locks[i].open = true
+		if locks[i].has("door"):
+			open_door(locks[i].door)
 	for L in lights:
 		L.locked = false
 		if L.broken:                         # a retry: the lamps and cameras are back
@@ -1360,9 +1434,12 @@ func start_run(idx := -1) -> void:
 	calm = 0.0
 	jump_queued = false
 	aiming = false
+	stay_down = false
+	stay_wait = false
 	reset_scarf()
 	cam.x = clampf(P.x - VIEW_W * 0.4, 0, LW * T - VIEW_W)
-	cam.y = clampf(P.y + P.h / 2 - VIEW_H * 0.55, 0, LH * T - VIEW_H)
+	cam_floor = P.y + P.h
+	cam.y = cam_y_target()
 	state = "play"
 	state_t = 0.0
 	level_t = 0.0
@@ -1401,12 +1478,17 @@ func start_run(idx := -1) -> void:
 	var prev: Dictionary = Levels.LEVELS[level_idx - 1].get("remember", {}) if level_idx > 0 else {}
 	if recall_on and not prev.get("abilities", []).is_empty() and recall_seen != level_idx:   # only for something he can do
 		start_recall(prev)
+	reset_searchlight()
+	resume_checkpoint()
+	save_game()
 
 var test_keys = null    # self-test: a Dictionary of held keys replaces the keyboard
 
 func held(k: String) -> bool:
 	if recall != "":                        # in the recall he just stands there
 		return false
+	if k == "down" and stay_down:           # ducked when a menu opened: he stays ducked
+		return true
 	if test_keys != null:
 		return test_keys.has(k)
 	match k:
@@ -1447,6 +1529,13 @@ func toggle_music() -> void:
 
 # A controller button, pressed. In menus the buttons stand in for keys; in play they're the controls.
 func pad_button(b: int) -> void:
+	if overlay_on():                            # the journal and the keypad: the same as their keys
+		var key: int = {JOY_BUTTON_A: KEY_ENTER, JOY_BUTTON_B: KEY_ESCAPE, JOY_BUTTON_START: KEY_ESCAPE, JOY_BUTTON_Y: KEY_J,
+			JOY_BUTTON_DPAD_UP: KEY_UP, JOY_BUTTON_DPAD_DOWN: KEY_DOWN,
+			JOY_BUTTON_DPAD_LEFT: KEY_LEFT, JOY_BUTTON_DPAD_RIGHT: KEY_RIGHT}.get(b, 0)
+		if key != 0:
+			overlay_key(key)
+		return
 	if b == JOY_BUTTON_Y and in_menu():         # music: Y in a menu (in play, Y blocks in a fight)
 		toggle_music()
 		return
@@ -1471,11 +1560,15 @@ func pad_button(b: int) -> void:
 		return
 	match b:
 		JOY_BUTTON_X:
-			if fight_ready():
+			if interact():
+				pass
+			elif fight_ready():
 				fight_strike()
 		JOY_BUTTON_Y:
 			if fight != null:
 				fight_block()
+			else:
+				open_journal()
 		JOY_BUTTON_A:
 			if state == "play":
 				jump_queued = true
@@ -1489,9 +1582,12 @@ func pad_button(b: int) -> void:
 		JOY_BUTTON_B:
 			aiming = false                  # cancels a throw
 		JOY_BUTTON_BACK:
-			start_run()
+			retry()
 		JOY_BUTTON_START:
-			open_menu("pause" if state == "play" else "title")
+			if state == "play":
+				open_journal()
+			else:
+				open_menu("title")
 
 # Hold RT (or RB) to aim with the right stick; let go to throw.
 func pad_throw(down: bool) -> void:
@@ -1507,7 +1603,11 @@ func pad_throw(down: bool) -> void:
 func _unhandled_input(e: InputEvent) -> void:
 	if e is InputEventJoypadButton:
 		pad = true
-		if e.button_index == JOY_BUTTON_RIGHT_SHOULDER:
+		if e.button_index == JOY_BUTTON_RIGHT_SHOULDER and e.pressed and tabs_on():
+			cycle_tab(1)                     # R1, with the menu open: the next of its three pages
+		elif e.button_index == JOY_BUTTON_LEFT_SHOULDER and e.pressed and tabs_on():
+			cycle_tab(-1)                    # L1: the other way
+		elif e.button_index == JOY_BUTTON_RIGHT_SHOULDER:
 			pad_throw(e.pressed)
 		elif e.pressed:
 			pad_button(e.button_index)
@@ -1527,8 +1627,12 @@ func _unhandled_input(e: InputEvent) -> void:
 			d.x = signi(int(signf(sx)))
 		if d != pad_stick:
 			pad_stick = d
-			if in_menu() and d != Vector2i.ZERO:
-				menu_key(KEY_UP if d.y < 0 else (KEY_DOWN if d.y > 0 else (KEY_LEFT if d.x < 0 else KEY_RIGHT)))
+			if (in_menu() or overlay_on()) and d != Vector2i.ZERO:
+				var key: int = KEY_UP if d.y < 0 else (KEY_DOWN if d.y > 0 else (KEY_LEFT if d.x < 0 else KEY_RIGHT))
+				if overlay_on():
+					overlay_key(key)
+				else:
+					menu_key(key)
 		return
 	if e is InputEventKey and e.pressed and not e.echo:
 		pad = false
@@ -1542,6 +1646,9 @@ func _unhandled_input(e: InputEvent) -> void:
 			return
 		if in_menu():
 			menu_key(code)
+			return
+		if overlay_on():
+			overlay_key(code)
 			return
 		if intro == "talk" and state == "play":
 			if code in [KEY_SPACE, KEY_ENTER, KEY_KP_ENTER, KEY_W, KEY_UP]:
@@ -1563,19 +1670,26 @@ func _unhandled_input(e: InputEvent) -> void:
 		match code:
 			KEY_SPACE, KEY_W, KEY_UP:
 				jump_queued = true
-			KEY_E, KEY_F:                   # a fight: strike (E is the grip otherwise)
-				if fight_ready():
+			KEY_E, KEY_F:                   # a clue or a keypad; or a fight: strike (E is the grip otherwise)
+				if interact():
+					pass
+				elif fight_ready():
 					fight_strike()
 			KEY_Q:
 				if fight != null:
 					fight_block()
+			KEY_J, KEY_TAB:                 # the map and the clues
+				open_journal()
 			KEY_CTRL:                       # throw mode on/off
 				if state == "play":
 					aiming = not aiming and can_throw()
 			KEY_R:
-				start_run()
+				retry()
 			KEY_ESCAPE, KEY_P:
-				open_menu("pause" if state == "play" else "title")   # caught / escaped go back to the title
+				if state == "play":          # the map first; TAB / R1 goes on to the clues, then the main menu
+					open_journal()
+				else:
+					open_menu("title")       # caught / escaped go back to the title
 			KEY_ENTER, KEY_KP_ENTER:
 				if state == "escaped" and level_idx + 1 < Levels.LEVELS.size():
 					start_run(level_idx + 1)        # on to the next floor
@@ -1640,6 +1754,7 @@ var menu_page := ""             # "" = the list, or "levels" / "about" / "contro
 var level_sel := 0              # Levels page: which floor is highlighted
 const LEVELS_Y := 250.0         # Levels page: first floor's baseline (hud.gd draws at the same spots)
 var quit_sel := 0               # "Are you sure?": 0 = No (the default), 1 = Yes
+var quit_new := false           # ...it's New Game asking, not Quit
 const QUIT_Y := 310.0           # No / Yes baseline; hud.gd draws them at QUIT_X
 const QUIT_X := [400.0, 560.0]
 
@@ -1648,7 +1763,9 @@ func in_menu() -> bool:
 
 func menu_items() -> Array:
 	if state == "pause":
-		return ["Resume", "New Game", "Levels", "About", "Controls", "Quit"]
+		return ["Resume", "Restart Floor", "Levels", "About", "Controls", "Quit"]
+	if has_save():
+		return ["Continue", "New Game", "Levels", "About", "Controls", "Quit"]
 	return ["New Game", "Levels", "About", "Controls", "Quit"]
 
 func menu_item_at(p: Vector2) -> int:
@@ -1669,15 +1786,19 @@ func menu_activate(i: int) -> void:
 	match menu_items()[i]:
 		"Resume":
 			state = "play"
+		"Continue":
+			continue_game()
+		"Restart Floor":                    # from the very start of it (a retry goes back to the checkpoint)
+			floor_state = {}
+			start_run()
 		"New Game":
-			intro_seen = false
-			recall_seen = -1
-			if howto_seen:
-				start_run(0)
+			if has_save():                  # there's a game to lose: ask
+				menu_page = "quit"
+				quit_new = true
+				quit_sel = 0
 			else:
-				howto_seen = true           # the first time: how to play, then any key starts
-				menu_page = "howto"
-		"Levels":                           # pick any floor (a dev convenience for now)
+				new_game()
+		"Levels":                         # pick any floor (a dev convenience for now)
 			menu_page = "levels"
 			level_sel = level_idx
 		"About":
@@ -1702,6 +1823,12 @@ func quit_item_at(p: Vector2) -> int:
 	return -1
 
 func quit_choose(i: int) -> void:
+	if quit_new:                            # the same page asks before New Game wipes the save
+		quit_new = false
+		menu_page = ""
+		if i == 1:
+			new_game()
+		return
 	if i == 1:
 		get_tree().quit()
 	else:
@@ -1710,8 +1837,6 @@ func quit_choose(i: int) -> void:
 func menu_key(code: int) -> void:
 	if menu_page == "howto":                # any key or button: play
 		menu_page = ""
-		intro_seen = false
-		recall_seen = -1
 		start_run(0)
 		return
 	if menu_page == "quit":                 # Are you sure?  ← → choose, Enter picks, Y / N shortcuts
@@ -1738,6 +1863,9 @@ func menu_key(code: int) -> void:
 				start_run(level_sel)
 			KEY_ESCAPE, KEY_BACKSPACE:
 				menu_page = ""
+		return
+	if state == "pause" and menu_page == "" and code in [KEY_TAB, KEY_LEFT, KEY_RIGHT, KEY_A, KEY_D]:
+		cycle_tab(-1 if code == KEY_LEFT or code == KEY_A else 1)
 		return
 	if menu_page != "":                     # About / Controls: any of these goes back
 		if code in [KEY_ESCAPE, KEY_ENTER, KEY_KP_ENTER, KEY_SPACE, KEY_BACKSPACE]:
@@ -3112,6 +3240,7 @@ func _physics_process(dt: float) -> void:
 		return
 	if state != "play":
 		return
+	update_stay_down()
 	update_intro(dt)
 	update_recall(dt)
 	if recall != "":                         # the recall: he stands there (held() is all false), nothing else moves
@@ -3127,6 +3256,8 @@ func _physics_process(dt: float) -> void:
 		update_detection(dt)
 		update_cameras(dt)
 		update_alarm(dt)
+		update_searchlight(dt)
+		update_checkpoints()
 	update_scarf()
 	update_hints(dt)
 	if recall == "":
@@ -3135,13 +3266,372 @@ func _physics_process(dt: float) -> void:
 	notice_t += dt
 	var target := clampf(P.x + P.w / 2 - VIEW_W * 0.45 + P.facing * 70, 0, LW * T - VIEW_W)
 	cam.x = lerpf(cam.x, target, 1 - exp(-dt * 4))
-	var target_y := clampf(P.y + P.h / 2 - VIEW_H * 0.55, 0, LH * T - VIEW_H)   # tall floors scroll vertically
+	var target_y := cam_y_target()           # tall floors scroll vertically
 	cam.y = lerpf(cam.y, target_y, 1 - exp(-dt * 3))
 	if state == "play" and P.x + P.w > exit_x and absf(P.y + P.h - exit_row * T) < T:
 		state = "escaped"
 		state_t = 0.0
 		alarm = ""                           # out in time: the alarm stays on the floor you left
 		record_time()
+		if level_idx + 1 < Levels.LEVELS.size():
+			floor_state = {}
+			save_game(level_idx + 1)         # Continue picks up on the next floor
+		else:
+			save_game()
+
+# =====================================================================
+#  CLUES AND LOCKS - E by one reads it or opens the keypad. The world holds still behind both.
+# =====================================================================
+# Where the camera wants to be, up and down. A floor with `floor_cam` keeps whatever he's standing on at the same
+# height on screen (his whole room in view, ceiling and all), and doesn't follow a jump; the others follow him.
+func cam_y_target() -> float:
+	if level.get("floor_cam", false):
+		if P.on_ground or P.clinging or P.y + P.h > cam_floor:
+			cam_floor = P.y + P.h
+		return clampf(cam_floor - 15.0 * T, 0, LH * T - VIEW_H)
+	return clampf(P.y + P.h / 2 - VIEW_H * 0.55, 0, LH * T - VIEW_H)
+
+func hold_crouch() -> void:                  # a menu is opening
+	if P.crawling or P.hidden:
+		stay_down = true
+		stay_wait = true
+
+func update_stay_down() -> void:
+	if not stay_down:
+		return
+	stay_down = false                        # (so held("down") reads the real button)
+	var pressed := held("down") or held("left") or held("right") or held("jump")
+	if stay_wait:                            # still holding what closed the menu: that doesn't count
+		stay_down = true
+		stay_wait = pressed
+	else:
+		stay_down = not pressed              # now anything you press takes over
+
+func overlay_on() -> bool:
+	return state == "journal" or state == "keypad"
+
+func near_thing() -> Dictionary:
+	if state != "play" or recall != "" or intro == "talk" or fight != null or aiming:
+		return {}
+	var mid := P.x + P.w / 2
+	var feet := P.y + P.h
+	for c in level.get("clues", []):
+		if not found.has(c[0]) and absf(mid - c[1] * T) < REACH and absf(feet - c[2] * T) < 40.0:
+			return {"kind": "clue", "id": c[0], "x": float(c[1]), "row": c[2]}
+	for i in locks.size():
+		var lk: Dictionary = locks[i]
+		if not lk.open and absf(mid - lk.x * T) < REACH and absf(feet - lk.row * T) < 40.0:
+			return {"kind": "lock", "i": i, "x": float(lk.x), "row": lk.row}
+	return {}
+
+func interact() -> bool:
+	var it := near_thing()
+	if it.is_empty():
+		return false
+	if it.kind == "clue":
+		take_clue(it.id)
+	else:
+		keypad_lock = it.i
+		keypad_digits = [-1, -1, -1, -1]
+		keypad_at = 0
+		hold_crouch()
+		state = "keypad"
+		state_t = 0.0
+	return true
+
+func take_clue(id: String) -> void:
+	if not found.has(id):
+		found.append(id)
+	sfx_page.play()
+	save_game()
+	open_journal(1, found.find(id))
+
+func open_journal(tab := 0, sel := -1) -> void:
+	if state != "play" or recall != "" or intro == "talk":
+		return
+	journal_tab = tab
+	journal_sel = sel if sel >= 0 else clampi(journal_sel, 0, maxi(0, found.size() - 1))
+	aiming = false
+	hold_crouch()
+	state = "journal"
+	state_t = 0.0
+
+func overlay_key(code: int) -> void:
+	if state == "keypad":
+		keypad_key(code)
+		return
+	match code:
+		KEY_ESCAPE, KEY_J, KEY_ENTER, KEY_KP_ENTER:
+			state = "play"
+		KEY_RIGHT, KEY_D, KEY_TAB:
+			cycle_tab(1)
+		KEY_LEFT, KEY_A:
+			cycle_tab(-1)
+		KEY_UP, KEY_W:
+			if journal_tab == 1 and not found.is_empty():
+				journal_sel = (journal_sel - 1 + found.size()) % found.size()
+		KEY_DOWN, KEY_S:
+			if journal_tab == 1 and not found.is_empty():
+				journal_sel = (journal_sel + 1) % found.size()
+
+# The menu's three pages: 0 the map, 1 the clues (both state "journal"), 2 the main menu (state "pause").
+func tabs_on() -> bool:
+	return state == "journal" or (state == "pause" and menu_page == "")
+
+func cycle_tab(step: int) -> void:
+	var now: int = 2 if state == "pause" else journal_tab
+	var to: int = posmod(now + step, 3)
+	if to == 2:
+		open_menu("pause")
+	else:
+		journal_tab = to
+		journal_sel = clampi(journal_sel, 0, maxi(0, found.size() - 1))
+		state = "journal"
+		state_t = 0.0
+
+func keypad_key(code: int) -> void:
+	var digit := -1
+	if code >= KEY_0 and code <= KEY_9:
+		digit = code - KEY_0
+	elif code >= KEY_KP_0 and code <= KEY_KP_9:
+		digit = code - KEY_KP_0
+	if digit >= 0:
+		keypad_digits[keypad_at] = digit
+		keypad_at = mini(keypad_at + 1, 3)
+		sfx_beep.play()
+		return
+	match code:
+		KEY_ESCAPE:
+			state = "play"
+		KEY_J:                               # forgot it: back out, and J shows the clue
+			state = "play"
+			open_journal(1)
+		KEY_UP, KEY_W:
+			keypad_digits[keypad_at] = (keypad_digits[keypad_at] + 1) % 10
+			sfx_beep.play()
+		KEY_DOWN, KEY_S:
+			keypad_digits[keypad_at] = 9 if keypad_digits[keypad_at] <= 0 else keypad_digits[keypad_at] - 1
+			sfx_beep.play()
+		KEY_LEFT, KEY_A, KEY_BACKSPACE:
+			keypad_at = maxi(keypad_at - 1, 0)
+		KEY_RIGHT, KEY_D:
+			keypad_at = mini(keypad_at + 1, 3)
+		KEY_ENTER, KEY_KP_ENTER, KEY_SPACE:
+			if not keypad_digits.has(-1):
+				keypad_submit()
+
+func keypad_submit() -> void:
+	var lk: Dictionary = locks[keypad_lock]
+	var entered := "".join(keypad_digits.map(func(d): return str(d)))
+	state = "play"
+	if entered != codes.get(lk.code, ""):    # wrong: it says so, loudly
+		sfx_buzz.play()
+		make_noise(lk.x * T, lk.row * T - 30, NOISE.buzz)
+		notice = "no."
+		notice_t = 0.0
+		return
+	lk.open = true
+	var solved: Array = floor_state.get("locks", [])
+	solved.append(keypad_lock)
+	floor_state["locks"] = solved
+	sfx_lever.play()
+	if lk.has("door"):
+		open_door(lk.door)
+		notice = "it opens."
+		notice_t = 0.0
+		save_game()
+	elif lk.has("clue"):
+		take_clue(lk.clue)
+
+# What he can make out of a word: "immunity@9" is scrawl until Floor 9. Returns [word, can he read it].
+func read_word(token: String) -> Array:
+	var at := token.rfind("@")
+	var word := token if at < 0 else token.substr(0, at)
+	for k in codes:
+		word = word.replace("{%s}" % k, codes[k])
+	return [word, at < 0 or read_floor >= int(token.substr(at + 1))]
+
+func clue_data(id: String) -> Dictionary:
+	return Clues.CLUES.get(id, {})
+
+# =====================================================================
+#  CHECKPOINTS AND THE SAVE - user://save.cfg holds where he is, what he's found and this game's numbers.
+# =====================================================================
+func update_checkpoints() -> void:
+	var cps: Array = level.get("checkpoints", [])
+	for i in cps.size():
+		if i > floor_state.get("cp", -1) and P.x >= cps[i].x * T and absf(P.y + P.h - cps[i].row * T) < T and fight == null:
+			reach_checkpoint(i)
+
+func reach_checkpoint(i: int) -> void:
+	floor_state["cp"] = i
+	floor_state["run_t"] = run_t
+	floor_state["stars"] = star_count
+	var on := []
+	for k in switches.size():
+		if switches[k].on:
+			on.append(k)
+	floor_state["switches"] = on
+	var asleep := []
+	for k in guards.size():
+		if guards[k].state == "asleep":
+			asleep.append(k)
+	floor_state["asleep"] = asleep
+	var out := []
+	for k in lights.size():
+		if lights[k].broken:
+			out.append(k)
+	floor_state["broken"] = out
+	floor_state["desks"] = props.map(func(p): return p.x)
+	intro_seen = true                        # past the opening and the recall for good
+	recall_seen = level_idx
+	notice = "you catch your breath."
+	notice_t = 0.0
+	save_game()
+
+# After start_run has laid the floor out: put him and what he's done back at the checkpoint.
+func resume_checkpoint() -> void:
+	var i: int = floor_state.get("cp", -1)
+	if i < 0:
+		return
+	var cp: Dictionary = level.checkpoints[i]
+	P.x = cp.x * T
+	P.y = cp.row * T - P.h
+	P.facing = 1
+	run_t = floor_state.get("run_t", 0.0)
+	star_count = floor_state.get("stars", star_count)
+	for k in floor_state.get("switches", []):
+		switches[k].on = true
+		switches[k].anim = 1.0
+		open_door(switches[k].door)
+	for k in floor_state.get("asleep", []):
+		if k < guards.size():
+			guards[k].state = "asleep"
+			guards[k].torch.level = 0.0
+	for k in floor_state.get("broken", []):
+		lights[k].broken = true
+		lights[k].level = 0.0
+	var desks: Array = floor_state.get("desks", [])
+	for k in mini(desks.size(), props.size()):
+		props[k].x = desks[k]
+	stage_node.queue_redraw()
+	level_t = 99.0                           # no floor name: he's been here
+	reset_scarf()
+	cam.x = clampf(P.x - VIEW_W * 0.4, 0, LW * T - VIEW_W)
+	cam_floor = P.y + P.h
+	cam.y = cam_y_target()
+
+# R: back to the last checkpoint. On the end screen: this floor again, from its start.
+func retry() -> void:
+	if state == "escaped":
+		floor_state = {}
+	start_run()
+
+func make_codes() -> void:
+	codes = {}
+	for k in ["door", "safe"]:
+		codes[k] = "%04d" % randi_range(0, 9999)
+
+func new_game() -> void:
+	intro_seen = false
+	recall_seen = -1
+	found = []
+	read_floor = 1
+	make_codes()
+	if howto_seen:
+		start_run(0)
+	else:
+		howto_seen = true                    # the first time: how to play, then any key starts
+		menu_page = "howto"
+
+func has_save() -> bool:
+	return save_on and FileAccess.file_exists(save_path)
+
+func save_game(floor_i := -1) -> void:
+	if not save_on:
+		return
+	var cf := ConfigFile.new()
+	cf.set_value("game", "floor", floor_i if floor_i >= 0 else level_idx)
+	cf.set_value("game", "floor_state", floor_state)
+	cf.set_value("game", "found", found)
+	cf.set_value("game", "codes", codes)
+	cf.set_value("game", "read_floor", read_floor)
+	cf.set_value("game", "intro_seen", intro_seen)
+	cf.set_value("game", "recall_seen", recall_seen)
+	cf.set_value("game", "howto_seen", howto_seen)
+	cf.save(save_path)
+
+# At launch: what he knows comes back with the game. Where he is waits for Continue.
+func load_save() -> void:
+	var cf := ConfigFile.new()
+	if cf.load(save_path) != OK:
+		return
+	saved_floor = clampi(cf.get_value("game", "floor", 0), 0, Levels.LEVELS.size() - 1)
+	floor_state = cf.get_value("game", "floor_state", {})
+	found = cf.get_value("game", "found", [])
+	codes = cf.get_value("game", "codes", codes)
+	read_floor = cf.get_value("game", "read_floor", 1)
+	intro_seen = cf.get_value("game", "intro_seen", false)
+	recall_seen = cf.get_value("game", "recall_seen", -1)
+	howto_seen = cf.get_value("game", "howto_seen", false)
+
+func continue_game() -> void:
+	load_save()
+	load_level(saved_floor)
+	start_run()
+
+# =====================================================================
+#  THE SEARCHLIGHT - from outside, through the glass roof. It fills the meter and never calls a guard. You hear the
+#  rotors first (warn s), then the beam crosses a span one way, stopping once. When it comes, which span (near him),
+#  which way and where it stops are all rolled fresh, so no two tries are the same.
+# =====================================================================
+func reset_searchlight() -> void:
+	sl.state = "idle"
+	if level.has("searchlight"):
+		var ev: Array = level.searchlight.every
+		sl.t = randf_range(ev[0], ev[1])
+	if sl_light != null:
+		sl_light.level = 0.0
+
+func update_searchlight(dt: float) -> void:
+	if sl_light == null:
+		return
+	var d: Dictionary = level.searchlight
+	match sl.state:
+		"idle":
+			sl.t -= dt
+			if sl.t <= 0.0:
+				var mid := (P.x + P.w / 2) / T
+				var near: Array = d.spans.filter(func(s): return mid > s[0] - 14 and mid < s[1] + 14)
+				if near.is_empty():
+					sl.t = 1.5                   # nothing near him: it's circling elsewhere
+				else:
+					var span: Array = near[randi() % near.size()]
+					sl.dir = 1 if randf() < 0.5 else -1
+					var a: float = span[0] if sl.dir > 0 else span[1]
+					var b: float = span[1] if sl.dir > 0 else span[0]
+					sl.x = (a - sl.dir * 6) * T  # it comes in from beyond the glass
+					sl.end = (b + sl.dir * 6) * T
+					sl.stop = lerpf(a, b, randf_range(0.2, 0.8)) * T
+					sl.wait = randf_range(d.linger[0], d.linger[1])
+					sl.state = "warn"
+					sl.t = d.warn
+		"warn":
+			sl.t -= dt
+			if sl.t <= 0.0:
+				sl.state = "sweep"
+				sl_light.level = d.intensity
+		"sweep":
+			if sl.wait > 0.0 and (sl.stop - sl.x) * sl.dir <= 0.0:
+				sl.wait -= dt                    # it hangs there, looking
+			else:
+				sl.x += sl.dir * d.speed * dt
+			if (sl.end - sl.x) * sl.dir <= 0.0:
+				sl.state = "idle"
+				sl.t = randf_range(d.every[0], d.every[1])
+				sl_light.level = 0.0
+	sl_light.pos.x = sl.x
+	sl_light.node.position = sl_light.pos
 
 func _process(dt: float) -> void:
 	fps = lerpf(fps, 1.0 / maxf(dt, 0.001), 0.05)
@@ -3181,6 +3671,48 @@ func _process(dt: float) -> void:
 func _capture_setup(setup: String) -> void:
 	load_level(1)                           # default setups are on the offices
 	match setup:
+		"f1map", "f1clue", "f1note", "f1keypad", "f1beam", "f1world", "f1office":   # floor 1's journal, keypad, searchlight
+			start_run(0)
+			intro = ""
+			alarm_quiet = true
+			intro_seen = true
+			level_t = 9.0
+			read_floor = int(_capture.get("read", "1"))
+			found = ["lablog", "memo", "notesafe", "notedoor", "file", "badge"].filter(func(c): return setup != "f1world" and setup != "f1beam" and setup != "f1office")
+			journal_sel = int(_capture.get("sel", "0"))
+			match setup:
+				"f1map":
+					P.x = 74 * T
+					state = "journal"
+					journal_tab = 0
+				"f1clue", "f1note":
+					state = "journal"
+					journal_tab = 1
+					journal_sel = 3 if setup == "f1note" else journal_sel
+				"f1keypad":
+					P.x = 110.3 * T
+					P.y = 24 * T - P.h
+					_run(2)
+					interact()
+					keypad_digits = [4, 7, -1, -1]
+					keypad_at = 2
+				"f1beam":
+					for g in guards:
+						g.state = "asleep"
+						g.torch.level = 0.0
+					P.x = 78 * T
+					sl_light.level = level.searchlight.intensity
+					sl.state = "sweep"
+					sl.x = 79.0 * T
+					sl.dir = 1
+					sl.stop = -99999.0
+					sl.end = 99999.0
+				"f1world":
+					P.x = 7.0 * T
+				"f1office":
+					P.x = 44 * T
+					P.y = 24 * T - P.h
+					test_keys = {}
 		"title":
 			open_menu("title")
 		"about", "controls", "quit":
@@ -3298,7 +3830,7 @@ func _capture_setup(setup: String) -> void:
 			face_each_other(intro_guards())
 			alarm_quiet = true
 			intro = "talk"
-			talk_i = 1
+			talk_i = int(_capture.get("sel", "1"))
 			bars = 1.0
 		"remember":                             # floor 2 cleared: a memory with no ability shows on the end screen
 			start_run(1)
@@ -3530,16 +4062,46 @@ func _selftest_menu() -> void:
 	_run(10)
 	var x0 := P.x
 	press.call(KEY_ESCAPE)
-	print("  Esc in play -> state: ", state, ", items: ", menu_items())
+	print("  Esc in play -> state: ", state, ", tab: ", journal_tab)
 	test_keys = {"right": true}
 	_run(30)
 	print("  paused: holding D moved px: ", P.x - x0)
 	test_keys = null
+	var pad_r1 := func():
+		var ev := InputEventJoypadButton.new()
+		ev.button_index = JOY_BUTTON_RIGHT_SHOULDER
+		ev.pressed = true
+		_unhandled_input(ev)
+		ev = InputEventJoypadButton.new()
+		ev.button_index = JOY_BUTTON_RIGHT_SHOULDER
+		ev.pressed = false
+		_unhandled_input(ev)
+	var page := func(): return "main menu" if state == "pause" else (["map", "clues"][journal_tab] if state == "journal" else state)
+	var pages := [page.call()]
+	for i in 3:
+		pad_r1.call()
+		pages.append(page.call())
+	print("  R1, R1, R1: ", pages, ", aiming: ", aiming)
+	var ev_l1 := InputEventJoypadButton.new()
+	ev_l1.button_index = JOY_BUTTON_LEFT_SHOULDER
+	ev_l1.pressed = true
+	var back := []
+	for i in 3:
+		_unhandled_input(ev_l1)
+		back.append(page.call())
+	print("  L1, L1, L1: ", back)
+	press.call(KEY_TAB)
+	press.call(KEY_TAB)
+	print("  TAB, TAB: ", page.call(), ", items: ", menu_items())
+	press.call(KEY_TAB)
+	print("  TAB: ", page.call())
 	press.call(KEY_ESCAPE)
-	print("  Esc again -> state: ", state)
+	print("  Esc -> state: ", state)
 	press.call(KEY_ESCAPE)
+	press.call(KEY_TAB)
+	press.call(KEY_TAB)
 	press.call(KEY_ENTER)
-	print("  Esc, Enter on Resume -> state: ", state)
+	print("  Esc, TAB, TAB, Enter on Resume -> state: ", state)
 	state = "caught"
 	press.call(KEY_ESCAPE)
 	print("  caught + Esc -> state: ", state)
@@ -3982,7 +4544,7 @@ func _selftest_intro() -> void:
 	for i in Levels.LEVELS.size():
 		start_run(i)
 		print("  %s remembers: %s%s" % [level.name, can.keys(), "  + scarf colour to %.2f" % scarf_reach if scarf_red else ""])
-	# the lab's route, guards asleep: the pipes (crawl), the crates (jump), out
+	# the lab's route, guards asleep: the pipes (crawl), the crates (jump) (the rest: --selftest=floor1)
 	start_run(0)
 	intro = ""
 	_sleep_all()
@@ -3991,8 +4553,283 @@ func _selftest_intro() -> void:
 	var at_pipes := (P.x + P.w) / T
 	_walk({"right": true, "down": true}, func(): return P.x > 56.5 * T, 400)
 	var through := P.x / T
-	var out := _walk({"right": true, "jump": true}, func(): return state == "escaped", 900)
-	print("  lab route: stopped at the pipes x%.1f, crawled through to x%.1f, out after %.1fs: %s" % [at_pipes, through, out / 60.0, state])
+	var over := _walk({"right": true, "jump": true}, func(): return P.x > 66 * T, 900)
+	print("  lab route: stopped at the pipes x%.1f, crawled through to x%.1f, over the crates after %.1fs: x%.1f" % [at_pipes, through, over / 60.0, P.x / T])
+	test_keys = null
+
+
+# Dev tool: the save, on its own file (never the player's): Continue puts everything back; New Game asks first; and
+# how the checkpoint's corner holds up with the guards awake.  godot_console --headless --path . -- --selftest=save
+func _selftest_save() -> void:
+	save_path = "user://save_selftest.cfg"
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(save_path))
+	save_on = true
+	open_menu("title")
+	print("  no save: title items %s" % [menu_items()])
+	howto_seen = true
+	new_game()
+	test_keys = {}
+	intro = ""
+	var door_code: String = codes.door
+	P.x = 8.2 * T - P.w / 2
+	interact()
+	state = "play"
+	print("  New Game, a clue found: has_save %s, found %s" % [has_save(), found])
+	open_door(0)
+	floor_state["locks"] = [0]
+	P.x = 116 * T
+	P.y = 24 * T - P.h
+	_run(2)
+	print("  the checkpoint: cp %s, notice '%s'" % [floor_state.get("cp", -1), notice])
+	# quit and come back: nothing in memory but what's on disk
+	found = []
+	codes = {}
+	floor_state = {}
+	intro_seen = false
+	open_menu("title")
+	print("  title now: %s" % [menu_items()])
+	menu_activate(menu_items().find("Continue"))
+	print("  Continue: floor %d, x%.1f, row %.1f, found %s, code kept %s, door open %s, intro '%s', state %s" % [level_idx + 1, P.x / T, (P.y + P.h) / T, found, codes.door == door_code, doors[0].open, intro, state])
+	test_keys = {}
+	var worst := 0.0
+	for i in 60 * 30:
+		_run(1)
+		worst = maxf(worst, meter)
+	print("  30s standing at the checkpoint, guards awake: meter peak %.2f, state %s" % [worst, state])
+	state = "play"
+	P.x = exit_x
+	P.y = exit_row * T - P.h
+	_run(2)
+	print("  floor cleared: state %s" % state)
+	load_save()
+	print("  the save now says floor %d, no checkpoint: %s" % [saved_floor + 1, not floor_state.has("cp")])
+	# Restart and New Game
+	continue_game()
+	print("  Continue: on floor %d" % (level_idx + 1))
+	load_level(0)
+	floor_state = {"cp": 0}
+	start_run()
+	open_menu("pause")
+	print("  pause: %s" % [menu_items()])
+	menu_activate(menu_items().find("Restart Floor"))
+	print("  Restart Floor: x%.1f, cp %s" % [P.x / T, floor_state.get("cp", -1)])
+	open_menu("title")
+	menu_activate(menu_items().find("New Game"))
+	print("  New Game with a save: page '%s', still has %d clues" % [menu_page, found.size()])
+	menu_key(KEY_ESCAPE)
+	print("  No: page '%s', still %d clues" % [menu_page, found.size()])
+	menu_activate(menu_items().find("New Game"))
+	quit_choose(1)
+	print("  Yes: state %s, clues %d, new code %s" % [state, found.size(), codes.door != door_code])
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(save_path))
+	test_keys = null
+
+
+# Dev tool: Floor 1's whole route with the guards asleep (can it be walked?), its clues and locks, the checkpoint,
+# the journal, the searchlight.  godot_console --headless --path . -- --selftest=floor1
+func _selftest_floor1() -> void:
+	var press := func(code):
+		var ev := InputEventKey.new()
+		ev.physical_keycode = code
+		ev.pressed = true
+		_unhandled_input(ev)
+	test_keys = {}
+	start_run(0)
+	intro = ""
+	alarm_quiet = true
+	_sleep_all()
+	sl.t = 9999.0
+	var there := func(keys: Dictionary, x: float, frames := 2400) -> int:
+		var goes_right := x > P.x / T
+		return _walk(keys, func(): return (P.x / T >= x) if goes_right else (P.x / T <= x), frames)
+	var t0 := 0
+	# take the first clue
+	P.x = 8.2 * T - P.w / 2
+	press.call(KEY_E)
+	print("  E by the lab log: state %s, tab %d, found %s" % [state, journal_tab, found])
+	press.call(KEY_J)
+	var wf := read_word("immunity@9")
+	var w2 := read_word("212")
+	print("  on Floor 1 'immunity' reads: %s; '212': %s" % [wf[1], w2[1]])
+	read_floor = 9
+	print("  on Floor 9 'immunity' reads: %s" % read_word("immunity@9")[1])
+	read_floor = 1
+	# upper floor, right
+	P.x = 45 * T
+	t0 += there.call({"right": true, "walk": true}, 51.0, 900)
+	t0 += _walk({"right": true, "down": true}, func(): return P.x > 56.5 * T, 900)
+	t0 += _walk({"right": true, "jump": true, "walk": true}, func(): return P.x > 66 * T, 900)
+	print("  through the lab to x%.1f, row %.1f" % [P.x / T, (P.y + P.h) / T])
+	t0 += there.call({"right": true, "walk": true}, 93.5, 1200)
+	press.call(KEY_E)
+	print("  the safe's note: state %s, found %s" % [state, found])
+	press.call(KEY_ESCAPE)
+	t0 += _walk({"right": true, "walk": true}, func(): return (P.y + P.h) / T > 23.5, 900)
+	print("  down the stairs: x%.1f, row %.1f, on the floor %s" % [P.x / T, (P.y + P.h) / T, P.on_ground])
+	# the coded door: locked, and the wrong number is loud
+	var at_x := P.x / T
+	t0 += there.call({"right": true, "walk": true}, 110.5 - 0.3, 900)
+	print("  at the keypad x%.1f (from x%.1f), near: %s" % [P.x / T, at_x, near_thing()])
+	press.call(KEY_E)
+	print("  E: state %s" % state)
+	var wrong: String = "0000" if codes.door != "0000" else "1111"
+	for ch in wrong:
+		press.call(KEY_0 + int(ch))
+	press.call(KEY_ENTER)
+	print("  wrong number: state %s, door open %s, notice '%s', noises %d" % [state, doors[0].open, notice, noises.size()])
+	# back left, for the note: under the stairs, the crawl at 58, the office
+	t0 += there.call({"left": true, "walk": true}, 60.0, 1800)
+	print("  back under the stairs to x%.1f" % (P.x / T))
+	t0 += _walk({"left": true, "down": true}, func(): return P.x < 56 * T, 900)
+	print("  crawled through to x%.1f" % (P.x / T))
+	t0 += there.call({"left": true, "walk": true}, 25.8, 900)
+	press.call(KEY_E)
+	print("  the door's note: state %s, found %s" % [state, found])
+	press.call(KEY_ESCAPE)
+	t0 += there.call({"right": true, "walk": true}, 56.0, 900)
+	t0 += _walk({"right": true, "down": true}, func(): return P.x > 60 * T, 900)
+	t0 += _walk({"right": true, "walk": true}, func(): return P.x / T > 87.0, 1800)
+	t0 += _walk({"right": true, "walk": true, "jump": true}, func(): return P.x / T >= 105.0, 1800)
+	t0 += _walk({"right": true, "walk": true}, func(): return P.x / T >= 110.2 and P.on_ground, 900)
+	press.call(KEY_E)
+	for ch in codes.door:
+		press.call(KEY_0 + int(ch))
+	press.call(KEY_ENTER)
+	print("  the right number at x%.1f: state %s, door open %s, notice '%s'" % [P.x / T, state, doors[0].open, notice])
+	t0 += there.call({"right": true, "walk": true}, 117.0, 600)
+	print("  through it to x%.1f: checkpoint %s, notice '%s'" % [P.x / T, floor_state.get("cp", -1), notice])
+	print("  walking the first half took %.0fs (no guards, no waiting)" % (t0 / 60.0))
+	# a retry goes back to the checkpoint, the door still open, the clues still found
+	press.call(KEY_R)
+	_sleep_all()
+	sl.t = 9999.0
+	print("  R: at x%.1f, door open %s, found %d, clock %s" % [P.x / T, doors[0].open, found.size(), clock(run_t)])
+	# the second half
+	var t1 := there.call({"right": true, "walk": true}, 127.0, 600) as int
+	t1 += _walk({"right": true, "down": true}, func(): return P.x > 131.5 * T, 900)
+	t1 += _walk({"right": true, "walk": true, "jump": true}, func(): return P.x / T > 176.5, 1800)
+	print("  along the lower floor to x%.1f, row %.1f" % [P.x / T, (P.y + P.h) / T])
+	t1 += _walk({"right": true, "walk": true}, func(): return P.x / T > 177.3, 300)
+	t1 += _walk({"right": true, "jump": true, "walk": true}, func(): return (P.y + P.h) / T < 23.5 and P.on_ground, 300)
+	print("  up on the crate: x%.1f, row %.1f" % [P.x / T, (P.y + P.h) / T])
+	t1 += _walk({"left": true, "jump": true}, func(): return (P.y + P.h) / T < 21.5 and P.on_ground, 300)
+	print("  on the first step: x%.1f, row %.1f" % [P.x / T, (P.y + P.h) / T])
+	t1 += _walk({"left": true, "walk": true}, func(): return (P.y + P.h) / T < 15.5 and P.x / T < 170.5, 900)
+	print("  at the top: x%.1f, row %.1f" % [P.x / T, (P.y + P.h) / T])
+	t1 += there.call({"left": true, "walk": true}, 123.4, 900)
+	print("  at the safe x%.1f, near: %s" % [P.x / T, near_thing()])
+	press.call(KEY_E)
+	for ch in codes.safe:
+		press.call(KEY_0 + int(ch))
+	press.call(KEY_ENTER)
+	print("  the safe: state %s, found %s" % [state, found])
+	press.call(KEY_ESCAPE)
+	t1 += _walk({"left": true, "walk": true}, func(): return switches[0].on, 600)
+	print("  the lever at x%.1f: on %s, door open %s" % [P.x / T, switches[0].on, doors[1].open])
+	_run(60)
+	t1 += there.call({"right": true, "walk": true}, 170.5, 900)
+	t1 += _walk({"right": true, "walk": true}, func(): return (P.y + P.h) / T > 23.5, 600)
+	print("  back down: x%.1f, row %.1f" % [P.x / T, (P.y + P.h) / T])
+	t1 += _walk({"right": true, "walk": true, "jump": true}, func(): return P.x / T > 188.0, 900)
+	press.call(KEY_ESCAPE) if state != "play" else null
+	P.x = 188.5 * T - P.w / 2
+	press.call(KEY_E)
+	print("  the badge: state %s, found %d" % [state, found.size()])
+	press.call(KEY_ESCAPE)
+	t1 += _walk({"right": true, "walk": true}, func(): return state == "escaped", 600)
+	print("  out: %s; the second half walked in %.0fs" % [state, t1 / 60.0])
+	# the journal on the map: it holds still, and the game goes on after
+	# ducked through a menu: he stays ducked until you do something
+	start_run(0)
+	intro = ""
+	alarm_quiet = true
+	_sleep_all()
+	sl.t = 9999.0
+	P.x = 12.5 * T
+	test_keys = {"down": true}
+	_run(30)
+	var duck := [P.hidden]
+	test_keys = {}
+	press.call(KEY_J)
+	press.call(KEY_J)
+	_run(30)
+	duck.append(P.hidden)
+	test_keys = {"down": true}                     # closed with B, the crouch button, still held
+	press.call(KEY_J)
+	press.call(KEY_ESCAPE)
+	_run(10)
+	test_keys = {}
+	_run(30)
+	duck.append(P.hidden)
+	test_keys = {"down": true}                     # now a real tap on down: let go, and he stands
+	_run(5)
+	test_keys = {}
+	_run(30)
+	duck.append(P.hidden)
+	print("  ducked %s; through a menu, nothing held %s; closed holding B, let go %s; then a tap on down %s" % duck)
+	test_keys = {"down": true}
+	_run(30)
+	test_keys = {}
+	press.call(KEY_J)
+	press.call(KEY_J)
+	_run(10)
+	test_keys = {"right": true}
+	_run(40)
+	print("  ducked through a menu, then move: crawling %s, moved %s" % [P.crawling, P.x > 13.0 * T])
+	test_keys = {"down": true}
+	_run(30)
+	test_keys = {}
+	press.call(KEY_J)
+	retry()
+	_run(5)
+	print("  ducked, menu, then a retry: starts ducked %s" % stay_down)
+	# the journal on the map: it holds still, and the game goes on after
+	start_run(0)
+	intro = ""
+	alarm_quiet = true
+	_sleep_all()
+	test_keys = {}
+	var x0 := P.x
+	press.call(KEY_J)
+	test_keys = {"right": true}
+	_run(30)
+	print("  J: state %s, tab %d; held still: %s" % [state, journal_tab, P.x == x0])
+	press.call(KEY_RIGHT)
+	print("  → tab %d" % journal_tab)
+	press.call(KEY_J)
+	print("  J again: state %s" % state)
+	# the searchlight: it fills the meter in the open, hiding beats it, nobody comes; never twice the same
+	test_keys = {}
+	var rolls := []
+	for k in 6:
+		reset_searchlight()
+		P.x = 80 * T
+		P.y = 15 * T - P.h
+		sl.t = 0.0
+		_run(1)
+		rolls.append("%s%d>%d" % ["+" if sl.dir > 0 else "-", roundi(sl.x / T), roundi(sl.stop / T)])
+	print("  six passes (way, from, stops at): %s" % [rolls])
+	for hiding in [false, true]:
+		reset_searchlight()
+		meter = 0.0
+		P.x = 67.5 * T + 20
+		P.y = 15 * T - P.h
+		test_keys = {"down": true} if hiding else {}
+		_run(20)
+		sl.t = 0.0
+		sl.state = "idle"
+		var calls := []
+		var peak := 0.0
+		var f := 0
+		while state == "play" and f < 60 * 40:
+			_run(1)
+			f += 1
+			peak = maxf(peak, meter)
+			if sl.state == "idle" and f > 60:
+				break
+		print("  a pass, %s: meter peak %.2f, hidden %s, guards hunting %d, took %.1fs, %s" % ["hiding" if hiding else "standing in the open", peak, P.hidden,
+			guards.filter(func(g): return g.state in ["chase", "investigate"] and g.state != "asleep").size(), f / 60.0, state])
+		state = "play"
 	test_keys = null
 
 

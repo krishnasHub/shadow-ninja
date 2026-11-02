@@ -109,6 +109,10 @@ One colour, one thing: the scarf, and only in shadow. Floor by floor the colour 
 <p class="lede">A later floor where the guards kill every light. The screen goes black; sound is the only light. Still things hum faintly. Every step sends out a ripple that outlines whatever it reaches, out to the same distance the guards hear it (a run: 150 px, as in the game), so <b>the room you see is the room that hears you</b>. Sneaking is silent and leaves you nearly blind; running shows you the room and gives you away. He knows his own body (a faint outline, his eyes, and what he's remembered). The scene: sneak, run, heard. <b>A:</b> the guards wear night vision - only their eyes show, and the small ripples of their own steps. <b>B:</b> the first pitch - a moving guard always shows, vibrating.</p>
 <div class="wide" id="blackout"></div>
 
+<h2>Clues · memory returning</h2>
+<p class="lede">The same note, as he reads it on Floors 1, 5 and 9. Numbers are clear from the start; each word stays scrawl until its floor, and the same letter is always the same scrawl, so it reads as a language he has lost. Copied into <code>hud.gd</code> (<code>_glyph</code>, <code>_page</code>).</p>
+<div class="grid" id="clues"></div>
+
 <footer>Game units: a tile is 32 px; the ninja is 18 × 44, a guard about 62 tall. Drawn here at the game's size, scaled up 2.5×. Nothing here changes the game.</footer>
 
 <script>
@@ -1286,6 +1290,38 @@ One colour, one thing: the scarf, and only in shadow. Floor by floor the colour 
   }
   blackoutScene("A · Night vision", "the guards: only their eyes, faint - brighter once they've heard you - and the small ripples of their own steps.", "eyes");
   blackoutScene("B · Vibrating", "the first pitch: a moving guard always shows, his outline jittering; still, he's barely there.", "jitter");
+
+  // ---- clues: memory returning ----
+  const hashCh = (ch) => { let h = ch.toLowerCase().charCodeAt(0) * 7919; return () => (h = (h * 1664525 + 1013904223) >>> 0) / 4294967296; };
+  function glyph(c, ch, x, y, h, w) {
+    const r = hashCh(ch);
+    for (let s = 0, ns = r() < 0.5 ? 1 : 2; s < ns; s++) {
+      const n = r() < 0.5 ? 3 : 4;
+      c.beginPath();
+      for (let k = 0; k < n; k++) {
+        const px = x + ((k + (r() - 0.5) * 0.4) / (n - 1)) * w * 0.78, py = y - r() * h;
+        k ? c.lineTo(px, py) : c.moveTo(px, py);
+      }
+      c.stroke();
+    }
+  }
+  const NOTE = ["batch@3 7", "trial@6 group@3 shows@4 full@5 immunity@9", "212 of@2 212 alive@7", "it@2 is@2 the@2 cure@9"];
+  for (const floor of [1, 5, 9]) {
+    card(document.getElementById("clues"), `Floor ${floor}`, floor === 1 ? "only the numbers" : floor === 5 ? "some of it" : "all of it", 150, 78, (c) => {
+      c.fillStyle = "#0d0d0e"; c.fillRect(0, 0, 150, 78);
+      c.fillStyle = "#9e9e99"; c.fillRect(6, 5, 138, 68);
+      c.strokeStyle = c.fillStyle = "#1a1a1c"; c.lineWidth = 0.5;
+      NOTE.forEach((line, i) => {
+        let x = 12; const y = 19 + i * 13, size = i ? 7.2 : 9;
+        c.font = `italic ${size}px Georgia, serif`;
+        for (const tok of line.split(" ")) {
+          const [word, n] = tok.split("@");
+          if (!n || floor >= +n) { c.fillText(word, x, y); x += c.measureText(word).width + 4; }
+          else { for (const ch of word) { glyph(c, ch, x, y, size * 0.72, size * 0.62); x += size * 0.62; } x += 4; }
+        }
+      });
+    });
+  }
 
   // ---- run ----
   let last = performance.now();

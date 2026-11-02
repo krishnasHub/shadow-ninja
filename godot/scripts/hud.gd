@@ -58,8 +58,9 @@ func _opening() -> void:
 
 var talk_font: FontVariation
 const TALK_SIZE := 13
-const TALK_INK := Color(0.6, 0.6, 0.6)
-const TALK_FAINT := Color(0.24, 0.24, 0.25)       # the words he half-hears
+const TALK_INK := Color(0.72, 0.72, 0.72)
+const TALK_FAINT := Color(0.24, 0.24, 0.25)       # the words he half-remembers
+const TALK_SCRAWL := Color(0.36, 0.36, 0.37)      # the words he can't follow
 
 func _talk_line() -> void:
 	var line: Array = m.level.intro.talk[m.talk_i]
@@ -68,7 +69,7 @@ func _talk_line() -> void:
 
 # One line, in the bottom bar under the speaker (sx: his x on screen): small spaced caps. Each word
 # drifts up into place a beat after the last; when the line's done, it lifts away. ~faint~ words are
-# the half-heard (or half-remembered) ones.
+# the half-remembered ones; word@n is scrawl until Floor n (the same scrawl as the clues).
 func _say(text: String, sx: float, t: float, dur: float) -> void:
 	if talk_font == null:
 		talk_font = FontVariation.new()
@@ -85,17 +86,16 @@ func _say(text: String, sx: float, t: float, dur: float) -> void:
 	var sp := talk_font.get_string_size("  ", HORIZONTAL_ALIGNMENT_LEFT, -1, TALK_SIZE).x
 	var total := -sp
 	for w in words:
-		total += talk_font.get_string_size(w[0], HORIZONTAL_ALIGNMENT_LEFT, -1, TALK_SIZE).x + sp
+		total += _word_width(w[0], TALK_SIZE, talk_font) + sp
 	var cx := clampf(sx, total / 2 + 24, 960 - total / 2 - 24)
 	var y: float = 540 - 31.0 * m.bars + TALK_SIZE * 0.35
 	var out := smoothstep(dur + m.TALK_GAP * 0.6 - 0.45, dur + m.TALK_GAP * 0.6, t)
 	var x := cx - total / 2
 	for i in words.size():
 		var k := smoothstep(i * 0.11, i * 0.11 + 0.5, t)
-		var col: Color = TALK_FAINT if words[i][1] else TALK_INK
+		var col: Color = TALK_FAINT if words[i][1] else (TALK_INK if m.read_word(words[i][0])[1] else TALK_SCRAWL)
 		col.a = k * (1.0 - out)
-		draw_string(talk_font, Vector2(x, y + (1.0 - k) * 9.0 - out * 8.0), words[i][0], HORIZONTAL_ALIGNMENT_LEFT, -1, TALK_SIZE, col)
-		x += talk_font.get_string_size(words[i][0], HORIZONTAL_ALIGNMENT_LEFT, -1, TALK_SIZE).x + sp
+		x = _word(words[i][0], Vector2(x, y + (1.0 - k) * 9.0 - out * 8.0), TALK_SIZE, col, talk_font) + sp
 
 func _star_icon(c: Vector2, col: Color, r := 5.0, rot := 0.4) -> void:
 	var pts := PackedVector2Array()
@@ -190,7 +190,7 @@ func _hud() -> void:
 	elif m.meter > 0:
 		status = "IN SHADOW"
 	_text(status, Vector2(x, y + 26), m.font_regular, 11, Color(1, 1, 1, 0.55), 3)
-	draw_string(m.font_regular, Vector2(960 - 24 - 500, 540 - 18), _k("Esc menu  ·  R restart  ·  M music  ·  F11 fullscreen  ·  G debug", "Start menu  ·  View restart  ·  Y music"),
+	draw_string(m.font_regular, Vector2(960 - 24 - 500, 540 - 18), _k("Esc map, clues, menu  ·  R retry  ·  M music  ·  F11 fullscreen", "Start map, clues, menu  ·  View retry"),
 		HORIZONTAL_ALIGNMENT_RIGHT, 500, 11, Color(1, 1, 1, 0.3))
 
 const CONTROLS := [                                   # keyboard, controller (Xbox), what it does
@@ -203,8 +203,9 @@ const CONTROLS := [                                   # keyboard, controller (Xb
 	["↓  +  hold  E", "↓  +  hold  X", "behind a desk: move it, hidden  -  a camera sees a desk move"],
 	["LEFT CLICK  /  E  /  F", "X", "fight a watcher:  strike  -  3 quick for a special  (once you remember)"],
 	["RIGHT CLICK  /  Q", "Y", "fight:  block his swing, as he winds up   ·   jump: hop back, or over him"],
-	["ESC", "START", "pause menu"],
-	["R    ·    F11", "VIEW", "restart    ·    fullscreen"],
+	["E", "X", "take a clue  ·  try a keypad or a safe"],
+	["ESC   then  TAB", "START   then  L1 / R1", "the map   >   the clues you've found   >   the main menu"],
+	["R    ·    F11", "VIEW", "back to the last checkpoint    ·    fullscreen"],
 	["M", "Y  (in a menu)", "music on / off"],
 ]
 
@@ -225,6 +226,10 @@ func _screens() -> void:
 	var t: float = m.state_t
 	if st == "title" or st == "pause":
 		_menu(st == "pause")
+	elif st == "journal":
+		_journal()
+	elif st == "keypad":
+		_keypad()
 	elif st == "caught":
 		draw_rect(Rect2(0, 0, 960, 540), Color(1, 1, 1, maxf(0, 1 - t * 3)))
 		draw_rect(Rect2(0, 0, 960, 540), Color(0, 0, 0, minf(0.78, t * 1.2)))
@@ -272,6 +277,8 @@ func _menu(paused: bool) -> void:
 		draw_rect(Rect2(0, 0, 960, 540), Color(0, 0, 0, 0.45))
 	if m.menu_page == "quit":
 		_text("Are you sure?", Vector2(480, 240), m.font_italic, 28, Color(1, 1, 1, 0.9), 0, true)
+		if m.quit_new:
+			_text("this starts over.", Vector2(480, 268), m.font_italic, 15, Color(1, 1, 1, 0.55), 0, true)
 		for i in 2:
 			var label := "NO" if i == 0 else "YES"
 			var x: float = m.QUIT_X[i]
@@ -299,17 +306,19 @@ func _menu(paused: bool) -> void:
 		_about()
 		return
 	if m.menu_page == "controls":
-		_text("CONTROLS", Vector2(480, 120), m.font_regular, 30, Color(1, 1, 1, 0.9), 10, true)
-		_table(200, true)
+		_text("CONTROLS", Vector2(480, 110), m.font_regular, 30, Color(1, 1, 1, 0.9), 10, true)
+		_table(170, true, 23.0)
 		_footer(_k("ESC  back", "B  back"))
 		return
 	if m.menu_page == "howto":                       # before the first New Game
 		_text("HOW TO PLAY", Vector2(480, 105), m.font_regular, 30, Color(1, 1, 1, 0.9), 10, true)
 		_text("stay in the dark. the light you see is the light that catches you.", Vector2(480, 140), m.font_italic, 16, Color(1, 1, 1, 0.65), 0, true)
-		_table(200, true, 22.0)
-		var a := 0.45 + 0.35 * sin(m.time * 3.0)
+		_table(190, true, 20.0)
+		var a :=0.45 + 0.35 * sin(m.time * 3.0)
 		_text(_k("press any key", "press any button"), Vector2(480, 470), m.font_regular, 14, Color(1, 1, 1, a), 4, true)
 		return
+	if paused:
+		_tabs(2)
 	_text("SHADOW NINJA", Vector2(480, 165), m.font_regular, 54, Color(1, 1, 1, 0.92), 14, true)
 	_text("paused" if paused else "stay out of the light", Vector2(480, 205), m.font_italic, 18, Color(1, 1, 1, 0.6), 0, true)
 	var items: Array = m.menu_items()
@@ -322,15 +331,15 @@ func _menu(paused: bool) -> void:
 			var half: float = (m.font_regular.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 20).x + label.length() * 5) / 2
 			draw_line(Vector2(480 - half - 44, y - 7), Vector2(480 - half - 16, y - 7), Color(1, 1, 1, 0.7), 1.0)
 			draw_line(Vector2(480 + half + 16, y - 7), Vector2(480 + half + 44, y - 7), Color(1, 1, 1, 0.7), 1.0)
-	_footer(_k("↑ ↓  choose    ·    ENTER  select" + ("    ·    ESC  resume" if paused else ""),
-		"↑ ↓  choose    ·    A  select" + ("    ·    B  resume" if paused else "")))
+	_footer(_k(("TAB  next    ·    " if paused else "") + "↑ ↓  choose    ·    ENTER  select" + ("    ·    ESC  resume" if paused else ""),
+		("L1  R1  next    ·    " if paused else "") + "↑ ↓  choose    ·    A  select" + ("    ·    B  resume" if paused else "")))
 
 func _about() -> void:
 	_text("ABOUT", Vector2(480, 80), m.font_regular, 30, Color(1, 1, 1, 0.9), 10, true)
 	for i in ABOUT.size():
 		_text(ABOUT[i], Vector2(480, 125 + i * 22), m.font_italic, 15, Color(1, 1, 1, 0.75), 0, true)
-	_text("CONTROLS", Vector2(480, 275), m.font_regular, 13, Color(1, 1, 1, 0.55), 6, true)
-	_table(294, false, 15.0, 12)
+	_text("CONTROLS", Vector2(480, 268), m.font_regular, 13, Color(1, 1, 1, 0.55), 6, true)
+	_table(285, false, 14.0, 12)
 	_text("a greyscale stealth prototype, after Limbo and Mark of the Ninja", Vector2(480, 482), m.font_italic, 12, Color(1, 1, 1, 0.4), 0, true)
 	_footer(_k("ESC  back", "B  back"))
 
@@ -345,6 +354,202 @@ func _table(y0: float, heads := false, dy := 24.0, size := 14) -> void:     # ke
 		draw_string(m.font_regular, Vector2(40, y), CONTROLS[i][0], HORIZONTAL_ALIGNMENT_RIGHT, 230, size, Color(1, 1, 1, kb))
 		draw_string(m.font_regular, Vector2(290, y), CONTROLS[i][1], HORIZONTAL_ALIGNMENT_LEFT, -1, size, Color(1, 1, 1, jp))
 		draw_string(m.font_italic, Vector2(420, y), CONTROLS[i][2], HORIZONTAL_ALIGNMENT_LEFT, -1, size, Color(1, 1, 1, 0.6))
+
+# =====================================================================
+#  THE JOURNAL - J / Y. The map: only the building, him and the way out (no guards). The clues: all he's found.
+# =====================================================================
+const PAPER := Color(0.62, 0.62, 0.6)
+const INK := Color(0.1, 0.1, 0.11)
+const INK_SOFT := Color(0.1, 0.1, 0.11, 0.55)
+
+func _journal() -> void:
+	draw_rect(Rect2(0, 0, 960, 540), Color(0.02, 0.02, 0.025, 0.97))
+	_tabs(m.journal_tab)
+	if m.journal_tab == 0:
+		_map()
+		_footer(_k("TAB  next    ·    ESC  back", "L1  R1  next    ·    B  back"))
+	else:
+		_clues()
+		_footer(_k("TAB  next    ·    ↑  ↓  choose    ·    ESC  back", "L1  R1  next    ·    ↑  ↓  choose    ·    B  back"))
+
+func _tabs(on_tab: int) -> void:                        # the menu's three pages, across the top
+	for i in 3:
+		var on: bool = i == on_tab
+		var cx: float = 360.0 + i * 120.0
+		_text(["MAP", "CLUES", "MENU"][i], Vector2(cx, 50), m.font_regular, 15, Color(1, 1, 1, 0.92 if on else 0.35), 6, true)
+		if on:
+			draw_line(Vector2(cx - 28, 60), Vector2(cx + 28, 60), Color(1, 1, 1, 0.6), 1.0)
+
+func _map() -> void:
+	_text(m.level.name, Vector2(480, 104), m.font_regular, 18, Color(1, 1, 1, 0.8), 8, true)
+	_text(m.level.subtitle, Vector2(480, 126), m.font_italic, 14, Color(1, 1, 1, 0.5), 0, true)
+	var s: float = minf(880.0 / m.LW, 300.0 / m.LH)     # one tile, on the map
+	var o := Vector2(480.0 - m.LW * s / 2.0, 310.0 - m.LH * s / 2.0)
+	for j in m.LH:                                      # the open spaces, in runs along each row; walls are what's left
+		var i := 0
+		while i < m.LW:
+			if m.grid[j * m.LW + i] == 0:
+				var i0 := i
+				while i < m.LW and m.grid[j * m.LW + i] == 0:
+					i += 1
+				draw_rect(Rect2(o + Vector2(i0, j) * s, Vector2(i - i0, 1) * s + Vector2(0.5, 0.5)), Color(0.17, 0.17, 0.175))
+			else:
+				if m.grid[j * m.LW + i] == m.DOOR:      # a locked door
+					draw_rect(Rect2(o + Vector2(i, j) * s, Vector2(s, s)), Color(1, 1, 1, 0.55))
+				i += 1
+	var ex: Vector2 = o + Vector2(m.door_x + 1, m.exit_row - 1.5) * s
+	draw_rect(Rect2(ex - Vector2(s, 1.5 * s), Vector2(2 * s, 3 * s)), Color(1, 1, 1, 0.85), false, 1.0)
+	_text("the way out", ex + Vector2(0, -2.0 * s - 6), m.font_italic, 13, Color(1, 1, 1, 0.7), 0, true)
+	var me: Vector2 = o + Vector2(m.P.x + m.P.w / 2, m.P.y + m.P.h / 2) / m.T * s
+	draw_circle(me, 6.0 + 2.0 * sin(m.time * 3.0), Color(1, 1, 1, 0.14))
+	draw_circle(me, 2.8, Color(1, 1, 1, 0.98))
+	_text("you", me + Vector2(0, -13), m.font_italic, 13, Color(1, 1, 1, 0.8), 0, true)
+
+func _clues() -> void:
+	if m.found.is_empty():
+		_text("nothing yet.", Vector2(480, 270), m.font_italic, 16, Color(1, 1, 1, 0.45), 0, true)
+		return
+	for i in m.found.size():                            # the list: each one a scrap, labelled as much as he can read
+		var c: Dictionary = m.clue_data(m.found[i])
+		var y: float = 110.0 + i * 34.0
+		var on: bool = i == m.journal_sel
+		var col := Color(1, 1, 1, 0.92 if on else 0.4)
+		if on:
+			draw_line(Vector2(36, y - 5), Vector2(54, y - 5), Color(1, 1, 1, 0.6), 1.0)
+		var title: String = c.get("title", "")
+		var x := 64.0
+		if title == "":
+			title = c.lines[0]
+		for t in title.split(" ", false):
+			x = _word(t, Vector2(x, y), 14, col, m.font_italic) + 8.0
+	_page(Rect2(345, 88, 560, 400), m.clue_data(m.found[clampi(m.journal_sel, 0, m.found.size() - 1)]))
+
+# One word as he sees it: itself, or scrawl - the same word is always the same scrawl. Returns where it ended.
+func _word(token: String, pos: Vector2, size: int, col: Color, font: Font) -> float:
+	var r: Array = m.read_word(token)
+	if r[1]:
+		draw_string(font, pos, r[0], HORIZONTAL_ALIGNMENT_LEFT, -1, size, col)
+		return pos.x + font.get_string_size(r[0], HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+	var w := size * 0.62
+	var x := pos.x
+	for ch in r[0]:
+		_glyph(ch, Vector2(x, pos.y), size * 0.72, w, col)
+		x += w
+	return x
+
+func _word_width(token: String, size: int, font: Font) -> float:
+	var r: Array = m.read_word(token)
+	if r[1]:
+		return font.get_string_size(r[0], HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+	return size * 0.62 * r[0].length()
+
+# A letter he's lost: a few strokes, fixed by the letter itself - so it reads as a language, not as noise.
+var _glyphs := {}
+func _glyph(ch: String, pos: Vector2, h: float, w: float, col: Color) -> void:
+	var key := ch.to_lower()
+	if not _glyphs.has(key):
+		var r := RandomNumberGenerator.new()
+		r.seed = key.unicode_at(0) * 7919
+		var strokes := []
+		for s in r.randi_range(1, 2):
+			var pts := PackedVector2Array()
+			var n := r.randi_range(3, 4)
+			for k in n:
+				pts.append(Vector2((k + r.randf_range(-0.2, 0.2)) / float(n - 1), r.randf_range(0.0, 1.0)))
+			strokes.append(pts)
+		_glyphs[key] = strokes
+	var size := Vector2(w * 0.78, -h)
+	for stroke in _glyphs[key]:
+		var out := PackedVector2Array()
+		for p in stroke:
+			out.append(pos + p * size)
+		draw_polyline(out, col, 1.15, true)
+
+func _page(r: Rect2, c: Dictionary) -> void:
+	var art: String = c.get("art", "")
+	var sticky := art == "sticky"
+	var p: Rect2 = Rect2(r.position + Vector2(100, 70), Vector2(300, 240)) if sticky else r
+	draw_set_transform(p.get_center())
+	var q: Rect2 = Rect2(-p.size / 2, p.size)
+	draw_rect(q, PAPER)
+	draw_rect(Rect2(q.position.x, q.position.y, q.size.x, 2), Color(1, 1, 1, 0.12))
+	var y: float = q.position.y + 40.0
+	var left: float = q.position.x + 34.0
+	if c.get("title", "") != "":
+		var tx := left
+		for t in c.title.split(" ", false):
+			tx = _word(t, Vector2(tx, y), 20, INK, m.font_bold) + 12.0
+		draw_line(Vector2(left, y + 10), Vector2(q.end.x - 34, y + 10), INK_SOFT, 1.0)
+		y += 46.0
+	for line in c.lines:
+		if line.begins_with("!"):                       # a code: big, sharp and circled
+			var code: String = m.read_word(line.substr(1))[0]
+			var spaced := "  ".join(code.split(""))
+			var cw: float = m.font_bold.get_string_size(spaced, HORIZONTAL_ALIGNMENT_LEFT, -1, 34).x
+			var cx := q.get_center().x
+			draw_string(m.font_bold, Vector2(cx - cw / 2, y + 26), spaced, HORIZONTAL_ALIGNMENT_LEFT, -1, 34, INK)
+			var loop := PackedVector2Array()
+			for k in 41:
+				var a := k / 40.0 * TAU * 1.04
+				loop.append(Vector2(cx, y + 14) + Vector2(cos(a) * (cw / 2 + 22), sin(a) * 34))
+			draw_polyline(loop, INK_SOFT, 1.5, true)
+			y += 70.0
+			continue
+		var x := left
+		for t in line.split(" ", false):
+			x = _word(t, Vector2(x, y), 16, INK, m.font_italic) + 11.0
+		y += 30.0
+	match art:
+		"chart": _art_chart(Rect2(left, y + 6, q.size.x - 68, q.end.y - y - 34))
+		"photo": _art_photo(Rect2(q.end.x - 150, q.position.y + 20, 116, 140))
+		"stamp": _art_stamp(Vector2(q.end.x - 92, q.end.y - 68))
+	draw_set_transform_matrix(Transform2D.IDENTITY)
+
+func _art_chart(r: Rect2) -> void:                      # two lines: one holds, one falls away to nothing
+	draw_line(r.position, Vector2(r.position.x, r.end.y), INK_SOFT, 1.0)
+	draw_line(Vector2(r.position.x, r.end.y), r.end, INK_SOFT, 1.0)
+	var hold := PackedVector2Array()
+	var fall := PackedVector2Array()
+	for k in 25:
+		var t := k / 24.0
+		var x := r.position.x + t * r.size.x
+		hold.append(Vector2(x, r.position.y + r.size.y * (0.1 + 0.02 * sin(t * 9.0))))
+		fall.append(Vector2(x, r.position.y + r.size.y * lerpf(0.14, 0.98, smoothstep(0.1, 0.7, t))))
+	draw_polyline(hold, INK, 1.6, true)
+	draw_polyline(fall, INK_SOFT, 1.2, true)
+
+func _art_photo(r: Rect2) -> void:                      # a clipped-in photo: a figure, the face scratched out
+	draw_rect(r, Color(0.3, 0.3, 0.3))
+	var c := r.get_center()
+	draw_circle(c + Vector2(0, -22), 19, Color(0.13, 0.13, 0.14))
+	draw_colored_polygon(PackedVector2Array([c + Vector2(-38, r.size.y / 2), c + Vector2(-26, 8), c + Vector2(26, 8), c + Vector2(38, r.size.y / 2)]), Color(0.13, 0.13, 0.14))
+	for k in 9:
+		var y0 := c.y - 40 + k * 4.5
+		draw_line(Vector2(c.x - 26, y0), Vector2(c.x + 26, y0 + 8 - k), Color(0.72, 0.72, 0.72, 0.8), 1.4, true)
+	draw_rect(r, INK_SOFT, false, 1.0)
+
+func _art_stamp(c: Vector2) -> void:                    # a rubber stamp, crooked, in a word he can't read
+	var x := c.x - 44.0                                 # (drawn square on: a rotated box would come out jagged)
+	draw_rect(Rect2(c.x - 54, c.y - 18, 108, 36), INK_SOFT, false, 2.0)
+	for ch in "sealed":
+		_glyph(ch, Vector2(x, c.y + 7), 15, 15, INK_SOFT)
+		x += 15
+
+func _keypad() -> void:
+	draw_rect(Rect2(0, 0, 960, 540), Color(0, 0, 0, 0.6))
+	var c := Vector2(480, 262)
+	draw_rect(Rect2(c.x - 150, c.y - 70, 300, 140), Color(0.09, 0.09, 0.1))
+	draw_rect(Rect2(c.x - 150, c.y - 70, 300, 140), Color(1, 1, 1, 0.3), false, 1.0)
+	for i in 4:
+		var x: float = c.x - 90 + i * 60
+		var on: bool = i == m.keypad_at
+		draw_rect(Rect2(x - 22, c.y - 34, 44, 60), Color(1, 1, 1, 0.1 if on else 0.04))
+		if on:
+			draw_line(Vector2(x - 16, c.y + 20), Vector2(x + 16, c.y + 20), Color(1, 1, 1, 0.7), 1.0)
+		var d: int = m.keypad_digits[i]
+		if d >= 0:
+			_text(str(d), Vector2(x, c.y + 8), m.font_bold, 32, Color(1, 1, 1, 0.92), 0, true)
+	_footer(_k("0-9  or  ↑ ↓  the number    ·    ENTER  try it    ·    J  your clues    ·    ESC  leave it", "↑ ↓  the number    ·    ← →  move    ·    A  try it    ·    B  leave it"))
 
 func _footer(s: String) -> void:
 	_text(s, Vector2(480, 515), m.font_regular, 11, Color(1, 1, 1, 0.35), 2, true)

@@ -31,20 +31,60 @@ extends RefCounted
 ##           the Evil Co mark on his chest, in grey.
 ##           A floor's abilities are everything remembered on the floors before it ("cling", "takedown",
 ##           "stars", "push", "fight").
+##   clues:  [id, x, row] something to pick up and read (E): the words are in clues.gd.
+##   locks:  {x, row, code, door} a keypad: the right number opens doors[door]. Or {x, row, code, clue, safe: true}:
+##           a safe with a clue in it. code: "door" / "safe" - a number made up each new game, shown on a clue.
+##   checkpoints: [{x, row}] a retry starts here once he's reached it. At least 6-7 minutes of play apart (user's call).
+##   searchlight: {spans: [[x0, x1], ...], every: [s, s], warn: s, speed: px/s, linger: [s, s], danger, intensity}
+##           a light from outside, through the glass roof (holes): it fills the meter, and never calls a guard. Rotors
+##           warn you; when it comes, which span, which way and where it stops are different every time.
 ##   intro:  the opening scene (Floor 1): {hide: seconds before the guards come, talk: [[guard, line], ...]}.
 ##           Guards with intro_to wait off to the side, run in to that x, talk, then walk to their rounds.
 
 const LEVELS := [
 	{
 		"name": "FLOOR 1", "subtitle": "the lab",
-		"width": 80,
-		# the vial machine against the left wall, a bench right beside it to hide behind; then the basics:
-		# lamps and cover, two guards (the ones from the opening), pipes to crawl under, crates
-		"solids": [[52, 2, 4, 12], [59, 13, 2, 2], [62, 11, 2, 4]],
-		"holes": [],
+		"width": 200, "height": 26, "floor_cam": true,
+		# Two storeys: the upper floor is row 15 (the slab is rows 15-16), the lower is row 24. About 10 minutes.
+		# Upper, left to right: the machine and the lab (the opening), pipes, crates, then the gallery under a
+		# ribbed glass roof (the searchlight), and stairs down at 96. Lower: the door at 112 wants a code; the code
+		# is back left under the upper floor, in the office past the crawl at 58, by a guard you have to lure away.
+		# Through the door: the checkpoint at 116 (about 6-7 minutes in). The crawl at 128, two guards, stairs up at
+		# 171-176, back left along the upper floor under more glass to the lever at 114 (and the safe at 123), back
+		# down, and the door it opened at 184.
+		"solids": [[52, 2, 4, 12], [59, 13, 2, 2], [62, 11, 2, 4],     # the lab: pipes, crates
+			[1, 15, 95, 2],                                            # the upper floor
+			[1, 17, 21, 7], [22, 17, 1, 7],                            # solid under the machine; the office's back wall
+			[96, 16, 1, 1], [97, 17, 1, 1], [98, 18, 1, 1], [99, 19, 1, 1], [100, 20, 1, 1], [101, 21, 1, 1],   # stairs down
+			[103, 23, 1, 1],                                           # a crate, to get back up them
+			[58, 17, 1, 6],                                            # the office wall: a crawl along the floor
+			[112, 2, 1, 19],                                           # the wall over the coded door
+			[113, 15, 58, 2],                                          # the second upper floor
+			[128, 17, 3, 6],                                           # a crawl
+			[171, 16, 1, 1], [172, 17, 1, 1], [173, 18, 1, 1], [174, 19, 1, 1], [175, 20, 1, 1], [176, 21, 1, 1],   # stairs back up, leftward
+			[178, 23, 1, 1],                                           # a crate
+			[184, 2, 1, 19]],                                          # the wall over the last door
+		"holes": [[68, 0, 3, 2], [72, 0, 3, 2], [76, 0, 3, 2], [80, 0, 3, 2], [84, 0, 3, 2], [88, 0, 3, 2], [92, 0, 3, 2],
+			[120, 0, 3, 2], [124, 0, 3, 2], [128, 0, 3, 2], [132, 0, 3, 2], [136, 0, 3, 2], [140, 0, 3, 2], [144, 0, 3, 2],
+			[148, 0, 3, 2], [152, 0, 3, 2], [156, 0, 3, 2], [160, 0, 3, 2], [164, 0, 3, 2]],
 		"ducts": [],
+		"doors": [[112, 21, 1, 3], [184, 21, 1, 3]],
+		"switches": [{"x": 114.3, "row": 15, "door": 1}],
+		"locks": [{"x": 110.5, "row": 24, "door": 0, "code": "door"},
+			{"x": 123, "row": 15, "code": "safe", "clue": "file", "safe": true}],
+		"clues": [["lablog", 8.2, 15], ["memo", 46.5, 15], ["notesafe", 93.5, 15], ["notedoor", 25.5, 24], ["badge", 188.5, 24]],
+		"checkpoints": [{"x": 116, "row": 24}],
+		"searchlight": {"spans": [[66, 96], [116, 170]], "every": [9.0, 22.0], "warn": 3.5, "speed": 170.0,
+			"linger": [0.5, 2.0], "danger": 1.6, "intensity": 0.95},
 		"props": [["machine", 1, 15], ["desk", 4.5, 15], ["desk", 12, 15], ["cooler", 18, 15], ["desk", 23, 15],
-			["plant", 29, 15], ["desk", 36, 15], ["cooler", 44, 15], ["plant", 49, 15], ["desk", 68, 15], ["plant", 74, 15]],
+			["plant", 29, 15], ["desk", 36, 15], ["cooler", 44, 15], ["plant", 49, 15],
+			["desk", 67, 15], ["plant", 74, 15], ["cooler", 80, 15], ["desk", 85, 15], ["plant", 91, 15],     # the gallery
+			["desk", 88, 24], ["plant", 80, 24], ["cooler", 72, 24], ["desk", 64, 24],                        # below it
+			["plant", 53, 24], ["desk", 45, 24], ["cooler", 40, 24], ["desk", 26, 24],                        # the office
+			["plant", 106, 24],
+			["plant", 134, 24], ["desk", 140, 24], ["cooler", 146, 24], ["desk", 155, 24], ["plant", 161, 24], ["desk", 166, 24],
+			["rack", 118, 15], ["desk", 126, 15], ["rack", 134, 15], ["desk", 140, 15], ["rack", 148, 15], ["desk", 154, 15], ["rack", 162, 15],
+			["desk", 186, 24], ["plant", 192, 24]],
 		"hints": [
 			[9.0, 170, "A D / ← →  run (loud)      SHIFT  sneak (silent)      SPACE / W / ↑  jump",
 				"stick  run (loud)      hold LT  sneak (silent)      A  jump"],
@@ -52,7 +92,15 @@ const LEVELS := [
 			[28.0, 190, "a guard sees what his torch sees. stay out of the beam."],
 			[50.0, 260, "↓  crawl - under the pipes"],
 			[58.0, 200, "up and over."],
-			[70.0, 190, "the way down. keep going."],
+			[65.0, 170, "something up there, circling. when you hear it, be behind something."],
+			[96.5, 240, "down."],
+			[106.0, 620, "four numbers.  someone will have written them down."],
+			[60.0, 640, "↓  crawl - through the gap"],
+			[47.0, 610, "running is loud. let him hear you - then be somewhere else."],
+			[114.0, 640, "a quiet corner."],
+			[125.0, 640, "↓  crawl"],
+			[176.0, 640, "the crate, a hop to the first step, then just walk."],
+			[176.0, 200, "the switch must be back along here."],
 		],
 		"lights": [
 			{"kind": "alarm", "x": 2.1, "y": 11.4, "dir": 0.6, "spread": 1.3, "radius": 170, "intensity": 0.55, "flicker": [1.0, 0.5], "danger": 0.0},
@@ -61,32 +109,51 @@ const LEVELS := [
 			{"kind": "lamp", "x": 33.5, "spread": 0.45, "radius": 560, "flicker": [3.0, 0.6]},
 			{"kind": "lamp", "x": 42.5, "spread": 0.45, "radius": 560},
 			{"kind": "lamp", "x": 57.5, "spread": 0.45, "radius": 420},
-			{"kind": "lamp", "x": 70.5, "spread": 0.5, "radius": 560, "intensity": 0.9},
-			{"kind": "sign", "x": 78},
+			{"kind": "lamp", "x": 79.5, "spread": 0.4, "radius": 480, "flicker": [5.0, 0.55]},  # the gallery
+			{"kind": "lamp", "x": 76.5, "y": 17.125, "spread": 0.5, "radius": 400},             # below it
+			{"kind": "lamp", "x": 66.5, "y": 17.125, "spread": 0.5, "radius": 400, "flicker": [3.6, 0.6]},
+			{"kind": "lamp", "x": 30.5, "y": 17.125, "spread": 0.55, "radius": 420},            # the office: the note is in the light
+			{"kind": "lamp", "x": 108.5, "y": 18, "spread": 0.5, "radius": 340, "intensity": 0.8},   # the coded door
+			{"kind": "lamp", "x": 137.5, "y": 17.125, "spread": 0.5, "radius": 400, "flicker": [4.0, 0.6]},
+			{"kind": "lamp", "x": 150.5, "y": 17.125, "spread": 0.5, "radius": 400},
+			{"kind": "lamp", "x": 163.5, "y": 17.125, "spread": 0.5, "radius": 400},
+			{"kind": "lamp", "x": 147.5, "spread": 0.4, "radius": 480},                          # the second gallery
+			{"kind": "lamp", "x": 117.5, "spread": 0.4, "radius": 420, "intensity": 0.8},        # over the lever
+			{"kind": "lamp", "x": 190.5, "y": 17.125, "spread": 0.5, "radius": 420},
+			{"kind": "sign", "x": 197},
 		],
 		"guards": [
 			{"x": 31, "from": 10, "to": 27, "min_x": 1, "max_x": 50, "row": 15, "intro_to": 9.5},
 			{"x": 33, "from": 32, "to": 47, "min_x": 1, "max_x": 50, "row": 15, "intro_to": 12.5},
+			{"x": 40, "from": 30, "to": 48, "min_x": 8, "max_x": 50, "row": 15},        # the lab, after they've gone
+			{"x": 82, "from": 72, "to": 90, "min_x": 65, "max_x": 95, "row": 15},       # the gallery
+			{"x": 75, "from": 62, "to": 92, "min_x": 59, "max_x": 95, "row": 24},       # below it
+			{"x": 32, "from": 30, "to": 35, "min_x": 24, "max_x": 57, "row": 24},       # the office: he stays by the note
+			{"x": 140, "from": 132, "to": 150, "min_x": 131, "max_x": 170, "row": 24},
+			{"x": 165, "from": 153, "to": 176, "min_x": 131, "max_x": 177, "row": 24},
+			{"x": 140, "from": 126, "to": 160, "min_x": 114, "max_x": 170, "row": 15},  # the second gallery
+			{"x": 190, "from": 188, "to": 193, "min_x": 185, "max_x": 196, "row": 24},  # by the way out
 		],
 		"intro": {
 			"hide": 10.0,
-			# [speaker, line, gesture]. ~words~ are the ones he half-hears (drawn faint). Gestures: "machine"
-			# (points back at it), "ahead" (points the way he went), "shrug"; none = talking hands.
+			# [speaker, line, gesture]. He can't follow what they say: word@n is scrawl until Floor n, as in
+			# clues.gd, and only the unmarked key words come through. Gestures: "machine" (points back at it),
+			# "ahead" (points the way he went), "shrug"; none = talking hands.
 			"talk": [
-				[0, "what happened?", "machine"],
-				[1, "someone ~got in and~ took the formula."],
-				[1, "it has a countermeasure... ~it~ sprays a chemical."],
+				[0, "what@2 happened?", "machine"],
+				[1, "someone@2 got@2 in@2 and@2 took@3 the@2 formula."],
+				[1, "it@2 has@2 a@2 countermeasure...@6 it@2 sprays@7 a@2 chemical."],
 				[0, "and?", "shrug"],
-				[1, "the thief loses his memory. ~maybe for a while.~"],
-				[1, "maybe for good."],
-				[0, "then he can't be far.", "ahead"],
+				[1, "the@2 thief@4 loses@5 his@2 memory.  maybe@3 for@2 a@2 while.@3"],
+				[1, "maybe@3 for@2 good."],
+				[0, "then@2 he@2 can't@3 be@2 far.", "ahead"],
 			],
 		},
 		"remember": {"abilities": ["cling", "takedown"], "say": [
 			"wait...  my hands know this.",
 			"the ceiling holds me.  ~it always did.~",
 			"and a guard sleeps  ~if I land on him.~"]},
-		"spawn": [3, 15], "exit": 77,
+		"spawn": [3, 15], "exit": 195, "exit_row": 24,
 	},
 	{
 		"name": "FLOOR 2", "subtitle": "the offices",

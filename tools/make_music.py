@@ -13,6 +13,9 @@
   godot/audio/step_*.wav         movement in the dark, in a big empty room (Floor 7): guards' boots, boots through
                                  a wall; his soft step, run and landing; his hands on a duct (grab, shimmy)
   godot/audio/takedown.wav       landing on a guard: a deep thud, the guard hitting the floor, his torch rattling
+  godot/audio/rotor.wav          the searchlight's helicopter (loops)
+  godot/audio/page.wav           a clue taken and unfolded
+  godot/audio/beep.wav, buzz.wav a keypad's button; the wrong number
 
   godot/audio/heartbeat.wav      a muffled lub-dub; the game plays it faster and louder as the meter fills
   godot/audio/riser.wav          an uneasy high cluster (loops); fades in and rises in pitch near full
@@ -440,7 +443,37 @@ def takedown_thud():                                     # he lands on a guard: 
         place(x, tick * level, at)
     return in_the_room(x, 1.0, 0.25)
 
-def dark_room():                                   # the loop: air and a far-off hum, with something settling now and then
+def rotor(seconds=4.0):                                  # the searchlight's helicopter, somewhere over the roof (loops)
+    n = int(seconds * SR)
+    tt = np.arange(n) / SR
+    spec = np.fft.rfft(rng.standard_normal(n))           # filtered in one piece, so it loops with no seam
+    freqs = np.fft.rfftfreq(n, 1 / SR)
+    air = np.fft.irfft(spec / (1 + (freqs / 320) ** 2), n)
+    air /= np.max(np.abs(air))
+    chop = (0.5 + 0.5 * np.cos(2 * np.pi * 44 * tt / seconds)) ** 3      # 11 beats a second, a whole number per loop
+    return air * (0.2 + chop) + 0.35 * np.sin(2 * np.pi * 44 * tt / seconds) * chop
+
+def page_turn():                                         # a sheet of paper taken and unfolded
+    x = np.zeros(int(0.5 * SR))
+    for at, dur, level in [(0.0, 0.09, 0.7), (0.1, 0.14, 1.0), (0.26, 0.08, 0.5)]:
+        m = int(dur * SR)
+        st = np.arange(m) / SR
+        burst = rng.standard_normal(m) * np.sin(np.pi * st / dur) ** 2 * level
+        place(x, burst - lowpass(burst, 900), at)
+    return lowpass(x, 5200)
+
+def key_beep():                                          # a keypad's button: small, dull, plastic
+    n = int(0.07 * SR)
+    tt = np.arange(n) / SR
+    return (np.sin(2 * np.pi * 880 * tt) + 0.3 * np.sin(2 * np.pi * 1760 * tt)) * np.exp(-tt / 0.018)
+
+def key_buzz():                                          # the wrong number: a flat, ugly, carrying buzz
+    n = int(0.45 * SR)
+    tt = np.arange(n) / SR
+    env = np.clip(tt / 0.005, 0, 1) * np.clip((tt[-1] - tt) / 0.03, 0, 1)
+    return lowpass(np.sign(np.sin(2 * np.pi * 118 * tt)), 1800) * env
+
+def dark_room():                             # the loop: air and a far-off hum, with something settling now and then
     n = int(LOOP * SR)
     spec = np.fft.rfft(rng.standard_normal(n))           # filtered in one piece, so the air loops with no seam
     freqs = np.fft.rfftfreq(n, 1 / SR)
@@ -495,3 +528,7 @@ if __name__ == '__main__':
     write(os.path.join(root, 'step_shimmy_a.wav'), duct_shimmy(), 0.55)
     write(os.path.join(root, 'step_shimmy_b.wav'), duct_shimmy(450.0), 0.55)          # the other hand
     write(os.path.join(root, 'takedown.wav'), takedown_thud(), 0.9)
+    write(os.path.join(root, 'rotor.wav'), rotor(), 0.7)
+    write(os.path.join(root, 'page.wav'), page_turn(), 0.5)
+    write(os.path.join(root, 'beep.wav'), key_beep(), 0.4)
+    write(os.path.join(root, 'buzz.wav'), key_buzz(), 0.6)
