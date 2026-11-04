@@ -35,6 +35,9 @@ extends RefCounted
 ##   locks:  {x, row, code, door} a keypad: the right number opens doors[door]. Or {x, row, code, clue, safe: true}:
 ##           a safe with a clue in it. code: "door" / "safe" - a number made up each new game, shown on a clue.
 ##   checkpoints: [{x, row}] a retry starts here once he's reached it. At least 6-7 minutes of play apart (user's call).
+##   spots:  [{x, row}] quiet checkpoints, off until needed: he's caught a third time since passing one, and a retry
+##           starts there from then on (main.gd: update_spots). Place them just before a hard part, somewhere he can
+##           stand for 30 s with the guards awake (--selftest=spots checks).
 ##   searchlight: {spans: [[x0, x1], ...], every: [s, s], warn: s, speed: px/s, linger: [s, s], danger, intensity}
 ##           a light from outside, through the glass roof (holes): it fills the meter, and never calls a guard. Rotors
 ##           warn you; when it comes, which span, which way and where it stops are different every time.
@@ -74,6 +77,9 @@ const LEVELS := [
 			{"x": 123, "row": 15, "code": "safe", "clue": "file", "safe": true}],
 		"clues": [["lablog", 8.2, 15], ["memo", 46.5, 15], ["notesafe", 93.5, 15], ["notedoor", 25.5, 24], ["badge", 188.5, 24]],
 		"checkpoints": [{"x": 116, "row": 24}],
+		# On the crates before the gallery; the foot of the stairs; inside the office, past the crawl; halfway up the far stairs
+		# (passed going up to the lever and coming back from it, so it also answers for the last guard).
+		"spots": [{"x": 63, "row": 11}, {"x": 104, "row": 24}, {"x": 50, "row": 24}, {"x": 173.5, "row": 18}],
 		"searchlight": {"spans": [[66, 96], [116, 170]], "every": [9.0, 22.0], "warn": 3.5, "speed": 170.0,
 			"linger": [0.5, 2.0], "danger": 1.6, "intensity": 0.95},
 		"props": [["machine", 1, 15], ["desk", 4.5, 15], ["desk", 12, 15], ["cooler", 18, 15], ["desk", 23, 15],

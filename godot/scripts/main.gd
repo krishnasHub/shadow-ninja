@@ -374,6 +374,7 @@ var keypad_digits: Array = []   # -1 = not entered yet
 var keypad_at := 0
 # Checkpoints and the save. floor_state: this floor's progress: "locks" (solved, always kept), and once he's reached a
 # checkpoint "cp" with what to put back. A retry goes back to it; picking the floor again clears it.
+const SPOT_CATCHES := 3         # caught this many times since passing a quiet spot, and a retry starts there
 var save_path := "user://save.cfg"
 var floor_state := {}
 var save_on := false            # off until the game's up, and always in self-tests and screenshots
@@ -487,6 +488,8 @@ func _ready() -> void:
 			_selftest_floor1()
 		elif _capture.selftest == "save":
 			_selftest_save()
+		elif _capture.selftest == "spots":
+			_selftest_spots()
 		elif _capture.selftest == "music":
 			_selftest_music()
 		elif _capture.selftest == "recall":
@@ -2381,6 +2384,7 @@ func update_detection(dt: float) -> void:
 		meter = 1.0
 		state = "caught"
 		state_t = 0.0
+		note_catch()
 
 # Cameras: their sweeping beam fills the meter like any light (hiding beats it). Seeing you locks
 # them on (they follow you) and calls the nearest awake guard over to where you were standing.
@@ -3458,62 +3462,116 @@ func clue_data(id: String) -> Dictionary:
 #  CHECKPOINTS AND THE SAVE - user://save.cfg holds where he is, what he's found and this game's numbers.
 # =====================================================================
 func update_checkpoints() -> void:
+	if fight != null:
+		return
+	var feet := P.y + P.h
 	var cps: Array = level.get("checkpoints", [])
 	for i in cps.size():
-		if i > floor_state.get("cp", -1) and P.x >= cps[i].x * T and absf(P.y + P.h - cps[i].row * T) < T and fight == null:
+		if absf(feet - cps[i].row * T) >= T:
+			continue
+		if i > floor_state.get("cp", -1) and P.x >= cps[i].x * T:
 			reach_checkpoint(i)
+		elif absf(P.x - cps[i].x * T) < T:
+			if floor_state.get("spot_at", -1) >= 0:   # sent back behind it, and he's walked up to it again
+				reach_checkpoint(i)
+			else:
+				floor_state["spot_last"] = -1         # catches from here on are the checkpoint's to answer
+	update_spots(feet)
 
-func reach_checkpoint(i: int) -> void:
-	floor_state["cp"] = i
-	floor_state["run_t"] = run_t
-	floor_state["stars"] = star_count
+# Quiet checkpoints (a floor's `spots`). Passing one notes what to put back, and catches count against the last one
+# he passed: that's always behind the place he was caught on the way he actually came, however the route doubles
+# back. The third catch switches it on, even if that's behind his checkpoint, and it stays on. After that, walking
+# past it makes it where a retry starts, until he reaches another one that's on, or a real checkpoint.
+func update_spots(feet: float) -> void:
+	var spots: Array = level.get("spots", [])
+	for i in spots.size():
+		if absf(P.x - spots[i].x * T) >= T or absf(feet - spots[i].row * T) >= 2 * T:
+			continue
+		var snaps: Dictionary = floor_state.get_or_add("spot_snaps", {})
+		snaps[i] = progress_snapshot()           # every frame he's there, so a lever pulled and walked back from counts
+		if floor_state.get("spot_last", -1) != i:
+			floor_state["spot_last"] = i
+			if i in floor_state.get("spot_on", []):
+				floor_state["spot_at"] = i
+			save_game()
+
+func note_catch() -> void:
+	var i: int = floor_state.get("spot_last", -1)
+	if i < 0:
+		return                                   # before the first spot, or just past a checkpoint: he's close already
+	var counts: Dictionary = floor_state.get_or_add("spot_catches", {})
+	counts[i] = counts.get(i, 0) + 1
+	if counts[i] >= SPOT_CATCHES and floor_state.get("spot_at", -1) != i:
+		var on: Array = floor_state.get_or_add("spot_on", [])
+		if not i in on:
+			on.append(i)
+			floor_state["spot_new"] = true       # the first time he comes back here: say so
+		floor_state["spot_at"] = i
+		intro_seen = true                        # past the opening and the recall for good
+		recall_seen = level_idx
+	save_game()
+
+# What a checkpoint puts back. Numbers solved and clues found aren't here: those always stay.
+func progress_snapshot() -> Dictionary:
 	var on := []
 	for k in switches.size():
 		if switches[k].on:
 			on.append(k)
-	floor_state["switches"] = on
 	var asleep := []
 	for k in guards.size():
 		if guards[k].state == "asleep":
 			asleep.append(k)
-	floor_state["asleep"] = asleep
 	var out := []
 	for k in lights.size():
 		if lights[k].broken:
 			out.append(k)
-	floor_state["broken"] = out
-	floor_state["desks"] = props.map(func(p): return p.x)
+	return {"run_t": run_t, "stars": star_count, "switches": on, "asleep": asleep, "broken": out,
+		"desks": props.map(func(p): return p.x), "facing": P.facing}
+
+func reach_checkpoint(i: int) -> void:
+	floor_state["cp"] = i
+	floor_state.merge(progress_snapshot(), true)
+	floor_state["facing"] = 1
+	floor_state["spot_at"] = -1
+	floor_state["spot_last"] = -1
 	intro_seen = true                        # past the opening and the recall for good
 	recall_seen = level_idx
 	notice = "you catch your breath."
 	notice_t = 0.0
 	save_game()
 
-# After start_run has laid the floor out: put him and what he's done back at the checkpoint.
+# After start_run has laid the floor out: put him and what he's done back at the checkpoint (or the spot that's on).
 func resume_checkpoint() -> void:
+	var at: int = floor_state.get("spot_at", -1)
+	floor_state["spot_last"] = at            # catches count from where he starts now, never from somewhere ahead of it
 	var i: int = floor_state.get("cp", -1)
-	if i < 0:
+	if at < 0 and i < 0:
 		return
-	var cp: Dictionary = level.checkpoints[i]
-	P.x = cp.x * T
-	P.y = cp.row * T - P.h
-	P.facing = 1
-	run_t = floor_state.get("run_t", 0.0)
-	star_count = floor_state.get("stars", star_count)
-	for k in floor_state.get("switches", []):
+	var there: Dictionary = level.spots[at] if at >= 0 else level.checkpoints[i]
+	var snap: Dictionary = floor_state.spot_snaps[at] if at >= 0 else floor_state
+	P.x = there.x * T
+	P.y = there.row * T - P.h
+	P.facing = snap.get("facing", 1)
+	run_t = snap.get("run_t", 0.0)
+	star_count = snap.get("stars", star_count)
+	for k in snap.get("switches", []):
 		switches[k].on = true
 		switches[k].anim = 1.0
 		open_door(switches[k].door)
-	for k in floor_state.get("asleep", []):
+	for k in snap.get("asleep", []):
 		if k < guards.size():
 			guards[k].state = "asleep"
 			guards[k].torch.level = 0.0
-	for k in floor_state.get("broken", []):
+	for k in snap.get("broken", []):
 		lights[k].broken = true
 		lights[k].level = 0.0
-	var desks: Array = floor_state.get("desks", [])
+	var desks: Array = snap.get("desks", [])
 	for k in mini(desks.size(), props.size()):
 		props[k].x = desks[k]
+	if floor_state.get("spot_new", false):
+		floor_state.erase("spot_new")
+		notice = "you catch your breath."
+		notice_t = 0.0
 	stage_node.queue_redraw()
 	level_t = 99.0                           # no floor name: he's been here
 	reset_scarf()
@@ -4625,6 +4683,128 @@ func _selftest_save() -> void:
 	test_keys = null
 
 
+# Dev tool: the quiet checkpoints. Each spot holds up with the guards awake; the third catch switches one on; a retry
+# never starts ahead of where he was caught, or at the floor's start once one is on.
+# godot_console --headless --path . -- --selftest=spots
+func _selftest_spots() -> void:
+	test_keys = {}
+	var walk_to := func(i: int) -> void:
+		var s: Dictionary = level.spots[i]
+		P.x = s.x * T
+		P.y = s.row * T - P.h
+		_run(2)
+	var caught_retry := func() -> void:
+		meter = 1.0
+		_run(2)
+		var was := state
+		retry()
+		test_keys = {}
+		print("    %s; retry at x%.1f row %.0f (last %s, on %s, at %s, catches %s)" % [was, P.x / T, (P.y + P.h) / T, floor_state.get("spot_last", -1), floor_state.get("spot_on", []), floor_state.get("spot_at", -1), floor_state.get("spot_catches", {})])
+	# 1. standing at each spot for 60 s, guards awake, door states as they'd be when he gets there; three tries each
+	intro_seen = true
+	for i in Levels.LEVELS[0].spots.size():
+		var line := ""
+		for n in 3:
+			start_run(0)
+			alarm_quiet = true
+			if i >= 1:
+				open_door(0)
+			if i >= 3:
+				open_door(1)
+			walk_to.call(i)
+			var worst := 0.0
+			var hunted := 0
+			var f := 0
+			while f < 60 * 60 and state == "play":
+				_run(1)
+				f += 1
+				worst = maxf(worst, meter)
+				for g in guards:
+					if g.state == "chase":
+						hunted += 1
+						break
+			line += " [%s %.2f%s]" % [state, worst, " hunted" if hunted > 0 else ""]
+		print("  spot %d (x%.1f): 60 s standing:%s, feet at x%.1f row %.1f, on the ground %s" % [i, level.spots[i].x, line, P.x / T, (P.y + P.h) / T, P.on_ground])
+	# 2. the third catch
+	print("  caught three times past the gallery spot:")
+	start_run(0)
+	intro = ""
+	walk_to.call(0)
+	var spot0_x: float = level.spots[0].x
+	for n in 3:
+		caught_retry.call()
+		if n < 2:
+			walk_to.call(0)
+	print("  after the third: x%.1f, wanted x%.1f, notice '%s'" % [P.x / T, spot0_x, notice])
+	# 3. passing a later spot that isn't on: a retry still starts at the one that is
+	walk_to.call(1)
+	print("  passed spot 1 (off), caught:")
+	caught_retry.call()
+	# 4. a catch before any spot counts for nothing, and never sends him ahead
+	start_run(0)
+	intro = ""
+	print("  fresh floor, caught in the lab 4 times:")
+	for n in 4:
+		P.x = 40 * T
+		caught_retry.call()
+	# 5. the door's checkpoint, then back behind it: stuck at the office, three times
+	start_run(0)
+	intro = ""
+	open_door(0)
+	floor_state["locks"] = [0]
+	P.x = 116 * T
+	P.y = 24 * T - P.h
+	_run(2)
+	print("  reached the checkpoint: cp %s; then back to the office side of the crawl, caught three times:" % floor_state.get("cp", -1))
+	walk_to.call(2)
+	for n in 3:
+		caught_retry.call()
+		if n < 2 and P.x < 100 * T:
+			walk_to.call(2)
+		elif n < 2:
+			walk_to.call(2)
+	print("  behind the checkpoint now: x%.1f (the door still open %s)" % [P.x / T, doors[0].open])
+	# 6. walking up to the checkpoint again makes it the checkpoint again; catches just past it count for nothing
+	P.x = 116 * T
+	P.y = 24 * T - P.h
+	_run(2)
+	print("  back at the checkpoint: spot_at %s, notice '%s'" % [floor_state.get("spot_at", -1), notice])
+	P.x = 118 * T
+	for n in 4:
+		caught_retry.call()
+	# 7. the lever: what a spot puts back
+	start_run(0)
+	intro = ""
+	floor_state = {}
+	open_door(0)
+	walk_to.call(3)
+	var snap_off: Dictionary = floor_state.spot_snaps[3].duplicate(true)
+	switches[0].on = true
+	open_door(1)
+	walk_to.call(3)
+	print("  spot 3: lever off when first passed %s, on when walked back past it %s" % [snap_off.switches, floor_state.spot_snaps[3].switches])
+	for n in 3:
+		caught_retry.call()
+		if n < 2:
+			walk_to.call(3)
+	print("  on at spot 3: x%.1f, last door open %s" % [P.x / T, doors[1].open])
+	# 8. through the save, then Restart Floor
+	save_path = "user://save_selftest.cfg"
+	save_on = true
+	save_game()
+	floor_state = {}
+	load_save()
+	load_level(saved_floor)
+	start_run()
+	print("  Continue: x%.1f row %.0f, on %s, last door open %s" % [P.x / T, (P.y + P.h) / T, floor_state.get("spot_on", []), doors[1].open])
+	open_menu("pause")
+	menu_activate(menu_items().find("Restart Floor"))
+	print("  Restart Floor: x%.1f, on %s, spot_at %s" % [P.x / T, floor_state.get("spot_on", []), floor_state.get("spot_at", -1)])
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(save_path))
+	save_on = false
+	test_keys = null
+
+
 # Dev tool: Floor 1's whole route with the guards asleep (can it be walked?), its clues and locks, the checkpoint,
 # the journal, the searchlight.  godot_console --headless --path . -- --selftest=floor1
 func _selftest_floor1() -> void:
@@ -4699,6 +4879,7 @@ func _selftest_floor1() -> void:
 	t0 += there.call({"right": true, "walk": true}, 117.0, 600)
 	print("  through it to x%.1f: checkpoint %s, notice '%s'" % [P.x / T, floor_state.get("cp", -1), notice])
 	print("  walking the first half took %.0fs (no guards, no waiting)" % (t0 / 60.0))
+	print("  quiet spots passed on the walk: %s" % [floor_state.get("spot_snaps", {}).keys()])
 	# a retry goes back to the checkpoint, the door still open, the clues still found
 	press.call(KEY_R)
 	_sleep_all()
@@ -4716,6 +4897,7 @@ func _selftest_floor1() -> void:
 	print("  on the first step: x%.1f, row %.1f" % [P.x / T, (P.y + P.h) / T])
 	t1 += _walk({"left": true, "walk": true}, func(): return (P.y + P.h) / T < 15.5 and P.x / T < 170.5, 900)
 	print("  at the top: x%.1f, row %.1f" % [P.x / T, (P.y + P.h) / T])
+	print("  quiet spots passed by the top of the far stairs: %s, last %s" % [floor_state.get("spot_snaps", {}).keys(), floor_state.get("spot_last", -1)])
 	t1 += there.call({"left": true, "walk": true}, 123.4, 900)
 	print("  at the safe x%.1f, near: %s" % [P.x / T, near_thing()])
 	press.call(KEY_E)

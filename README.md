@@ -2,6 +2,10 @@
 
 A greyscale 2D stealth side-scroller. You're a ninja inside a high-security office tower, and you have to get out. Light is the enemy: lamps, moonlight and every guard's torch fill your detection meter, and shadow drains it. On Floor 7 the guards cut the lights, and you go by sound alone.
 
+He's also lost his memory. The clues he finds and the talk he overhears are mostly scrawl, with only numbers and a few key words clear, and more becomes readable as he remembers. The game is being rebuilt floor by floor toward 10 floors and about 4 hours of play; Floor 1 is done (about 10 minutes is the target), and the others still have their earlier, shorter layouts.
+
+**Next up:** finish playtesting Floor 1's quiet checkpoints, which switch on after a third catch near one (playtest started, none switched on yet). See "Start here" in `TODO.md`.
+
 The rule the whole game is built on: **the light you see is the light that catches you.** Drawing and detection use the same light geometry.
 
 ## Two versions
